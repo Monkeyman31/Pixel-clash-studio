@@ -1,7 +1,9 @@
 {
-  "name": "react-example",
+  "name": "pixelclash-studio",
   "private": true,
-  "version": "0.0.0",
+  "version": "2.0.0",
+  "description": "PixelClash Studio - Suite profesional de Pixel Art, Vectores, Animacion 2D y FX Lab",
+  "author": "PixelClash Studio",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
@@ -32,7 +34,7 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "autoprefixer": "^10.4.21",
-    "esbuild": "^0.25.0",
+    "esbuild": "^0.28.0",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",
     "typescript": "^7.0.2",

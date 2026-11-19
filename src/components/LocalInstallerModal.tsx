@@ -272,12 +272,12 @@ export const LocalInstallerModal: React.FC<LocalInstallerModalProps> = ({
                 </div>
                 <ol className="list-decimal list-inside space-y-1.5 text-[11px] opacity-90 leading-relaxed">
                   <li>Descarga el <strong>proyecto completo</strong> desde AI Studio (no solo el ZIP del instalador) y descomprímelo en una carpeta.</li>
-                  <li>Instala <strong>Node.js 20 LTS</strong> (solo necesario en el equipo que compila; el usuario final nunca lo necesita).</li>
+                  <li>Instala <strong>Node.js 22 LTS</strong> (solo necesario en el equipo que compila; el usuario final nunca lo necesita).</li>
                   <li>Abre PowerShell en esa carpeta raíz una sola vez y pega estos comandos:</li>
                 </ol>
                 <div className="relative rounded border border-slate-700 bg-[#090d16] p-2 font-mono text-[10px] text-cyan-200 select-all leading-relaxed">
-                  npm install{'\n'}
-                  npm install --save-dev electron electron-builder{'\n'}
+                  npm install --legacy-peer-deps{'\n'}
+                  npm install --save-dev --legacy-peer-deps electron@^33.2.0 electron-builder@^25.1.8{'\n'}
                   node installer/ensure-icon.mjs{'\n'}
                   npx vite build --base=./{'\n'}
                   npx electron-builder --win nsis msi --x64 --config electron-builder.yml
@@ -285,7 +285,7 @@ export const LocalInstallerModal: React.FC<LocalInstallerModalProps> = ({
                     type="button"
                     onClick={() => {
                       navigator.clipboard?.writeText(
-                        'npm install\nnpm install --save-dev electron electron-builder\nnode installer/ensure-icon.mjs\nnpx vite build --base=./\nnpx electron-builder --win nsis msi --x64 --config electron-builder.yml'
+                        'npm install --legacy-peer-deps\nnpm install --save-dev --legacy-peer-deps electron@^33.2.0 electron-builder@^25.1.8\nnode installer/ensure-icon.mjs\nnpx vite build --base=./\nnpx electron-builder --win nsis msi --x64 --config electron-builder.yml'
                       );
                       setCopiedCmd(true);
                       window.setTimeout(() => setCopiedCmd(false), 1800);

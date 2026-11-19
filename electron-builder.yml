@@ -3,6 +3,8 @@ productName: "PixelClash Studio"
 copyright: "Copyright © 2026 PixelClash Studio"
 extraMetadata:
   main: electron/main.cjs
+  version: "2.0.0"
+npmRebuild: false
 directories:
   output: release
   buildResources: assets
@@ -11,6 +13,7 @@ files:
   - electron/**/*
   - assets/pixelclash.ico
   - package.json
+  - "!node_modules/**/*"
 win:
   icon: assets/pixelclash.ico
   executableName: PixelClashStudio
@@ -21,7 +24,6 @@ win:
     - target: msi
       arch:
         - x64
-  publisherName: "PixelClash Studio"
 nsis:
   oneClick: false
   perMachine: false

@@ -482,6 +482,8 @@ productName: "${cfg.appName}"
 copyright: "Copyright © ${new Date().getFullYear()} ${cfg.publisher}"
 extraMetadata:
   main: electron/main.cjs
+  version: "${cfg.version}"
+npmRebuild: false
 directories:
   output: release
   buildResources: assets
@@ -490,6 +492,7 @@ files:
   - electron/**/*
   - assets/pixelclash.ico
   - package.json
+  - "!node_modules/**/*"
 win:
   icon: assets/pixelclash.ico
   executableName: "${slug}"
@@ -500,7 +503,6 @@ win:
     - target: msi
       arch:
         - x64
-  publisherName: "${cfg.publisher}"
 nsis:
   oneClick: false
   perMachine: false
@@ -660,17 +662,19 @@ jobs:
       - name: Descargar repositorio
         uses: actions/checkout@v4
 
-      - name: Configurar Node.js 20
+      - name: Configurar Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Instalar dependencias de empaquetado
         run: |
-          npm install
-          npm install --save-dev electron electron-builder
+          npm install --legacy-peer-deps
+          npm install --save-dev --legacy-peer-deps electron@^33.2.0 electron-builder@^25.1.8
 
       - name: Compilar aplicación y generar Instaladores Windows (.EXE y .MSI)
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
         run: |
           npx vite build --base=./
           npx electron-builder --win nsis msi --x64 --config electron-builder.yml
