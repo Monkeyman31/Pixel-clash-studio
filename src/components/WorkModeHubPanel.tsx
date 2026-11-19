@@ -22,6 +22,8 @@ import {
 } from 'lucide-react';
 import {
   EditableFxRecipe,
+  GuidesConfig,
+  GuidesModalTab,
   Layer,
   ProjectWorkMode,
   StageParallaxConfig,
@@ -59,6 +61,10 @@ interface WorkModeHubPanelProps {
   lastGeneratedFxRecipe?: EditableFxRecipe | null;
   activeLayerFxRecipe?: EditableFxRecipe | null;
   onOpenExportModal: () => void;
+  // Perspective & Stage Depth Guides integration
+  guidesConfig?: GuidesConfig;
+  onChangeGuidesConfig?: (next: GuidesConfig) => void;
+  onOpenGuidesModal?: (tab?: GuidesModalTab) => void;
 }
 
 const MODE_ICON_MAP: Record<ProjectWorkMode, React.FC<{ className?: string }>> = {
@@ -92,6 +98,9 @@ export const WorkModeHubPanel: React.FC<WorkModeHubPanelProps> = ({
   lastGeneratedFxRecipe,
   activeLayerFxRecipe,
   onOpenExportModal,
+  guidesConfig,
+  onChangeGuidesConfig,
+  onOpenGuidesModal,
 }) => {
   const modeDef = WORK_MODES_REGISTRY[workMode];
   const repeatCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -432,6 +441,208 @@ export const WorkModeHubPanel: React.FC<WorkModeHubPanelProps> = ({
               ))}
             </div>
           </div>
+
+          {/* Automatic Stage Depth Planes & Perspective Quick Controls (Stage Mode Integration) */}
+          {guidesConfig && onChangeGuidesConfig && (
+            <div
+              className="p-2.5 rounded-lg border flex flex-col gap-2"
+              style={{
+                borderColor: 'rgba(16, 185, 129, 0.35)',
+                backgroundColor: 'var(--studio-bg-elevated)',
+              }}
+            >
+              <div className="flex items-center justify-between gap-1">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-sky-400">
+                  Perspectiva y Profundidad Visual
+                </span>
+                <label className="flex items-center gap-1 text-[10px] cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(guidesConfig.stageDepth.enabled || guidesConfig.stageDepth.autoShowInStageMode)}
+                    onChange={(e) =>
+                      onChangeGuidesConfig({
+                        ...guidesConfig,
+                        showGuides: true,
+                        stageDepth: {
+                          ...guidesConfig.stageDepth,
+                          enabled: e.target.checked,
+                          autoShowInStageMode: e.target.checked,
+                        },
+                      })
+                    }
+                    style={{ accentColor: '#38bdf8' }}
+                  />
+                  <span>Auto Stage</span>
+                </label>
+              </div>
+
+              <div className="grid grid-cols-2 gap-1 text-[10px]">
+                {(
+                  [
+                    ['showHorizon', 'Línea de horizonte'],
+                    ['showGroundPlane', 'Plano del suelo'],
+                    ['showVisualDepth', 'Profundidad visual'],
+                    ['showFarBackground', 'Fondos lejanos'],
+                    ['showMidBackground', 'Fondos medios'],
+                    ['showForeground', 'Primer plano'],
+                  ] as const
+                ).map(([field, label]) => (
+                  <label key={field} className="flex items-center gap-1.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(guidesConfig.stageDepth[field])}
+                      onChange={(e) =>
+                        onChangeGuidesConfig({
+                          ...guidesConfig,
+                          showGuides: true,
+                          stageDepth: {
+                            ...guidesConfig.stageDepth,
+                            enabled: true,
+                            [field]: e.target.checked,
+                          },
+                        })
+                      }
+                      style={{ accentColor: '#38bdf8' }}
+                    />
+                    <span className="truncate">{label}</span>
+                  </label>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-2 gap-1.5 pt-1 border-t" style={{ borderColor: 'var(--studio-border)' }}>
+                <StudioSlider
+                  variant="panel"
+                  label="Horizonte"
+                  value={guidesConfig.stageDepth.horizonPct}
+                  min={15}
+                  max={85}
+                  step={1}
+                  unit="%"
+                  defaultValue={54}
+                  accentColor="#38bdf8"
+                  onChange={(v) =>
+                    onChangeGuidesConfig({
+                      ...guidesConfig,
+                      showGuides: true,
+                      stageDepth: { ...guidesConfig.stageDepth, enabled: true, horizonPct: v },
+                      perspective: {
+                        ...guidesConfig.perspective,
+                        horizonY: Math.round((v / 100) * canvasHeight),
+                      },
+                    })
+                  }
+                />
+                <StudioSlider
+                  variant="panel"
+                  label="Plano Suelo"
+                  value={guidesConfig.stageDepth.groundPlanePct}
+                  min={50}
+                  max={98}
+                  step={1}
+                  unit="%"
+                  defaultValue={84}
+                  accentColor="#10b981"
+                  onChange={(v) =>
+                    onChangeGuidesConfig({
+                      ...guidesConfig,
+                      showGuides: true,
+                      stageDepth: { ...guidesConfig.stageDepth, enabled: true, groundPlanePct: v },
+                    })
+                  }
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-1 text-[10px] pt-1 border-t" style={{ borderColor: 'var(--studio-border)' }}>
+                <label className="flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(guidesConfig.perspective.enabled)}
+                    onChange={(e) =>
+                      onChangeGuidesConfig({
+                        ...guidesConfig,
+                        showGuides: true,
+                        perspective: { ...guidesConfig.perspective, enabled: e.target.checked },
+                      })
+                    }
+                    style={{ accentColor: '#38bdf8' }}
+                  />
+                  <span className="truncate">Guía Perspectiva</span>
+                </label>
+                <label className="flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(guidesConfig.perspective.floorGrid.enabled)}
+                    onChange={(e) =>
+                      onChangeGuidesConfig({
+                        ...guidesConfig,
+                        showGuides: true,
+                        perspective: {
+                          ...guidesConfig.perspective,
+                          enabled: e.target.checked ? true : guidesConfig.perspective.enabled,
+                          floorGrid: {
+                            ...guidesConfig.perspective.floorGrid,
+                            enabled: e.target.checked,
+                          },
+                        },
+                      })
+                    }
+                    style={{ accentColor: '#10b981' }}
+                  />
+                  <span className="truncate">Piso Automático</span>
+                </label>
+                <label className="flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(guidesConfig.cameraGuides.enabled)}
+                    onChange={(e) =>
+                      onChangeGuidesConfig({
+                        ...guidesConfig,
+                        showGuides: true,
+                        cameraGuides: { ...guidesConfig.cameraGuides, enabled: e.target.checked },
+                      })
+                    }
+                    style={{ accentColor: '#f59e0b' }}
+                  />
+                  <span className="truncate">Guías Cámara</span>
+                </label>
+                <label className="flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(guidesConfig.snapToPerspective)}
+                    onChange={(e) =>
+                      onChangeGuidesConfig({
+                        ...guidesConfig,
+                        snapToPerspective: e.target.checked,
+                      })
+                    }
+                    style={{ accentColor: '#a855f7' }}
+                  />
+                  <span className="truncate">Snap Perspectiva</span>
+                </label>
+              </div>
+
+              {onOpenGuidesModal && (
+                <div className="grid grid-cols-2 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => onOpenGuidesModal('perspective')}
+                    className="py-1 px-2 rounded border text-[10px] font-semibold hover:bg-white/5 text-sky-300"
+                    style={{ borderColor: 'rgba(56,189,248,0.4)', backgroundColor: 'var(--studio-bg-card)' }}
+                  >
+                    Puntos de Fuga...
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onOpenGuidesModal('floor_stage')}
+                    className="py-1 px-2 rounded border text-[10px] font-semibold hover:bg-white/5 text-emerald-300"
+                    style={{ borderColor: 'rgba(16,185,129,0.4)', backgroundColor: 'var(--studio-bg-card)' }}
+                  >
+                    Piso y Escenario...
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Stage Templates */}
           <div className="flex flex-col gap-1.5">

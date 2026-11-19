@@ -90,6 +90,7 @@ import {
   GroundConfig,
   GuidePresetKind,
   GuidesConfig,
+  GuidesModalTab,
   Hitbox, 
   HitboxType, 
   LassoMode,
@@ -107,6 +108,7 @@ import {
   OptionsBarState,
   ParametricShapeObject,
   PencilBrushSubMode,
+  PerspectiveGuideType,
   ProjectState,
   ProjectWorkMode,
   PureRefConfig,
@@ -117,6 +119,7 @@ import {
   ReferenceItem,
   RulerUnit,
   SampledColorInfo,
+  ScenarioGuidePresetId,
   SelectionArea,
   SelectionDisplayConfig,
   SelectionSubTool,
@@ -153,7 +156,11 @@ import {
   generateModeGuides,
 } from './utils/workModesEngine';
 import {
+  PERSPECTIVE_TYPE_META,
+  SCENARIO_GUIDE_PRESETS,
   createGuidePreset,
+  createVanishingPointsForType,
+  getDefaultAxonometricAngles,
   loadGuidesConfig,
   renderProjectThumbnailDataUrl,
   saveGuidesConfig,
@@ -902,7 +909,7 @@ export default function App() {
   const [selectedGuideId, setSelectedGuideId] = useState<string | null>(null);
   const [guidesConfig, setGuidesConfig] = useState<GuidesConfig>(() => loadGuidesConfig());
   const [guidesModalOpen, setGuidesModalOpen] = useState<boolean>(false);
-  const [guidesModalTab, setGuidesModalTab] = useState<'exact' | 'presets' | 'list'>('exact');
+  const [guidesModalTab, setGuidesModalTab] = useState<GuidesModalTab>('perspective');
   const [wheelNavMode, setWheelNavMode] = useState<WheelNavigationMode>(() => {
     try {
       const saved = localStorage.getItem(WHEEL_NAV_STORAGE_KEY);
@@ -6708,7 +6715,17 @@ export default function App() {
       // Gentle non-destructive workspace adaptation (NEVER deletes or mutates user pixels/frames)
       if (mode === 'tileset') {
         setShowGrid(true);
-      } else if (mode === 'hud_ui' || mode === 'stage') {
+      } else if (mode === 'stage') {
+        handleChangeGuidesConfig({
+          ...guidesConfig,
+          showRulers: true,
+          showGuides: true,
+          stageDepth: {
+            ...guidesConfig.stageDepth,
+            enabled: guidesConfig.stageDepth.autoShowInStageMode ? true : guidesConfig.stageDepth.enabled,
+          },
+        });
+      } else if (mode === 'hud_ui') {
         handleChangeGuidesConfig({ ...guidesConfig, showRulers: true, showGuides: true });
       }
       if (mode !== 'fighter') {
@@ -6718,6 +6735,49 @@ export default function App() {
       setTimeout(() => setImportNotification(null), 3000);
     },
     [guidesConfig, handleChangeGuidesConfig, handleFocusPanel]
+  );
+
+  const handleSelectPerspectiveType = useCallback(
+    (type: PerspectiveGuideType) => {
+      const horizonY = guidesConfig.perspective.horizonY || Math.round(canvasHeight * 0.54);
+      const angles = getDefaultAxonometricAngles(type);
+      const nextVps = createVanishingPointsForType(type, canvasWidth, canvasHeight, horizonY);
+      handleChangeGuidesConfig({
+        ...guidesConfig,
+        showGuides: true,
+        perspective: {
+          ...guidesConfig.perspective,
+          enabled: true,
+          type,
+          vanishingPoints: nextVps,
+          isoAngleLeft: angles.isoAngleLeft,
+          isoAngleRight: angles.isoAngleRight,
+        },
+      });
+      const meta = PERSPECTIVE_TYPE_META.find((m) => m.id === type);
+      setImportNotification(`Guía activada: ${meta?.label || type} (arrastra los puntos de fuga en el visor).`);
+      setTimeout(() => setImportNotification(null), 3000);
+    },
+    [guidesConfig, canvasWidth, canvasHeight, handleChangeGuidesConfig]
+  );
+
+  const handleApplyScenarioGuidePreset = useCallback(
+    (presetId: ScenarioGuidePresetId) => {
+      const def = SCENARIO_GUIDE_PRESETS.find((p) => p.id === presetId);
+      if (!def) return;
+      const built = def.build(canvasWidth, canvasHeight);
+      handleChangeGuidesConfig({
+        ...guidesConfig,
+        showRulers: true,
+        showGuides: true,
+        perspective: built.perspective,
+        cameraGuides: built.cameraGuides,
+        stageDepth: built.stageDepth,
+      });
+      setImportNotification(`Preset de escenario aplicado: ${def.label}.`);
+      setTimeout(() => setImportNotification(null), 2800);
+    },
+    [guidesConfig, canvasWidth, canvasHeight, handleChangeGuidesConfig]
   );
 
   const handleCreateSuggestedModeLayers = useCallback(
@@ -8771,12 +8831,15 @@ export default function App() {
         onToggleSnapOption={(key) =>
           handleChangeGuidesConfig({ ...guidesConfig, [key]: !guidesConfig[key] })
         }
-        onOpenGuidesModal={(tab = 'exact') => {
+        onOpenGuidesModal={(tab: GuidesModalTab = 'perspective') => {
           setGuidesModalTab(tab);
           setGuidesModalOpen(true);
         }}
         onApplyGuidePreset={(preset) => handleApplyGuidePreset(preset, false)}
         onClearAllGuides={handleClearAllGuides}
+        onChangeGuidesConfig={handleChangeGuidesConfig}
+        onSelectPerspectiveType={handleSelectPerspectiveType}
+        onApplyScenarioGuidePreset={handleApplyScenarioGuidePreset}
         wheelNavMode={wheelNavMode}
         onToggleWheelNavMode={() => {
           setWheelNavMode((prev) => {
@@ -9424,6 +9487,12 @@ export default function App() {
           setExportModalTab('mode_export');
           setExportModalOpen(true);
         }}
+        guidesConfig={guidesConfig}
+        onChangeGuidesConfig={handleChangeGuidesConfig}
+        onOpenGuidesModal={(tab: GuidesModalTab = 'perspective') => {
+          setGuidesModalTab(tab);
+          setGuidesModalOpen(true);
+        }}
         centerCanvas={
           <CanvasViewport
             width={canvasWidth}
@@ -9566,7 +9635,7 @@ export default function App() {
             onDuplicateGuide={handleDuplicateGuide}
             onDeleteGuide={handleDeleteGuide}
             onChangeGuidesConfig={handleChangeGuidesConfig}
-            onOpenGuidesModal={(tab = 'exact') => {
+            onOpenGuidesModal={(tab: GuidesModalTab = 'perspective') => {
               setGuidesModalTab(tab);
               setGuidesModalOpen(true);
             }}
@@ -9692,6 +9761,9 @@ export default function App() {
           onDeleteGuide={handleDeleteGuide}
           onApplyPreset={handleApplyGuidePreset}
           onClearAllGuides={handleClearAllGuides}
+          onSyncDummiePerspective={(enabled) =>
+            setDummiePose((prev) => ({ ...prev, respectPerspective: enabled }))
+          }
         />
       </StudioTopLayerPortal>
 
@@ -10390,6 +10462,11 @@ export default function App() {
               setSavedDummiePoses((prev) => prev.filter((p) => p.id !== id))
             }
             onOpenApplyModal={() => setApplyPoseModalOpen(true)}
+            references={references}
+            guidesConfig={guidesConfig}
+            canvasWidth={canvasWidth}
+            canvasHeight={canvasHeight}
+            onChangeGuidesConfig={handleChangeGuidesConfig}
           />
         </div>
       )}

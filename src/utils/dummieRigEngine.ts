@@ -1,9 +1,42 @@
 import {
+  DummieAnchorProfile,
+  DummieAnchorSection,
+  DummieAnchorVisualState,
+  DummieChainMoveScope,
   DummieJoint,
+  DummieJointAnchor,
   DummiePose,
   DummiePostureModifiers,
   DummieRigType,
+  PerspectiveGuidesConfig,
 } from '../types';
+
+export const DEFAULT_JOINT_ANCHOR: DummieJointAnchor = {
+  anchored: true,
+  linkPosition: true,
+  linkRotation: true,
+  linkScale: true,
+};
+
+export const DEFAULT_SECTION_ANCHORS: Record<DummieAnchorSection, boolean> = {
+  head_neck: true,
+  arm_left: true,
+  arm_right: true,
+  torso: true,
+  leg_left: true,
+  leg_right: true,
+  tail: true,
+};
+
+export const DUMMIE_ANCHOR_SECTIONS: { id: DummieAnchorSection; label: string }[] = [
+  { id: 'head_neck', label: 'Cabeza y cuello' },
+  { id: 'arm_left', label: 'Brazo izquierdo' },
+  { id: 'arm_right', label: 'Brazo derecho' },
+  { id: 'torso', label: 'Tronco' },
+  { id: 'leg_left', label: 'Pierna izquierda' },
+  { id: 'leg_right', label: 'Pierna derecha' },
+  { id: 'tail', label: 'Cola' },
+];
 
 export const DEFAULT_DUMMIE_MODIFIERS: DummiePostureModifiers = {
   bodyLean: 0,
@@ -36,6 +69,7 @@ export const DUMMIE_RIG_TEMPLATES: { id: DummieRigType; label: string; category:
   { id: 'slim', label: 'Delgado / Ágil', category: 'Humanoide' },
   { id: 'quadruped', label: 'Animal Cuadrúpedo', category: 'Criatura' },
   { id: 'bird', label: 'Animal Bípedo / Ave', category: 'Criatura' },
+  { id: 'dragon', label: 'Dragón / Alado', category: 'Criatura' },
   { id: 'custom', label: 'Criatura Personalizada', category: 'Personalizado' },
 ];
 
@@ -751,13 +785,13 @@ function buildBirdPoseJoints(presetId: string): DummieJoint[] {
 }
 
 export function createRigJoints(rigType: DummieRigType, presetId: string = 'idle'): DummieJoint[] {
-  if (rigType === 'quadruped') {
-    return buildQuadrupedPoseJoints(presetId);
-  }
-  if (rigType === 'bird') {
-    return buildBirdPoseJoints(presetId);
-  }
-  return buildHumanoidPoseJoints(rigType, presetId);
+  const baseJoints =
+    rigType === 'quadruped'
+      ? buildQuadrupedPoseJoints(presetId)
+      : rigType === 'bird'
+      ? buildBirdPoseJoints(presetId)
+      : buildHumanoidPoseJoints(rigType, presetId);
+  return autoConfigureDummieAnchorsForRig(baseJoints, rigType);
 }
 
 export function applyPresetToDummiePose(
@@ -781,24 +815,138 @@ export function applyPresetToDummiePose(
     canvasX: 0,
     canvasY: 0,
     canvasScale: 1,
+    chainMoveScope: 'branch',
+    rigViewEnabled: false,
+    respectPerspective: false,
+    sectionAnchors: computeSectionAnchorsFromJoints(joints),
+    activeAnchorProfileId: getDefaultAnchorProfileIdForRig(rigType),
   };
 }
 
-export function getEffectivePoseJoints(pose: DummiePose): DummieJoint[] {
+export interface DummiePerspectiveProjectionInfo {
+  active: boolean;
+  depthScale: number;
+  leanShiftDeg: number;
+  feetYCanvasPx: number;
+  horizonYCanvasPx: number;
+}
+
+/**
+ * Computes coherent perspective scaling and directional lean for a Dummie based on
+ * where its feet sit relative to the active perspective horizon and ground plane.
+ */
+export function computeDummiePerspectiveAdjustment(
+  pose: DummiePose,
+  perspective?: PerspectiveGuidesConfig | null,
+  canvasSize?: { width: number; height: number } | null
+): DummiePerspectiveProjectionInfo {
+  if (!pose.respectPerspective || !perspective || !perspective.enabled || !canvasSize) {
+    return {
+      active: false,
+      depthScale: 1,
+      leanShiftDeg: 0,
+      feetYCanvasPx: canvasSize ? canvasSize.height * 0.85 : 100,
+      horizonYCanvasPx: canvasSize ? canvasSize.height * 0.54 : 64,
+    };
+  }
+
+  const cw = Math.max(1, canvasSize.width);
+  const ch = Math.max(1, canvasSize.height);
+  const ankles = pose.joints.filter(
+    (j) => j.id.includes('ankle') || j.id.includes('toe')
+  );
+  const footNormY =
+    ankles.length > 0
+      ? Math.max(...ankles.map((a) => a.y))
+      : 0.86;
+  const footNormX =
+    ankles.length > 0
+      ? ankles.reduce((acc, a) => acc + a.x, 0) / ankles.length
+      : 0.5;
+
+  const feetYCanvasPx = pose.canvasY + footNormY * ch * pose.canvasScale;
+  const feetXCanvasPx = pose.canvasX + footNormX * cw * pose.canvasScale;
+  const horizonYCanvasPx = perspective.horizonY;
+
+  // Isometric / Dimetric / Trimetric maintain uniform depth scale
+  if (
+    perspective.type === 'isometric' ||
+    perspective.type === 'dimetric' ||
+    perspective.type === 'trimetric'
+  ) {
+    return {
+      active: true,
+      depthScale: 1,
+      leanShiftDeg: 0,
+      feetYCanvasPx,
+      horizonYCanvasPx,
+    };
+  }
+
+  const floorRefY = ch * Math.max(0.65, perspective.floorGrid?.floorYRatio || 0.92);
+  const refSpan = Math.max(12, Math.abs(floorRefY - horizonYCanvasPx));
+  const distFromHorizon = feetYCanvasPx - horizonYCanvasPx;
+  // Scale shrinks cleanly as character moves closer to horizon, expands in foreground
+  const normalizedDepth = Math.max(0.28, Math.min(1.55, distFromHorizon / refSpan));
+  const depthScale = Math.max(0.35, Math.min(1.45, 0.35 + normalizedDepth * 0.65));
+
+  // Subtle vertical convergence when 3-point perspective has an active vertical VP
+  let leanShiftDeg = 0;
+  if (perspective.type === '3point') {
+    const vertVp = perspective.vanishingPoints.find(
+      (vp) => vp.visible && Math.abs(vp.y - horizonYCanvasPx) > ch * 0.25
+    );
+    if (vertVp) {
+      const dx = vertVp.x - feetXCanvasPx;
+      const dy = vertVp.y - feetYCanvasPx;
+      if (Math.abs(dy) > 10) {
+        const tilt = (Math.atan2(dx, -dy) * 180) / Math.PI;
+        leanShiftDeg = Math.max(-14, Math.min(14, tilt * 0.32));
+      }
+    }
+  }
+
+  return {
+    active: true,
+    depthScale,
+    leanShiftDeg,
+    feetYCanvasPx,
+    horizonYCanvasPx,
+  };
+}
+
+export function getEffectivePoseJoints(
+  pose: DummiePose,
+  perspective?: PerspectiveGuidesConfig | null,
+  canvasSize?: { width: number; height: number } | null
+): DummieJoint[] {
   const { modifiers } = pose;
   const pelvis = pose.joints.find((j) => j.id === 'pelvis') || pose.joints[0];
   if (!pelvis) return pose.joints;
-  const leanRad = (modifiers.bodyLean * Math.PI) / 180;
+  const perspAdj = computeDummiePerspectiveAdjustment(pose, perspective, canvasSize);
+  const leanRad = (((modifiers.bodyLean || 0) + perspAdj.leanShiftDeg) * Math.PI) / 180;
   const headRad = (modifiers.headTilt * Math.PI) / 180;
+
+  // Foot anchor baseline for perspective depth scaling (keeps feet planted on floor!)
+  const ankles = pose.joints.filter((j) => j.id.includes('ankle'));
+  const footAnchorX =
+    ankles.length > 0
+      ? ankles.reduce((acc, j) => acc + j.x, 0) / ankles.length
+      : pelvis.x;
+  const footAnchorY =
+    ankles.length > 0
+      ? Math.max(...ankles.map((j) => j.y))
+      : 0.86;
 
   return pose.joints.map((j) => {
     let x = j.x;
     let y = j.y;
 
-    // Limb scale relative to pelvis
-    if (modifiers.limbLengthScale !== 1 && j.id !== 'pelvis') {
-      x = pelvis.x + (x - pelvis.x) * modifiers.limbLengthScale;
-      y = pelvis.y + (y - pelvis.y) * modifiers.limbLengthScale;
+    // Limb scale relative to pelvis (plus local per-joint scale)
+    const effectiveLimbScale = modifiers.limbLengthScale * (j.scale ?? 1);
+    if (effectiveLimbScale !== 1 && j.id !== 'pelvis') {
+      x = pelvis.x + (x - pelvis.x) * effectiveLimbScale;
+      y = pelvis.y + (y - pelvis.y) * effectiveLimbScale;
     }
 
     // Arm / Leg spread
@@ -828,6 +976,12 @@ export function getEffectivePoseJoints(pose: DummiePose): DummieJoint[] {
 
     // Center of gravity shift
     x += modifiers.centerOfGravityX + modifiers.weightBalance * 0.03;
+
+    // Perspective depth projection around foot contact baseline
+    if (perspAdj.active && Math.abs(perspAdj.depthScale - 1) > 0.005) {
+      x = footAnchorX + (x - footAnchorX) * perspAdj.depthScale;
+      y = footAnchorY + (y - footAnchorY) * perspAdj.depthScale;
+    }
 
     return {
       ...j,
@@ -1162,9 +1316,12 @@ function makeOrientedBoxFaces(
 export function computeDummieVolumes25D(
   pose: DummiePose,
   viewW: number,
-  viewH: number
+  viewH: number,
+  perspective?: PerspectiveGuidesConfig | null,
+  canvasSize?: { width: number; height: number } | null
 ): DummieVolumeShape25D[] {
-  const joints = getEffectivePoseJoints(pose);
+  const joints = getEffectivePoseJoints(pose, perspective, canvasSize);
+  const perspAdj = computeDummiePerspectiveAdjustment(pose, perspective, canvasSize);
   const jMap = new Map(joints.map((j) => [j.id, j]));
   const perspMode = pose.modifiers.perspectiveMode || 'light';
   const perspStrength = perspMode === 'dynamic' ? 0.0042 : perspMode === 'light' ? 0.002 : 0;
@@ -1180,7 +1337,15 @@ export function computeDummieVolumes25D(
   };
 
   const shapes: DummieVolumeShape25D[] = [];
-  const scaleMod = pose.rigType === 'muscular' ? 1.28 : pose.rigType === 'slim' ? 0.78 : pose.rigType === 'chibi' ? 1.08 : 1;
+  const baseScaleMod =
+    pose.rigType === 'muscular'
+      ? 1.28
+      : pose.rigType === 'slim'
+      ? 0.78
+      : pose.rigType === 'chibi'
+      ? 1.08
+      : 1;
+  const scaleMod = baseScaleMod * (perspAdj.active ? perspAdj.depthScale : 1);
 
   // 1. Torso 2.5D Volumes (Chest, Abdomen, Pelvis)
   const chest = pt('chest');
@@ -1620,15 +1785,778 @@ export function generateDummiePoseFromImageDataUrl(
         return j;
       });
 
+      const anchoredJoints = autoConfigureDummieAnchorsForRig(mappedJoints, rigType);
+
       resolve({
         ...base,
         id: `pose-img-${Date.now()}`,
         name: `Pose desde ${sourceName.slice(0, 14)}`,
         category: 'Generada',
-        joints: mappedJoints,
+        joints: anchoredJoints,
+        sectionAnchors: computeSectionAnchorsFromJoints(anchoredJoints),
+        activeAnchorProfileId: getDefaultAnchorProfileIdForRig(rigType),
       });
     };
     img.onerror = () => resolve(applyPresetToDummiePose(rigType, 'idle'));
     img.src = dataUrl;
   });
 }
+
+// =========================================================
+// DUMMIE RIG ANCHORING SYSTEM, PARTIAL LINKS, RIG VIEW & PROFILES
+// =========================================================
+export const DUMMIE_ANCHOR_PROFILES_STORAGE_KEY = 'pixelclash_dummie_anchor_profiles_v1';
+
+export function getJointAnchor(joint: DummieJoint): DummieJointAnchor {
+  if (!joint.anchor) {
+    return { ...DEFAULT_JOINT_ANCHOR };
+  }
+  return {
+    anchored: Boolean(joint.anchor.anchored),
+    linkPosition: Boolean(joint.anchor.linkPosition),
+    linkRotation: Boolean(joint.anchor.linkRotation),
+    linkScale: Boolean(joint.anchor.linkScale),
+  };
+}
+
+/**
+ * Returns semantic visual status of an articulation:
+ * - locked: blocked joint (cannot move)
+ * - anchored (Verde): full anchor (position + rotation + scale linked)
+ * - partial (Amarillo): partial anchor (subset of pos/rot/scale linked)
+ * - independent (Rojo): unanchored free joint
+ */
+export function getJointAnchorVisualState(joint: DummieJoint): DummieAnchorVisualState {
+  if (joint.locked) return 'locked';
+  const a = getJointAnchor(joint);
+  if (!a.anchored || (!a.linkPosition && !a.linkRotation && !a.linkScale)) {
+    return 'independent';
+  }
+  if (a.linkPosition && a.linkRotation && a.linkScale) {
+    return 'anchored';
+  }
+  return 'partial';
+}
+
+export function getJointAnchorColor(state: DummieAnchorVisualState): string {
+  switch (state) {
+    case 'anchored':
+      return '#22c55e'; // Verde: Anclada
+    case 'partial':
+      return '#facc15'; // Amarillo: Anclaje parcial
+    case 'independent':
+      return '#ef4444'; // Rojo: Independiente
+    case 'locked':
+      return '#94a3b8'; // Bloqueada
+  }
+}
+
+export function getJointAnchorLabel(state: DummieAnchorVisualState): string {
+  switch (state) {
+    case 'anchored':
+      return 'Anclada';
+    case 'partial':
+      return 'Parcial';
+    case 'independent':
+      return 'Independiente';
+    case 'locked':
+      return 'Bloqueada';
+  }
+}
+
+export function getJointAnchorSection(joint: DummieJoint): DummieAnchorSection {
+  if (joint.id.includes('tail')) return 'tail';
+  switch (joint.group) {
+    case 'head':
+      return 'head_neck';
+    case 'arm_l':
+      return 'arm_left';
+    case 'arm_r':
+      return 'arm_right';
+    case 'torso':
+      return 'torso';
+    case 'leg_l':
+      return 'leg_left';
+    case 'leg_r':
+      return 'leg_right';
+    case 'extra':
+    default:
+      if (joint.id.includes('wing_l')) return 'arm_left';
+      if (joint.id.includes('wing_r')) return 'arm_right';
+      return 'tail';
+  }
+}
+
+export function computeSectionAnchorsFromJoints(
+  joints: DummieJoint[]
+): Record<DummieAnchorSection, boolean> {
+  const result: Record<DummieAnchorSection, boolean> = { ...DEFAULT_SECTION_ANCHORS };
+  for (const sec of DUMMIE_ANCHOR_SECTIONS) {
+    const members = joints.filter((j) => getJointAnchorSection(j) === sec.id);
+    if (members.length === 0) {
+      result[sec.id] = true;
+    } else {
+      result[sec.id] = members.some((j) => getJointAnchor(j).anchored);
+    }
+  }
+  return result;
+}
+
+export function autoConfigureDummieAnchorsForRig(
+  joints: DummieJoint[],
+  rigType: DummieRigType
+): DummieJoint[] {
+  return joints.map((j) => {
+    // Intelligent anatomical defaults based on rig type
+    if (rigType === 'chibi') {
+      const isExtremity = j.id.includes('wrist') || j.id.includes('ankle');
+      return {
+        ...j,
+        scale: j.scale ?? 1,
+        anchor: isExtremity
+          ? { anchored: true, linkPosition: true, linkRotation: false, linkScale: true }
+          : { ...DEFAULT_JOINT_ANCHOR },
+      };
+    }
+    if (rigType === 'quadruped') {
+      const isPaw = j.id.includes('wrist') || j.id.includes('ankle');
+      return {
+        ...j,
+        scale: j.scale ?? 1,
+        anchor: isPaw
+          ? { anchored: true, linkPosition: true, linkRotation: false, linkScale: true }
+          : { ...DEFAULT_JOINT_ANCHOR },
+      };
+    }
+    if (rigType === 'dragon') {
+      const isWingTip = j.id.includes('wing');
+      return {
+        ...j,
+        scale: j.scale ?? 1,
+        anchor: isWingTip
+          ? { anchored: true, linkPosition: true, linkRotation: true, linkScale: false }
+          : { ...DEFAULT_JOINT_ANCHOR },
+      };
+    }
+    if (rigType === 'custom') {
+      const isExtra = j.group === 'extra';
+      return {
+        ...j,
+        scale: j.scale ?? 1,
+        anchor: isExtra
+          ? { anchored: true, linkPosition: true, linkRotation: false, linkScale: false }
+          : { ...DEFAULT_JOINT_ANCHOR },
+      };
+    }
+    return {
+      ...j,
+      scale: j.scale ?? 1,
+      anchor: j.anchor ? getJointAnchor(j) : { ...DEFAULT_JOINT_ANCHOR },
+    };
+  });
+}
+
+export function toggleSectionAnchors(
+  pose: DummiePose,
+  section: DummieAnchorSection,
+  anchored: boolean
+): DummiePose {
+  const nextJoints = pose.joints.map((j) => {
+    if (getJointAnchorSection(j) !== section) return j;
+    return {
+      ...j,
+      anchor: anchored
+        ? { anchored: true, linkPosition: true, linkRotation: true, linkScale: true }
+        : { anchored: false, linkPosition: false, linkRotation: false, linkScale: false },
+    };
+  });
+  return {
+    ...pose,
+    joints: nextJoints,
+    sectionAnchors: computeSectionAnchorsFromJoints(nextJoints),
+  };
+}
+
+export function updateJointAnchor(
+  pose: DummiePose,
+  jointId: string,
+  patch: Partial<DummieJointAnchor>
+): DummiePose {
+  const nextJoints = pose.joints.map((j) => {
+    if (j.id !== jointId) return j;
+    const prev = getJointAnchor(j);
+    let next: DummieJointAnchor = { ...prev, ...patch };
+    if (patch.anchored === true && !next.linkPosition && !next.linkRotation && !next.linkScale) {
+      next = { anchored: true, linkPosition: true, linkRotation: true, linkScale: true };
+    } else if (patch.anchored === false) {
+      next = { anchored: false, linkPosition: false, linkRotation: false, linkScale: false };
+    } else if (patch.anchored === undefined) {
+      next.anchored = Boolean(next.linkPosition || next.linkRotation || next.linkScale);
+    }
+    return { ...j, anchor: next };
+  });
+  return {
+    ...pose,
+    joints: nextJoints,
+    sectionAnchors: computeSectionAnchorsFromJoints(nextJoints),
+  };
+}
+
+export interface ChainScopeOption {
+  scope: DummieChainMoveScope;
+  label: string;
+}
+
+/**
+ * Generates contextual chain move scope labels based on the currently selected articulation.
+ */
+export function getChainScopeOptionsForJoint(
+  jointId: string | null,
+  joints: DummieJoint[]
+): ChainScopeOption[] {
+  const joint = joints.find((j) => j.id === jointId);
+  if (!joint) {
+    return [
+      { scope: 'piece', label: 'Solo pieza' },
+      { scope: 'branch', label: 'Rama completa' },
+      { scope: 'upper_body', label: 'Mitad superior' },
+      { scope: 'full_body', label: 'Cuerpo completo' },
+    ];
+  }
+
+  const shortName = joint.label.split('/')[0].trim();
+  const sec = getJointAnchorSection(joint);
+  let branchLabel = 'Rama completa';
+  let halfScope: DummieChainMoveScope = 'upper_body';
+  let halfLabel = 'Mitad superior';
+
+  if (sec === 'arm_left') branchLabel = 'Brazo izq. completo';
+  else if (sec === 'arm_right') branchLabel = 'Brazo der. completo';
+  else if (sec === 'head_neck') branchLabel = 'Cabeza y cuello';
+  else if (sec === 'torso') branchLabel = 'Columna y torso';
+  else if (sec === 'leg_left') {
+    branchLabel = 'Pierna izq. completa';
+    halfScope = 'lower_body';
+    halfLabel = 'Mitad inferior';
+  } else if (sec === 'leg_right') {
+    branchLabel = 'Pierna der. completa';
+    halfScope = 'lower_body';
+    halfLabel = 'Mitad inferior';
+  } else if (sec === 'tail') {
+    branchLabel = 'Cola completa';
+    halfScope = 'lower_body';
+    halfLabel = 'Mitad inferior';
+  }
+
+  return [
+    { scope: 'piece', label: `Solo ${shortName}` },
+    { scope: 'branch', label: branchLabel },
+    { scope: halfScope, label: halfLabel },
+    { scope: 'full_body', label: 'Cuerpo completo' },
+  ];
+}
+
+function collectAnchoredDescendants(
+  rootId: string,
+  joints: DummieJoint[],
+  requireLink: 'position' | 'rotation' | 'scale'
+): Set<string> {
+  const childrenByParent = new Map<string, DummieJoint[]>();
+  for (const j of joints) {
+    if (!j.parentId) continue;
+    const list = childrenByParent.get(j.parentId) || [];
+    list.push(j);
+    childrenByParent.set(j.parentId, list);
+  }
+
+  const visited = new Set<string>();
+  const queue = [rootId];
+  while (queue.length > 0) {
+    const curr = queue.shift()!;
+    const kids = childrenByParent.get(curr) || [];
+    for (const k of kids) {
+      if (k.locked || visited.has(k.id)) continue;
+      const a = getJointAnchor(k);
+      if (!a.anchored) continue;
+      if (requireLink === 'position' && !a.linkPosition) continue;
+      if (requireLink === 'rotation' && !a.linkRotation) continue;
+      if (requireLink === 'scale' && !a.linkScale) continue;
+      visited.add(k.id);
+      queue.push(k.id);
+    }
+  }
+  return visited;
+}
+
+function collectSameSectionAncestors(
+  joint: DummieJoint,
+  joints: DummieJoint[]
+): Set<string> {
+  const out = new Set<string>();
+  const targetSec = getJointAnchorSection(joint);
+  const byId = new Map(joints.map((j) => [j.id, j]));
+  let curr: DummieJoint | undefined = joint;
+  while (curr && curr.parentId) {
+    const parent = byId.get(curr.parentId);
+    if (!parent || parent.locked) break;
+    const currAnchor = getJointAnchor(curr);
+    if (!currAnchor.anchored || !currAnchor.linkPosition) break;
+    // Propagate along same limb/spine branch (e.g. moving wrist drags elbow/shoulder or neck drags chest/abdomen/pelvis when in branch scope)
+    const pSec = getJointAnchorSection(parent);
+    if (pSec === targetSec || (targetSec === 'head_neck' && pSec === 'torso')) {
+      const pAnchor = getJointAnchor(parent);
+      if (pAnchor.anchored && pAnchor.linkPosition) {
+        out.add(parent.id);
+        curr = parent;
+        continue;
+      }
+    }
+    break;
+  }
+  return out;
+}
+
+function collectAffectedJointsByScope(
+  pose: DummiePose,
+  jointId: string,
+  scope: DummieChainMoveScope,
+  requireLink: 'position' | 'rotation' | 'scale'
+): Map<string, number> {
+  // Returns map of jointId -> weight (1 = full propagation, 0.5..0.85 = natural parent follow-through)
+  const weights = new Map<string, number>();
+  const target = pose.joints.find((j) => j.id === jointId);
+  if (!target || target.locked) return weights;
+  weights.set(target.id, 1);
+
+  const targetAnchor = getJointAnchor(target);
+  if (scope === 'piece' || !targetAnchor.anchored) {
+    return weights;
+  }
+
+  // Always propagate to anchored descendants
+  const descendants = collectAnchoredDescendants(target.id, pose.joints, requireLink);
+  descendants.forEach((id) => weights.set(id, 1));
+
+  if (scope === 'branch') {
+    // Also follow-through softly up the same anchored chain if dragging an extremity/neck
+    const ancestors = collectSameSectionAncestors(target, pose.joints);
+    let falloff = 0.65;
+    ancestors.forEach((id) => {
+      if (!weights.has(id)) {
+        weights.set(id, falloff);
+        // Include descendants of dragged torso/branch ancestors (except other locked/independent parts)
+        const subKids = collectAnchoredDescendants(id, pose.joints, requireLink);
+        subKids.forEach((kidId) => {
+          if (!weights.has(kidId)) weights.set(kidId, falloff);
+        });
+        falloff = Math.max(0.25, falloff * 0.6);
+      }
+    });
+  } else if (scope === 'upper_body') {
+    for (const j of pose.joints) {
+      if (j.locked || weights.has(j.id)) continue;
+      const a = getJointAnchor(j);
+      const sec = getJointAnchorSection(j);
+      if (
+        a.anchored &&
+        ((requireLink === 'position' && a.linkPosition) ||
+          (requireLink === 'rotation' && a.linkRotation) ||
+          (requireLink === 'scale' && a.linkScale)) &&
+        (sec === 'head_neck' || sec === 'arm_left' || sec === 'arm_right' || (sec === 'torso' && j.id !== 'pelvis'))
+      ) {
+        weights.set(j.id, 1);
+      }
+    }
+  } else if (scope === 'lower_body') {
+    for (const j of pose.joints) {
+      if (j.locked || weights.has(j.id)) continue;
+      const a = getJointAnchor(j);
+      const sec = getJointAnchorSection(j);
+      if (
+        a.anchored &&
+        ((requireLink === 'position' && a.linkPosition) ||
+          (requireLink === 'rotation' && a.linkRotation) ||
+          (requireLink === 'scale' && a.linkScale)) &&
+        (sec === 'leg_left' || sec === 'leg_right' || sec === 'tail' || j.id === 'pelvis')
+      ) {
+        weights.set(j.id, 1);
+      }
+    }
+  } else if (scope === 'full_body') {
+    for (const j of pose.joints) {
+      if (j.locked || weights.has(j.id)) continue;
+      const a = getJointAnchor(j);
+      if (
+        a.anchored &&
+        ((requireLink === 'position' && a.linkPosition) ||
+          (requireLink === 'rotation' && a.linkRotation) ||
+          (requireLink === 'scale' && a.linkScale))
+      ) {
+        weights.set(j.id, 1);
+      }
+    }
+  }
+
+  return weights;
+}
+
+/**
+ * Moves a Dummie joint respecting Anchor state, Partial Link flags, Chain Move Scope,
+ * Symmetry, and Alt-key temporary unlinking (without modifying saved anchor config!).
+ */
+export function moveDummieJointWithAnchors(
+  pose: DummiePose,
+  jointId: string,
+  nextX: number,
+  nextY: number,
+  options: { altBypass?: boolean; scope?: DummieChainMoveScope } = {}
+): DummiePose {
+  const target = pose.joints.find((j) => j.id === jointId);
+  if (!target || target.locked) return pose;
+
+  const clampedX = Math.max(0.03, Math.min(0.97, nextX));
+  const clampedY = Math.max(0.03, Math.min(0.97, nextY));
+  const dx = clampedX - target.x;
+  const dy = clampedY - target.y;
+
+  const effectiveScope: DummieChainMoveScope = options.altBypass
+    ? 'piece'
+    : options.scope || pose.chainMoveScope || 'branch';
+
+  const affectedWeights = collectAffectedJointsByScope(pose, jointId, effectiveScope, 'position');
+
+  // Optional auto-symmetry for mirrored joints
+  const mirrorWeights = new Map<string, number>();
+  if (pose.modifiers.autoSymmetry) {
+    const byId = new Map(pose.joints.map((j) => [j.id, j]));
+    affectedWeights.forEach((w, id) => {
+      const src = byId.get(id);
+      if (src?.mirrorId && !affectedWeights.has(src.mirrorId)) {
+        const mir = byId.get(src.mirrorId);
+        if (mir && !mir.locked) {
+          mirrorWeights.set(mir.id, w);
+        }
+      }
+    });
+  }
+
+  return {
+    ...pose,
+    joints: pose.joints.map((j) => {
+      if (j.id === jointId) {
+        return { ...j, x: clampedX, y: clampedY };
+      }
+      const w = affectedWeights.get(j.id);
+      if (w !== undefined) {
+        return {
+          ...j,
+          x: Math.max(0.03, Math.min(0.97, j.x + dx * w)),
+          y: Math.max(0.03, Math.min(0.97, j.y + dy * w)),
+        };
+      }
+      const mw = mirrorWeights.get(j.id);
+      if (mw !== undefined) {
+        return {
+          ...j,
+          x: Math.max(0.03, Math.min(0.97, j.x - dx * mw)),
+          y: Math.max(0.03, Math.min(0.97, j.y + dy * mw)),
+        };
+      }
+      return j;
+    }),
+  };
+}
+
+/**
+ * Applies rotation (rx, ry, rz), depth, or local scale changes to a joint, propagating
+ * rotation/scale to anchored descendants according to partial anchor flags.
+ */
+export function transformDummieJointWithAnchors(
+  pose: DummiePose,
+  jointId: string,
+  patch: Partial<{ rx: number; ry: number; rz: number; depth: number; scale: number; locked: boolean }>,
+  options: { altBypass?: boolean; scope?: DummieChainMoveScope } = {}
+): DummiePose {
+  const target = pose.joints.find((j) => j.id === jointId);
+  if (!target) return pose;
+
+  const dRx = patch.rx !== undefined ? patch.rx - (target.rx ?? 0) : 0;
+  const dRy = patch.ry !== undefined ? patch.ry - (target.ry ?? 0) : 0;
+  const dRz = patch.rz !== undefined ? patch.rz - (target.rz ?? 0) : 0;
+  const dScale = patch.scale !== undefined ? patch.scale / Math.max(0.2, target.scale ?? 1) : 1;
+
+  const isBypass = Boolean(options.altBypass);
+  const scope = options.scope || pose.chainMoveScope || 'branch';
+  const rotTargets =
+    !isBypass && (dRx !== 0 || dRy !== 0 || dRz !== 0)
+      ? collectAffectedJointsByScope(pose, jointId, scope === 'piece' ? 'piece' : 'branch', 'rotation')
+      : new Map<string, number>();
+  const scaleTargets =
+    !isBypass && Math.abs(dScale - 1) > 0.001
+      ? collectAffectedJointsByScope(pose, jointId, scope === 'piece' ? 'piece' : 'branch', 'scale')
+      : new Map<string, number>();
+
+  const radZ = (dRz * Math.PI) / 180;
+  const cosZ = Math.cos(radZ);
+  const sinZ = Math.sin(radZ);
+
+  return {
+    ...pose,
+    joints: pose.joints.map((j) => {
+      if (j.id === jointId) {
+        return { ...j, ...patch };
+      }
+      let next = j;
+      if (rotTargets.has(j.id)) {
+        const anchor = getJointAnchor(j);
+        let nx = next.x;
+        let ny = next.y;
+        // Swing anchored child coordinates around parent when rolling Z
+        if (dRz !== 0 && anchor.linkPosition) {
+          const rx0 = next.x - target.x;
+          const ry0 = next.y - target.y;
+          nx = Math.max(0.03, Math.min(0.97, target.x + rx0 * cosZ - ry0 * sinZ));
+          ny = Math.max(0.03, Math.min(0.97, target.y + rx0 * sinZ + ry0 * cosZ));
+        }
+        next = {
+          ...next,
+          x: nx,
+          y: ny,
+          rx: Math.max(-75, Math.min(75, (next.rx ?? 0) + dRx)),
+          ry: Math.max(-90, Math.min(90, (next.ry ?? 0) + dRy)),
+          rz: Math.max(-180, Math.min(180, (next.rz ?? 0) + dRz)),
+        };
+      }
+      if (scaleTargets.has(j.id)) {
+        next = {
+          ...next,
+          scale: Math.max(0.5, Math.min(1.8, Number(((next.scale ?? 1) * dScale).toFixed(2)))),
+        };
+      }
+      return next;
+    }),
+  };
+}
+
+// =========================================================
+// RIG VIEW HIERARCHY TREE BUILDER
+// =========================================================
+export interface DummieRigTreeNode {
+  joint: DummieJoint;
+  depth: number;
+  section: DummieAnchorSection;
+  visualState: DummieAnchorVisualState;
+  children: DummieRigTreeNode[];
+}
+
+export function buildDummieRigTree(joints: DummieJoint[]): DummieRigTreeNode[] {
+  const byParent = new Map<string | null, DummieJoint[]>();
+  for (const j of joints) {
+    const pid = j.parentId && joints.some((p) => p.id === j.parentId) ? j.parentId : null;
+    const list = byParent.get(pid) || [];
+    list.push(j);
+    byParent.set(pid, list);
+  }
+
+  const buildNode = (j: DummieJoint, depth: number, seen: Set<string>): DummieRigTreeNode => {
+    seen.add(j.id);
+    const kids = (byParent.get(j.id) || [])
+      .filter((k) => !seen.has(k.id))
+      .map((k) => buildNode(k, depth + 1, seen));
+    return {
+      joint: j,
+      depth,
+      section: getJointAnchorSection(j),
+      visualState: getJointAnchorVisualState(j),
+      children: kids,
+    };
+  };
+
+  const seen = new Set<string>();
+  const roots = byParent.get(null) || (joints[0] ? [joints[0]] : []);
+  return roots.map((r) => buildNode(r, 0, seen));
+}
+
+// =========================================================
+// ANCHOR PROFILES (5 BUILT-INS + CUSTOM PERSISTENCE)
+// =========================================================
+export const BUILTIN_ANCHOR_PROFILES: DummieAnchorProfile[] = [
+  {
+    id: 'profile-human-standard',
+    name: 'Humano estándar',
+    rigType: 'male',
+    description: 'Cadena completa anclada en torso, cabeza y extremidades para posado anatómico natural.',
+    builtIn: true,
+    sectionAnchors: {
+      head_neck: true,
+      arm_left: true,
+      arm_right: true,
+      torso: true,
+      leg_left: true,
+      leg_right: true,
+      tail: true,
+    },
+    jointAnchors: {},
+  },
+  {
+    id: 'profile-quadruped',
+    name: 'Animal cuadrúpedo',
+    rigType: 'quadruped',
+    description: 'Columna, cuello y cola anclados; patas con rotación libre para apoyo natural en suelo.',
+    builtIn: true,
+    sectionAnchors: {
+      head_neck: true,
+      arm_left: true,
+      arm_right: true,
+      torso: true,
+      leg_left: true,
+      leg_right: true,
+      tail: true,
+    },
+    jointAnchors: {
+      wrist_l: { anchored: true, linkPosition: true, linkRotation: false, linkScale: true },
+      wrist_r: { anchored: true, linkPosition: true, linkRotation: false, linkScale: true },
+      ankle_l: { anchored: true, linkPosition: true, linkRotation: false, linkScale: true },
+      ankle_r: { anchored: true, linkPosition: true, linkRotation: false, linkScale: true },
+    },
+  },
+  {
+    id: 'profile-dragon',
+    name: 'Dragón',
+    rigType: 'dragon',
+    description: 'Cadena vertebral y cola vinculadas; alas con escala independiente para envergadura variable.',
+    builtIn: true,
+    sectionAnchors: {
+      head_neck: true,
+      arm_left: true,
+      arm_right: true,
+      torso: true,
+      leg_left: true,
+      leg_right: true,
+      tail: true,
+    },
+    jointAnchors: {
+      wing_l: { anchored: true, linkPosition: true, linkRotation: true, linkScale: false },
+      wing_r: { anchored: true, linkPosition: true, linkRotation: true, linkScale: false },
+      tail_tip: { anchored: true, linkPosition: true, linkRotation: true, linkScale: false },
+    },
+  },
+  {
+    id: 'profile-chibi',
+    name: 'Chibi',
+    rigType: 'chibi',
+    description: 'Cabeza y tronco firmes; manos y pies independientes para gestos súper deformados.',
+    builtIn: true,
+    sectionAnchors: {
+      head_neck: true,
+      arm_left: true,
+      arm_right: true,
+      torso: true,
+      leg_left: true,
+      leg_right: true,
+      tail: false,
+    },
+    jointAnchors: {
+      wrist_l: { anchored: false, linkPosition: false, linkRotation: false, linkScale: false },
+      wrist_r: { anchored: false, linkPosition: false, linkRotation: false, linkScale: false },
+      ankle_l: { anchored: false, linkPosition: false, linkRotation: false, linkScale: false },
+      ankle_r: { anchored: false, linkPosition: false, linkRotation: false, linkScale: false },
+    },
+  },
+  {
+    id: 'profile-custom-creature',
+    name: 'Criatura personalizada',
+    rigType: 'custom',
+    description: 'Núcleo corporal anclado con extremidades y apéndices flexibles/parciales.',
+    builtIn: true,
+    sectionAnchors: {
+      head_neck: true,
+      arm_left: true,
+      arm_right: true,
+      torso: true,
+      leg_left: false,
+      leg_right: false,
+      tail: false,
+    },
+    jointAnchors: {
+      elbow_l: { anchored: true, linkPosition: true, linkRotation: false, linkScale: false },
+      elbow_r: { anchored: true, linkPosition: true, linkRotation: false, linkScale: false },
+      tail_mid: { anchored: false, linkPosition: false, linkRotation: false, linkScale: false },
+      tail_tip: { anchored: false, linkPosition: false, linkRotation: false, linkScale: false },
+    },
+  },
+];
+
+export function getDefaultAnchorProfileIdForRig(rigType: DummieRigType): string {
+  if (rigType === 'quadruped') return 'profile-quadruped';
+  if (rigType === 'dragon') return 'profile-dragon';
+  if (rigType === 'chibi') return 'profile-chibi';
+  if (rigType === 'custom') return 'profile-custom-creature';
+  return 'profile-human-standard';
+}
+
+export function loadSavedAnchorProfiles(): DummieAnchorProfile[] {
+  try {
+    const raw = localStorage.getItem(DUMMIE_ANCHOR_PROFILES_STORAGE_KEY);
+    if (!raw) return [...BUILTIN_ANCHOR_PROFILES];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [...BUILTIN_ANCHOR_PROFILES];
+    return [...parsed, ...BUILTIN_ANCHOR_PROFILES];
+  } catch {
+    return [...BUILTIN_ANCHOR_PROFILES];
+  }
+}
+
+export function saveCustomAnchorProfile(profile: DummieAnchorProfile): DummieAnchorProfile[] {
+  try {
+    const raw = localStorage.getItem(DUMMIE_ANCHOR_PROFILES_STORAGE_KEY);
+    const existing: DummieAnchorProfile[] = raw ? JSON.parse(raw) : [];
+    const next = [
+      { ...profile, builtIn: false, createdAt: new Date().toISOString() },
+      ...existing.filter((p) => p.id !== profile.id && p.name !== profile.name),
+    ];
+    localStorage.setItem(DUMMIE_ANCHOR_PROFILES_STORAGE_KEY, JSON.stringify(next));
+    return [...next, ...BUILTIN_ANCHOR_PROFILES];
+  } catch {
+    return [...BUILTIN_ANCHOR_PROFILES];
+  }
+}
+
+export function deleteCustomAnchorProfile(id: string): DummieAnchorProfile[] {
+  try {
+    const raw = localStorage.getItem(DUMMIE_ANCHOR_PROFILES_STORAGE_KEY);
+    const existing: DummieAnchorProfile[] = raw ? JSON.parse(raw) : [];
+    const next = existing.filter((p) => p.id !== id);
+    localStorage.setItem(DUMMIE_ANCHOR_PROFILES_STORAGE_KEY, JSON.stringify(next));
+    return [...next, ...BUILTIN_ANCHOR_PROFILES];
+  } catch {
+    return [...BUILTIN_ANCHOR_PROFILES];
+  }
+}
+
+export function applyAnchorProfileToPose(
+  pose: DummiePose,
+  profile: DummieAnchorProfile
+): DummiePose {
+  const nextJoints = pose.joints.map((j) => {
+    const explicit = profile.jointAnchors[j.id];
+    if (explicit) {
+      return { ...j, anchor: { ...explicit } };
+    }
+    const sec = getJointAnchorSection(j);
+    const secEnabled = profile.sectionAnchors[sec] ?? true;
+    return {
+      ...j,
+      anchor: secEnabled
+        ? { anchored: true, linkPosition: true, linkRotation: true, linkScale: true }
+        : { anchored: false, linkPosition: false, linkRotation: false, linkScale: false },
+    };
+  });
+  return {
+    ...pose,
+    joints: nextJoints,
+    sectionAnchors: computeSectionAnchorsFromJoints(nextJoints),
+    activeAnchorProfileId: profile.id,
+  };
+}
+

@@ -47,6 +47,7 @@ import {
   GradientConfig,
   GroundConfig,
   GuidesConfig,
+  GuidesModalTab,
   Hitbox,
   HitboxType,
   LassoMode,
@@ -149,6 +150,10 @@ import {
 import {
   computeDummieVolumes25D,
   getEffectivePoseJoints,
+  getJointAnchorColor,
+  getJointAnchorLabel,
+  getJointAnchorVisualState,
+  moveDummieJointWithAnchors,
 } from '../utils/dummieRigEngine';
 import {
   DEFAULT_BUCKET_OPTIONS,
@@ -348,7 +353,7 @@ interface CanvasViewportProps {
   onDuplicateGuide?: (id: string) => void;
   onDeleteGuide?: (id: string) => void;
   onChangeGuidesConfig?: (next: GuidesConfig) => void;
-  onOpenGuidesModal?: (tab?: 'exact' | 'presets' | 'list') => void;
+  onOpenGuidesModal?: (tab?: GuidesModalTab) => void;
   onFocusGuidesContext?: () => void;
   wheelNavMode?: WheelNavigationMode;
   // Work Modes: Stage Parallax & Tileset Studio overlays
@@ -556,18 +561,35 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   }, [isPanning]);
 
   const isGuideSnapEnabled = Boolean(
-    guidesConfig.snapToGuides || guidesConfig.snapToRulers || guidesConfig.snapToGrid
+    guidesConfig.snapToGuides ||
+      guidesConfig.snapToRulers ||
+      guidesConfig.snapToGrid ||
+      (guidesConfig.snapToPerspective && guidesConfig.perspective?.enabled)
   );
 
   const applyGuideSnap = useCallback(
-    (rawX: number, rawY: number, altBypass: boolean = false) => {
+    (
+      rawX: number,
+      rawY: number,
+      altBypass: boolean = false,
+      anchorPoint: { x: number; y: number } | null = null
+    ) => {
       if (altBypass || !isGuideSnapEnabled) {
         setSnappedGuideIds((prev) =>
           prev.xId || prev.yId ? { xId: null, yId: null } : prev
         );
         return { x: rawX, y: rawY };
       }
-      const res = snapCoordinateToGuides(rawX, rawY, width, height, guides, guidesConfig, zoom);
+      const res = snapCoordinateToGuides(
+        rawX,
+        rawY,
+        width,
+        height,
+        guides,
+        guidesConfig,
+        zoom,
+        anchorPoint
+      );
       const nextXId = res.guideX?.id || null;
       const nextYId = res.guideY?.id || null;
       setSnappedGuideIds((prev) =>
@@ -4085,7 +4107,21 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       const paths = currentLayer.vectorPaths ? [...currentLayer.vectorPaths] : [];
       const activePath = paths.find((p) => p.id === selectedVectorPathId) || null;
       const allNodes = paths.flatMap((p) => p.nodes);
-      const snapped = snapVectorCoord(coords, vectorConfig.snap, width, height, allNodes);
+      const placingRefPath =
+        vectorDraftSession?.phase === 'placing'
+          ? paths.find((p) => p.id === vectorDraftSession.pathId) || null
+          : activePath;
+      const prevVecAnchor =
+        placingRefPath && placingRefPath.nodes.length > 0
+          ? placingRefPath.nodes[placingRefPath.nodes.length - 1]
+          : null;
+      const vecBaseSnap = snapVectorCoord(coords, vectorConfig.snap, width, height, allNodes);
+      const snapped = applyGuideSnap(
+        vecBaseSnap.x,
+        vecBaseSnap.y,
+        e.altKey,
+        prevVecAnchor ? { x: prevVecAnchor.x, y: prevVecAnchor.y } : null
+      );
       const allowNodeEditNow = isDirectSelectActive || vectorDraftSession?.phase !== 'placing';
 
       // 1a. Hit test tangent handles of active path (always allowed when Ctrl/Direct Select is active)
@@ -5457,7 +5493,20 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
     if (vectorDraftSession?.phase === 'placing' && (rawCoords || unclampedCoords)) {
       const nextPt = rawCoords || unclampedCoords;
-      setVectorHoverCoord(nextPt);
+      if (nextPt) {
+        const placingPath = currentLayer.vectorPaths?.find((p) => p.id === vectorDraftSession.pathId);
+        const anchorNode =
+          placingPath && placingPath.nodes.length > 0
+            ? placingPath.nodes[placingPath.nodes.length - 1]
+            : null;
+        const snappedHover = applyGuideSnap(
+          nextPt.x,
+          nextPt.y,
+          e.altKey,
+          anchorNode ? { x: anchorNode.x, y: anchorNode.y } : null
+        );
+        setVectorHoverCoord(snappedHover);
+      }
     }
 
     // Magnetic Lasso live contour hugging while moving cursor between anchors
@@ -5959,7 +6008,12 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       const paths = currentLayer.vectorPaths;
       const allNodes = paths.flatMap((p) => p.nodes);
       const vecSnapped = snapVectorCoord(curGrid, vectorConfig.snap, width, height, allNodes);
-      const snapped = applyGuideSnap(vecSnapped.x, vecSnapped.y, e.altKey);
+      const snapped = applyGuideSnap(
+        vecSnapped.x,
+        vecSnapped.y,
+        e.altKey,
+        drag.kind === 'node' || drag.kind === 'whole_path' ? drag.startGrid : null
+      );
 
       if (drag.kind === 'whole_path') {
         const dx = snapped.x - drag.startGrid.x;
@@ -6497,10 +6551,13 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       if (dragStartPoint) {
         draftPixelsRef.current = currentLayer.pixels.map((r) => [...r]);
         if (activeTool === 'line') {
+          const snappedLineEnd = applyGuideSnap(coords.x, coords.y, e.altKey, dragStartPoint);
+          const lineEndX = Math.round(snappedLineEnd.x);
+          const lineEndY = Math.round(snappedLineEnd.y);
           const segs =
             effSymmetry.enabled && effSymmetry.mode !== 'none'
-              ? computeSymmetricSegments(dragStartPoint.x, dragStartPoint.y, coords.x, coords.y, effSymmetry)
-              : [{ x0: dragStartPoint.x, y0: dragStartPoint.y, x1: coords.x, y1: coords.y }];
+              ? computeSymmetricSegments(dragStartPoint.x, dragStartPoint.y, lineEndX, lineEndY, effSymmetry)
+              : [{ x0: dragStartPoint.x, y0: dragStartPoint.y, x1: lineEndX, y1: lineEndY }];
           for (const seg of segs) {
             drawAdvancedLine(
               seg.x0,
@@ -6518,7 +6575,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             );
           }
         } else if (activeTool === 'rectangle' || activeTool === 'circle') {
-          const snappedShapeEnd = applyGuideSnap(coords.x, coords.y, e.altKey);
+          const snappedShapeEnd = applyGuideSnap(coords.x, coords.y, e.altKey, dragStartPoint);
           let endX = snappedShapeEnd.x;
           let endY = snappedShapeEnd.y;
           // Shift constrains 1:1 perfect square / circle / regular polygon / star
@@ -7156,6 +7213,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         onChangeGuidesConfig={onChangeGuidesConfig}
         onOpenGuidesModal={onOpenGuidesModal}
         onFocusGuidesContext={onFocusGuidesContext}
+        workMode={workMode}
       />
 
       {/* Temporary Spacebar Hand Tool Indicator */}
@@ -7233,7 +7291,9 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             dummiePose.overlayMode === 'canvas' &&
             onChangeDummiePose &&
             (() => {
-              const joints = getEffectivePoseJoints(dummiePose);
+              const perspForDummie = guidesConfig.perspective;
+              const canvasDims = { width, height };
+              const joints = getEffectivePoseJoints(dummiePose, perspForDummie, canvasDims);
               const jointMap = new Map(joints.map((j) => [j.id, j]));
               const totalW = width * zoom;
               const totalH = height * zoom;
@@ -7255,7 +7315,9 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
               const rigH = totalH * dummiePose.canvasScale;
               const offX = dummiePose.canvasX * zoom;
               const offY = dummiePose.canvasY * zoom;
-              const volumes = showVols ? computeDummieVolumes25D(dummiePose, rigW, rigH) : [];
+              const volumes = showVols
+                ? computeDummieVolumes25D(dummiePose, rigW, rigH, perspForDummie, canvasDims)
+                : [];
 
               return (
                 <svg
@@ -7267,17 +7329,11 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
                     const rect = e.currentTarget.getBoundingClientRect();
                     const nx = Math.max(0.02, Math.min(0.98, ((e.clientX - rect.left) / zoom - dummiePose.canvasX) / (width * dummiePose.canvasScale)));
                     const ny = Math.max(0.02, Math.min(0.98, ((e.clientY - rect.top) / zoom - dummiePose.canvasY) / (height * dummiePose.canvasScale)));
-                    const dragged = dummiePose.joints.find((j) => j.id === draggingDummieJointId);
-                    onChangeDummiePose({
-                      ...dummiePose,
-                      joints: dummiePose.joints.map((j) => {
-                        if (j.id === draggingDummieJointId && !j.locked) return { ...j, x: nx, y: ny };
-                        if (dummiePose.modifiers.autoSymmetry && dragged?.mirrorId === j.id && !j.locked) {
-                          return { ...j, x: 1 - nx, y: ny };
-                        }
-                        return j;
-                      }),
-                    });
+                    onChangeDummiePose(
+                      moveDummieJointWithAnchors(dummiePose, draggingDummieJointId, nx, ny, {
+                        altBypass: e.altKey,
+                      })
+                    );
                   }}
                   onPointerUp={() => setDraggingDummieJointId(null)}
                   onPointerLeave={() => setDraggingDummieJointId(null)}
@@ -7377,13 +7433,14 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
                       })}
                     </g>
                   )}
-                  {(showJts || isSimpleSil) &&
+                  {(showJts || isSimpleSil || dummiePose.rigViewEnabled) &&
                     joints.map((j) => {
                       if (!j.parentId) return null;
                       const parent = jointMap.get(j.parentId);
                       if (!parent) return null;
                       const p1 = toPx(parent);
                       const p2 = toPx(j);
+                      const vState = getJointAnchorVisualState(j);
                       return (
                         <line
                           key={`bone-${j.id}`}
@@ -7391,32 +7448,37 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
                           y1={p1.y}
                           x2={p2.x}
                           y2={p2.y}
-                          stroke={dummiePose.overlayColor || '#38bdf8'}
+                          stroke={dummiePose.rigViewEnabled ? getJointAnchorColor(vState) : dummiePose.overlayColor || '#38bdf8'}
                           strokeWidth={Math.max(1.8, (dummiePose.lineWidth || 2.5) * (zoom * 0.12))}
+                          strokeDasharray={vState === 'independent' ? '5 4' : vState === 'partial' ? '8 3' : undefined}
                           strokeLinecap="round"
-                          opacity={isSimpleSil ? 0.4 : 0.85}
+                          opacity={isSimpleSil ? 0.4 : 0.88}
                         />
                       );
                     })}
-                  {showJts &&
+                  {(showJts || dummiePose.rigViewEnabled) &&
                     joints.map((j) => {
                       const p = toPx(j);
                       const isDrag = draggingDummieJointId === j.id;
+                      const vState = getJointAnchorVisualState(j);
+                      const handleColor = getJointAnchorColor(vState);
                       return (
                         <g key={`joint-${j.id}`}>
                           <circle
                             cx={p.x}
                             cy={p.y}
                             r={isDrag ? 7 : 5}
-                            fill={isDrag ? '#fbbf24' : j.id === 'pelvis' ? '#f43f5e' : '#0f172a'}
-                            stroke={isDrag ? '#fff' : '#38bdf8'}
+                            fill={isDrag ? '#fbbf24' : handleColor}
+                            stroke={isDrag ? '#fff' : '#090d16'}
                             strokeWidth={1.8}
                             className="cursor-grab active:cursor-grabbing"
                             onPointerDown={(e) => {
                               e.stopPropagation();
-                              setDraggingDummieJointId(j.id);
+                              if (!j.locked) setDraggingDummieJointId(j.id);
                             }}
-                          />
+                          >
+                            <title>{`${j.label} · ${getJointAnchorLabel(vState)} (Alt + arrastrar = desanclaje temporal)`}</title>
+                          </circle>
                         </g>
                       );
                     })}

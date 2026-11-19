@@ -76,6 +76,8 @@ import {
   Frame, 
   GradientConfig,
   GroundConfig,
+  GuidesConfig,
+  GuidesModalTab,
   Hitbox, 
   HitboxType, 
   Layer, 
@@ -648,6 +650,10 @@ interface RightSidebarProps {
   onOpenFxStudio?: (tab?: 'generator' | 'lab' | 'library', recipe?: EditableFxRecipe | null) => void;
   lastGeneratedFxRecipe?: EditableFxRecipe | null;
   onOpenModeExportModal?: () => void;
+  // Perspective & Guides sync for Stage Mode and Dummie
+  guidesConfig?: GuidesConfig;
+  onChangeGuidesConfig?: (next: GuidesConfig) => void;
+  onOpenGuidesModal?: (tab?: GuidesModalTab) => void;
 }
 
 const PANEL_ICONS: Record<RightPanelId, React.FC<{ className?: string; style?: React.CSSProperties }>> = {
@@ -966,6 +972,9 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
   onOpenFxStudio,
   lastGeneratedFxRecipe = null,
   onOpenModeExportModal,
+  guidesConfig,
+  onChangeGuidesConfig,
+  onOpenGuidesModal,
 }) => {
   const workModeCompositeGrid = useMemo(
     () =>
@@ -2417,6 +2426,10 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                         onCenterAllReferences={onCenterAllReferences}
                         onBringReferenceToFront={onBringReferenceToFront}
                         onActivateMoveReferenceTool={onActivateMoveReferenceTool}
+                        guidesConfig={guidesConfig}
+                        canvasWidth={canvasWidth}
+                        canvasHeight={canvasHeight}
+                        onChangeGuidesConfig={onChangeGuidesConfig}
                       />
                     </div>
                   )}
@@ -3588,6 +3601,9 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                       lastGeneratedFxRecipe={lastGeneratedFxRecipe}
                       activeLayerFxRecipe={layers[currentLayerIndex]?.fxRecipe || null}
                       onOpenExportModal={() => onOpenModeExportModal?.()}
+                      guidesConfig={guidesConfig}
+                      onChangeGuidesConfig={onChangeGuidesConfig}
+                      onOpenGuidesModal={onOpenGuidesModal}
                     />
                   )}
 
@@ -3867,6 +3883,10 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                           onDeleteSavedPose={(id) => onDeleteSavedDummiePose?.(id)}
                           onOpenApplyModal={() => onOpenApplyPoseModal?.()}
                           references={references}
+                          guidesConfig={guidesConfig}
+                          canvasWidth={canvasWidth}
+                          canvasHeight={canvasHeight}
+                          onChangeGuidesConfig={onChangeGuidesConfig}
                         />
                       </div>
                     ) : (

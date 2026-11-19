@@ -2,35 +2,61 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
+  Anchor,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  Compass,
   Download,
+  GitBranch,
   ImagePlus,
+  Link2,
+  Link2Off,
   Lock,
   RotateCcw,
   Save,
   Sliders,
-  Sparkles,
+  Trash2,
   Unlock,
   Upload,
   User,
   Wand2,
 } from 'lucide-react';
 import {
+  DummieAnchorProfile,
   DummieDisplayMode,
   DummieOverlayMode,
   DummiePerspectiveMode,
   DummiePose,
   DummieRigType,
+  GuidesConfig,
   ReferenceItem,
 } from '../types';
 import {
   BUILTIN_POSE_PRESETS,
+  DUMMIE_ANCHOR_SECTIONS,
   DUMMIE_RIG_TEMPLATES,
+  DummieRigTreeNode,
   analyzeDummieBalance,
+  applyAnchorProfileToPose,
   applyPresetToDummiePose,
+  buildDummieRigTree,
   computeDummieVolumes25D,
+  computeSectionAnchorsFromJoints,
+  deleteCustomAnchorProfile,
   generateDummiePoseFromImageDataUrl,
+  getChainScopeOptionsForJoint,
   getEffectivePoseJoints,
+  getJointAnchor,
+  getJointAnchorColor,
+  getJointAnchorLabel,
+  getJointAnchorVisualState,
+  loadSavedAnchorProfiles,
+  moveDummieJointWithAnchors,
+  saveCustomAnchorProfile,
+  toggleSectionAnchors,
+  transformDummieJointWithAnchors,
+  updateJointAnchor,
 } from '../utils/dummieRigEngine';
 import { StudioSlider } from './StudioSlider';
 
@@ -42,6 +68,10 @@ interface DummiePosePanelProps {
   onDeleteSavedPose: (id: string) => void;
   onOpenApplyModal: () => void;
   references?: ReferenceItem[];
+  guidesConfig?: GuidesConfig;
+  canvasWidth?: number;
+  canvasHeight?: number;
+  onChangeGuidesConfig?: (next: GuidesConfig) => void;
 }
 
 const DISPLAY_MODE_OPTIONS: { id: DummieDisplayMode; label: string }[] = [
@@ -60,6 +90,10 @@ export const DummiePosePanel: React.FC<DummiePosePanelProps> = ({
   onDeleteSavedPose,
   onOpenApplyModal,
   references = [],
+  guidesConfig,
+  canvasWidth = 128,
+  canvasHeight = 128,
+  onChangeGuidesConfig,
 }) => {
   const svgRef = useRef<SVGSVGElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -70,19 +104,80 @@ export const DummiePosePanel: React.FC<DummiePosePanelProps> = ({
   const [saveCat, setSaveCat] = useState('Combate');
   const [isGeneratingFromImg, setIsGeneratingFromImg] = useState(false);
 
-  const effectiveJoints = useMemo(() => getEffectivePoseJoints(pose), [pose]);
+  // Anchors & Rig View UI state
+  const [anchorsExpanded, setAnchorsExpanded] = useState<boolean>(true);
+  const [altPressed, setAltPressed] = useState<boolean>(false);
+  const [anchorProfiles, setAnchorProfiles] = useState<DummieAnchorProfile[]>(() =>
+    loadSavedAnchorProfiles()
+  );
+  const [selectedProfileId, setSelectedProfileId] = useState<string>(
+    pose.activeAnchorProfileId || 'profile-human-standard'
+  );
+  const [newProfileName, setNewProfileName] = useState<string>('');
+
+  // Live Alt key monitor for temporary unlinking without altering saved anchor settings
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Alt') setAltPressed(true);
+    };
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.key === 'Alt') setAltPressed(false);
+    };
+    const handleBlur = () => setAltPressed(false);
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('blur', handleBlur);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('blur', handleBlur);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (pose.activeAnchorProfileId) {
+      setSelectedProfileId(pose.activeAnchorProfileId);
+    }
+  }, [pose.activeAnchorProfileId]);
+
+  const activePerspective = guidesConfig?.perspective;
+  const canvasSize = useMemo(
+    () => ({ width: Math.max(16, canvasWidth), height: Math.max(16, canvasHeight) }),
+    [canvasWidth, canvasHeight]
+  );
+
+  const effectiveJoints = useMemo(
+    () => getEffectivePoseJoints(pose, activePerspective, canvasSize),
+    [pose, activePerspective, canvasSize]
+  );
   const selectedJoint = pose.joints.find((j) => j.id === selectedJointId) || null;
   const effectiveSelected = effectiveJoints.find((j) => j.id === selectedJointId) || null;
 
   const w = 240;
   const h = 230;
-  const volumes25D = useMemo(() => computeDummieVolumes25D(pose, w, h), [pose]);
+  const volumes25D = useMemo(
+    () => computeDummieVolumes25D(pose, w, h, activePerspective, canvasSize),
+    [pose, activePerspective, canvasSize]
+  );
   const balanceReport = useMemo(() => analyzeDummieBalance(pose), [pose]);
+  const sectionAnchorMap = useMemo(
+    () => computeSectionAnchorsFromJoints(pose.joints),
+    [pose.joints]
+  );
+  const chainScopeOptions = useMemo(
+    () => getChainScopeOptionsForJoint(selectedJointId, pose.joints),
+    [selectedJointId, pose.joints]
+  );
+  const rigTree = useMemo(
+    () => (pose.rigViewEnabled ? buildDummieRigTree(pose.joints) : []),
+    [pose.rigViewEnabled, pose.joints]
+  );
 
   const displayMode: DummieDisplayMode =
     pose.modifiers.displayMode ||
     (pose.modifiers.skeletonMode ? 'joints_only' : 'joints_and_volumes');
   const perspMode: DummiePerspectiveMode = pose.modifiers.perspectiveMode || 'light';
+  const activeChainScope = pose.chainMoveScope || 'branch';
 
   useEffect(() => {
     if (!draggingJointId) return;
@@ -92,22 +187,11 @@ export const DummiePosePanel: React.FC<DummiePosePanelProps> = ({
       const rect = svg.getBoundingClientRect();
       const nx = Math.max(0.04, Math.min(0.96, (e.clientX - rect.left) / rect.width));
       const ny = Math.max(0.04, Math.min(0.96, (e.clientY - rect.top) / rect.height));
-      onChangePose({
-        ...pose,
-        joints: pose.joints.map((j) => {
-          if (j.id === draggingJointId && !j.locked) {
-            return { ...j, x: nx, y: ny };
-          }
-          if (
-            pose.modifiers.autoSymmetry &&
-            j.mirrorId === draggingJointId &&
-            !j.locked
-          ) {
-            return { ...j, x: Math.max(0.04, Math.min(0.96, 1 - nx)), y: ny };
-          }
-          return j;
-        }),
-      });
+      onChangePose(
+        moveDummieJointWithAnchors(pose, draggingJointId, nx, ny, {
+          altBypass: e.altKey,
+        })
+      );
     };
     const handleUp = () => setDraggingJointId(null);
     window.addEventListener('pointermove', handleMove);
@@ -118,14 +202,15 @@ export const DummiePosePanel: React.FC<DummiePosePanelProps> = ({
     };
   }, [draggingJointId, pose, onChangePose]);
 
-  const updateSelectedJointProp = (patch: Partial<{ rx: number; ry: number; rz: number; depth: number; locked: boolean }>) => {
+  const updateSelectedJointProp = (
+    patch: Partial<{ rx: number; ry: number; rz: number; depth: number; scale: number; locked: boolean }>
+  ) => {
     if (!selectedJoint) return;
-    onChangePose({
-      ...pose,
-      joints: pose.joints.map((j) =>
-        j.id === selectedJoint.id ? { ...j, ...patch } : j
-      ),
-    });
+    onChangePose(
+      transformDummieJointWithAnchors(pose, selectedJoint.id, patch, {
+        altBypass: altPressed,
+      })
+    );
   };
 
   const handleExportPose = () => {
@@ -173,6 +258,9 @@ export const DummiePosePanel: React.FC<DummiePosePanelProps> = ({
           overlayColor: pose.overlayColor,
           overlayOpacity: pose.overlayOpacity,
           lineWidth: pose.lineWidth,
+          respectPerspective: pose.respectPerspective,
+          chainMoveScope: pose.chainMoveScope,
+          rigViewEnabled: pose.rigViewEnabled,
           modifiers: {
             ...nextPose.modifiers,
             perspectiveMode: perspMode,
@@ -203,6 +291,9 @@ export const DummiePosePanel: React.FC<DummiePosePanelProps> = ({
       overlayColor: pose.overlayColor,
       overlayOpacity: pose.overlayOpacity,
       lineWidth: pose.lineWidth,
+      respectPerspective: pose.respectPerspective,
+      chainMoveScope: pose.chainMoveScope,
+      rigViewEnabled: pose.rigViewEnabled,
       modifiers: {
         ...nextPose.modifiers,
         perspectiveMode: perspMode,
@@ -217,10 +308,118 @@ export const DummiePosePanel: React.FC<DummiePosePanelProps> = ({
     setIsGeneratingFromImg(false);
   };
 
+  const handleApplyAnchorProfile = (profileId: string) => {
+    const prof = anchorProfiles.find((p) => p.id === profileId);
+    if (!prof) return;
+    setSelectedProfileId(prof.id);
+    onChangePose(applyAnchorProfileToPose(pose, prof));
+  };
+
+  const handleSaveCurrentAnchorProfile = () => {
+    const trimmed = newProfileName.trim();
+    if (!trimmed) return;
+    const jointAnchors: DummieAnchorProfile['jointAnchors'] = {};
+    pose.joints.forEach((j) => {
+      jointAnchors[j.id] = getJointAnchor(j);
+    });
+    const created: DummieAnchorProfile = {
+      id: `profile-custom-${Date.now()}`,
+      name: trimmed,
+      rigType: pose.rigType,
+      description: `Perfil personalizado para ${pose.rigType}`,
+      builtIn: false,
+      sectionAnchors: computeSectionAnchorsFromJoints(pose.joints),
+      jointAnchors,
+    };
+    const nextList = saveCustomAnchorProfile(created);
+    setAnchorProfiles(nextList);
+    setSelectedProfileId(created.id);
+    setNewProfileName('');
+    onChangePose({ ...pose, activeAnchorProfileId: created.id });
+  };
+
+  const handleDeleteAnchorProfile = (id: string) => {
+    const nextList = deleteCustomAnchorProfile(id);
+    setAnchorProfiles(nextList);
+    if (selectedProfileId === id) {
+      setSelectedProfileId(nextList[0]?.id || 'profile-human-standard');
+    }
+  };
+
+  const renderRigTreeNode = (node: DummieRigTreeNode): React.ReactNode => {
+    const { joint, depth, visualState, children } = node;
+    const isSel = joint.id === selectedJointId;
+    const anchor = getJointAnchor(joint);
+    const stateColor = getJointAnchorColor(visualState);
+    const stateLabel = getJointAnchorLabel(visualState);
+    return (
+      <div key={joint.id} className="flex flex-col">
+        <div
+          onClick={() => setSelectedJointId(joint.id)}
+          className="flex items-center justify-between gap-1 px-1.5 py-0.5 rounded cursor-pointer transition-colors hover:bg-white/5"
+          style={{
+            paddingLeft: `${6 + depth * 10}px`,
+            backgroundColor: isSel ? 'rgba(251, 191, 36, 0.14)' : 'transparent',
+            borderLeft: depth > 0 ? '1px solid rgba(148,163,184,0.22)' : 'none',
+          }}
+        >
+          <div className="flex items-center gap-1.5 min-w-0">
+            {depth > 0 && <span className="text-[9px] opacity-45 font-mono">└</span>}
+            <span
+              className="w-2 h-2 rounded-full shrink-0"
+              style={{ backgroundColor: stateColor }}
+              title={stateLabel}
+            />
+            <span className="truncate font-medium text-[10px]" style={{ color: isSel ? '#fde68a' : 'var(--studio-text)' }}>
+              {joint.label}
+            </span>
+          </div>
+          <div className="flex items-center gap-1 shrink-0">
+            <span
+              className="text-[9px] font-mono px-1 rounded"
+              style={{ color: stateColor, backgroundColor: 'rgba(15, 23, 42, 0.65)' }}
+            >
+              {visualState === 'anchored'
+                ? 'Anclada'
+                : visualState === 'partial'
+                ? 'Parcial'
+                : visualState === 'locked'
+                ? 'Fija'
+                : 'Indep.'}
+            </span>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onChangePose(updateJointAnchor(pose, joint.id, { anchored: !anchor.anchored }));
+              }}
+              className="p-0.5 rounded hover:bg-white/10"
+              title={anchor.anchored ? 'Desanclar pieza (independiente)' : 'Anclar pieza al rig'}
+            >
+              {anchor.anchored ? (
+                <Link2 className="w-3 h-3 text-emerald-400" />
+              ) : (
+                <Link2Off className="w-3 h-3 text-rose-400" />
+              )}
+            </button>
+          </div>
+        </div>
+        {children.length > 0 && (
+          <div className="flex flex-col">{children.map((child) => renderRigTreeNode(child))}</div>
+        )}
+      </div>
+    );
+  };
+
   const showVolumes = displayMode !== 'joints_only';
   const showJointHandles = displayMode === 'joints_only' || displayMode === 'joints_and_volumes';
   const isSolidSilhouette = displayMode === 'solid_silhouette';
   const isSimpleSilhouette = displayMode === 'simple_silhouette';
+
+  const selectedJointAnchor = selectedJoint ? getJointAnchor(selectedJoint) : null;
+  const selectedJointState = selectedJoint ? getJointAnchorVisualState(selectedJoint) : null;
+  const selectedProfileObj = anchorProfiles.find((p) => p.id === selectedProfileId) || null;
+  const isPerspectiveSyncActive = Boolean(pose.respectPerspective && activePerspective?.enabled);
 
   return (
     <div className="flex flex-col gap-2 text-[11px] select-none">
@@ -255,6 +454,9 @@ export const DummiePosePanel: React.FC<DummiePosePanelProps> = ({
               overlayMode: pose.overlayMode,
               overlayColor: pose.overlayColor,
               overlayOpacity: pose.overlayOpacity,
+              respectPerspective: pose.respectPerspective,
+              chainMoveScope: pose.chainMoveScope,
+              rigViewEnabled: pose.rigViewEnabled,
               modifiers: {
                 ...next.modifiers,
                 perspectiveMode: perspMode,
@@ -305,7 +507,7 @@ export const DummiePosePanel: React.FC<DummiePosePanelProps> = ({
             borderColor: 'var(--studio-border-strong)',
             color: 'var(--studio-accent)',
           }}
-          title="Analiza la silueta de cualquier imagen o foto y genera una pose editable"
+          title="Analiza la silueta de cualquier imagen y configura pose + anclajes automáticamente"
         >
           <ImagePlus className="w-3.5 h-3.5" />
           <span>{isGeneratingFromImg ? 'Analizando silueta...' : 'Generar Dummie desde Imagen'}</span>
@@ -325,7 +527,7 @@ export const DummiePosePanel: React.FC<DummiePosePanelProps> = ({
               borderColor: 'var(--studio-border-strong)',
               color: 'var(--studio-text)',
             }}
-            title="Generar Dummie directamente desde una referencia cargada"
+            title="Generar Dummie y anclajes automáticos desde una referencia cargada"
           >
             <option value="" disabled>
               Desde Ref...
@@ -351,13 +553,26 @@ export const DummiePosePanel: React.FC<DummiePosePanelProps> = ({
           className="px-2 py-1 border-b flex items-center justify-between text-[10px]"
           style={{ backgroundColor: 'var(--studio-bg-bar)', borderColor: 'var(--studio-border)' }}
         >
-          <span className="font-mono font-bold truncate">
-            {pose.name} · 2.5D
+          <span className="font-mono font-bold truncate flex items-center gap-1.5">
+            <span>{pose.name} · 2.5D</span>
+            {isPerspectiveSyncActive && (
+              <span className="px-1 rounded bg-sky-500/20 text-sky-300 text-[9px] font-mono">
+                Persp. Activa
+              </span>
+            )}
           </span>
           <div className="flex items-center gap-1">
             <button
               type="button"
-              onClick={() => onChangePose(applyPresetToDummiePose(pose.rigType, 'idle'))}
+              onClick={() => {
+                const reset = applyPresetToDummiePose(pose.rigType, 'idle');
+                onChangePose({
+                  ...reset,
+                  respectPerspective: pose.respectPerspective,
+                  chainMoveScope: pose.chainMoveScope,
+                  rigViewEnabled: pose.rigViewEnabled,
+                });
+              }}
               title="Restablecer pose neutral"
               className="p-0.5 rounded hover:opacity-80"
             >
@@ -381,6 +596,24 @@ export const DummiePosePanel: React.FC<DummiePosePanelProps> = ({
             </button>
           </div>
         </div>
+
+        {/* Live Alt Temporary Unlink Banner */}
+        {altPressed && (
+          <div
+            className="px-2 py-1 border-b text-[10px] font-semibold flex items-center justify-between"
+            style={{
+              backgroundColor: 'rgba(239, 68, 68, 0.16)',
+              borderColor: 'rgba(239, 68, 68, 0.45)',
+              color: '#fca5a5',
+            }}
+          >
+            <span className="flex items-center gap-1">
+              <Link2Off className="w-3 h-3" />
+              Alt activo: Desanclaje temporal
+            </span>
+            <span className="text-[9px] font-mono opacity-85">Sin alterar anclajes</span>
+          </div>
+        )}
 
         <svg
           ref={svgRef}
@@ -525,12 +758,14 @@ export const DummiePosePanel: React.FC<DummiePosePanelProps> = ({
               return null;
             })}
 
-          {/* Skeleton / Articulation Bones */}
-          {(showJointHandles || displayMode === 'simple_silhouette') &&
+          {/* Skeleton / Articulation Bones (dashed if child is independent!) */}
+          {(showJointHandles || displayMode === 'simple_silhouette' || pose.rigViewEnabled) &&
             effectiveJoints.map((j) => {
               if (!j.parentId) return null;
               const parent = effectiveJoints.find((p) => p.id === j.parentId);
               if (!parent) return null;
+              const vState = getJointAnchorVisualState(j);
+              const boneColor = pose.rigViewEnabled ? getJointAnchorColor(vState) : pose.overlayColor;
               return (
                 <line
                   key={`bone-${j.id}`}
@@ -538,10 +773,17 @@ export const DummiePosePanel: React.FC<DummiePosePanelProps> = ({
                   y1={parent.y * h}
                   x2={j.x * w}
                   y2={j.y * h}
-                  stroke={pose.overlayColor}
-                  strokeWidth={displayMode === 'joints_only' ? 1.6 : Math.max(1.2, pose.lineWidth * 0.7)}
+                  stroke={boneColor}
+                  strokeWidth={
+                    pose.rigViewEnabled
+                      ? 1.9
+                      : displayMode === 'joints_only'
+                      ? 1.6
+                      : Math.max(1.2, pose.lineWidth * 0.7)
+                  }
+                  strokeDasharray={vState === 'independent' ? '3 3' : vState === 'partial' ? '5 2' : undefined}
                   strokeLinecap="round"
-                  opacity={displayMode === 'simple_silhouette' ? 0.45 : 0.85}
+                  opacity={displayMode === 'simple_silhouette' ? 0.45 : 0.88}
                 />
               );
             })}
@@ -581,10 +823,12 @@ export const DummiePosePanel: React.FC<DummiePosePanelProps> = ({
             </g>
           )}
 
-          {/* Interactive Joint Handles */}
-          {showJointHandles &&
+          {/* Interactive Color-Coded Joint Handles (Verde = Anclada, Amarillo = Parcial, Rojo = Independiente, Slate = Fija) */}
+          {(showJointHandles || pose.rigViewEnabled) &&
             effectiveJoints.map((j) => {
               const isSelected = j.id === selectedJointId;
+              const vState = getJointAnchorVisualState(j);
+              const handleColor = getJointAnchorColor(vState);
               return (
                 <g
                   key={j.id}
@@ -595,29 +839,101 @@ export const DummiePosePanel: React.FC<DummiePosePanelProps> = ({
                   }}
                   className="cursor-grab active:cursor-grabbing"
                 >
+                  {isSelected && (
+                    <circle
+                      cx={j.x * w}
+                      cy={j.y * h}
+                      r={7.5}
+                      fill="none"
+                      stroke="#fbbf24"
+                      strokeWidth={1.6}
+                    />
+                  )}
                   <circle
                     cx={j.x * w}
                     cy={j.y * h}
-                    r={isSelected ? 5 : 3.6}
-                    fill={j.locked ? '#ef4444' : isSelected ? '#fbbf24' : '#ffffff'}
+                    r={isSelected ? 4.8 : 3.8}
+                    fill={handleColor}
                     stroke="#090d16"
                     strokeWidth={1.3}
-                  />
+                  >
+                    <title>{`${j.label} · ${getJointAnchorLabel(vState)} (Alt + arrastrar = desanclaje temporal)`}</title>
+                  </circle>
                 </g>
               );
             })}
         </svg>
 
-        {/* Active Joint 2.5D Rotation & Depth Controls */}
+        {/* Visual Anchor State Legend */}
+        <div
+          className="px-2 py-1 border-t flex items-center justify-between gap-1 text-[9px] font-mono"
+          style={{ backgroundColor: 'var(--studio-bg-card)', borderColor: 'var(--studio-border)', color: 'var(--studio-text-muted)' }}
+        >
+          <div className="flex items-center gap-2">
+            <span className="flex items-center gap-1">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" />
+              Anclada
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="w-2 h-2 rounded-full bg-yellow-400 inline-block" />
+              Parcial
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="w-2 h-2 rounded-full bg-rose-500 inline-block" />
+              Indep.
+            </span>
+          </div>
+          <span className="opacity-80" title="Mantén pulsada la tecla Alt al arrastrar cualquier articulación">
+            Alt = Libre temp.
+          </span>
+        </div>
+
+        {/* Contextual Chain Move Scope Bar (Anclaje Automático de Cadenas) */}
+        <div
+          className="px-2 py-1.5 border-t flex flex-col gap-1 text-[10px]"
+          style={{ backgroundColor: 'var(--studio-bg-elevated)', borderColor: 'var(--studio-border)' }}
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-[9px] uppercase tracking-wider font-bold" style={{ color: 'var(--studio-text-muted)' }}>
+              Alcance de Arrastre (Cadena)
+            </span>
+            <span className="text-[9px] font-mono text-sky-300">
+              {selectedJoint ? selectedJoint.label : 'Sin selección'}
+            </span>
+          </div>
+          <div className="grid grid-cols-2 gap-1">
+            {chainScopeOptions.map((opt) => {
+              const active = activeChainScope === opt.scope;
+              return (
+                <button
+                  key={opt.scope}
+                  type="button"
+                  onClick={() => onChangePose({ ...pose, chainMoveScope: opt.scope })}
+                  className="px-1.5 py-1 rounded border text-[9px] font-semibold truncate transition-colors"
+                  style={{
+                    backgroundColor: active ? 'var(--studio-accent)' : 'var(--studio-bg-card)',
+                    color: active ? 'var(--studio-accent-text)' : 'var(--studio-text)',
+                    borderColor: active ? 'var(--studio-accent)' : 'var(--studio-border-strong)',
+                  }}
+                  title={`Mover ${opt.label} al arrastrar esta pieza`}
+                >
+                  {opt.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Active Joint 2.5D Rotation, Depth & Local Scale Controls */}
         {selectedJoint && (
           <div
             className="px-2 py-1.5 border-t flex flex-col gap-1 text-[10px]"
             style={{ backgroundColor: 'var(--studio-bg-bar)', borderColor: 'var(--studio-border)' }}
           >
             <div className="flex items-center justify-between gap-2">
-              <span className="font-mono font-bold truncate">
-                <User className="w-3 h-3 inline mr-1 opacity-70" />
-                {selectedJoint.label}
+              <span className="font-mono font-bold truncate flex items-center gap-1">
+                <User className="w-3 h-3 opacity-70" />
+                <span>{selectedJoint.label}</span>
               </span>
               <button
                 type="button"
@@ -681,6 +997,275 @@ export const DummiePosePanel: React.FC<DummiePosePanelProps> = ({
                 formatValue={(v) => v.toFixed(2)}
                 onChange={(v) => updateSelectedJointProp({ depth: v })}
               />
+            </div>
+
+            <StudioSlider
+              variant="panel"
+              label="Escala Local de Pieza"
+              value={selectedJoint.scale ?? 1}
+              min={0.6}
+              max={1.5}
+              step={0.05}
+              unit="×"
+              defaultValue={1}
+              formatValue={(v) => v.toFixed(2)}
+              accentColor="#a855f7"
+              onChange={(v) => updateSelectedJointProp({ scale: v })}
+            />
+          </div>
+        )}
+      </div>
+
+      {/* ===================== ANCLAJES & MODO RIG (RIG VIEW) ===================== */}
+      <div
+        className="rounded-lg border overflow-hidden flex flex-col"
+        style={{ backgroundColor: 'var(--studio-bg-card)', borderColor: 'var(--studio-border-strong)' }}
+      >
+        <button
+          type="button"
+          onClick={() => setAnchorsExpanded((v) => !v)}
+          className="px-2.5 py-1.5 flex items-center justify-between text-[11px] font-bold hover:bg-white/5"
+          style={{ backgroundColor: 'var(--studio-bg-bar)', borderBottom: anchorsExpanded ? '1px solid var(--studio-border)' : 'none' }}
+        >
+          <span className="flex items-center gap-1.5">
+            {anchorsExpanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+            <Anchor className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Anclajes del Rig</span>
+          </span>
+          <span className="text-[9px] font-mono opacity-75">
+            {pose.rigViewEnabled ? 'Rig View ON' : 'Jerarquía'}
+          </span>
+        </button>
+
+        {anchorsExpanded && (
+          <div className="p-2 flex flex-col gap-2 text-[10px]">
+            {/* Active Joint Anchor & Partial Links */}
+            {selectedJoint && selectedJointAnchor && selectedJointState && (
+              <div
+                className="p-2 rounded border flex flex-col gap-1.5"
+                style={{ backgroundColor: 'var(--studio-bg-elevated)', borderColor: 'var(--studio-border)' }}
+              >
+                <div className="flex items-center justify-between gap-1">
+                  <span className="font-bold truncate">{selectedJoint.label}</span>
+                  <span
+                    className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold"
+                    style={{
+                      color: getJointAnchorColor(selectedJointState),
+                      backgroundColor: 'rgba(15, 23, 42, 0.7)',
+                    }}
+                  >
+                    {getJointAnchorLabel(selectedJointState)}
+                  </span>
+                </div>
+
+                {/* Primary Anchored vs Independent Toggle */}
+                <div className="grid grid-cols-2 gap-1">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onChangePose(updateJointAnchor(pose, selectedJoint.id, { anchored: true }))
+                    }
+                    className="py-1 px-1.5 rounded border font-semibold flex items-center justify-center gap-1"
+                    style={{
+                      backgroundColor: selectedJointAnchor.anchored
+                        ? 'rgba(34, 197, 94, 0.18)'
+                        : 'var(--studio-bg-card)',
+                      borderColor: selectedJointAnchor.anchored ? '#22c55e' : 'var(--studio-border)',
+                      color: selectedJointAnchor.anchored ? '#86efac' : 'var(--studio-text-muted)',
+                    }}
+                  >
+                    <Link2 className="w-3 h-3" />
+                    <span>Anclada</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onChangePose(updateJointAnchor(pose, selectedJoint.id, { anchored: false }))
+                    }
+                    className="py-1 px-1.5 rounded border font-semibold flex items-center justify-center gap-1"
+                    style={{
+                      backgroundColor: !selectedJointAnchor.anchored
+                        ? 'rgba(239, 68, 68, 0.18)'
+                        : 'var(--studio-bg-card)',
+                      borderColor: !selectedJointAnchor.anchored ? '#ef4444' : 'var(--studio-border)',
+                      color: !selectedJointAnchor.anchored ? '#fca5a5' : 'var(--studio-text-muted)',
+                    }}
+                  >
+                    <Link2Off className="w-3 h-3" />
+                    <span>Independiente</span>
+                  </button>
+                </div>
+
+                {/* Partial Anchors: Position / Rotation / Scale */}
+                <div className="flex flex-col gap-1 pt-1 border-t" style={{ borderColor: 'var(--studio-border)' }}>
+                  <span className="text-[9px] uppercase tracking-wider opacity-70 font-semibold">
+                    Anclajes Parciales
+                  </span>
+                  <div className="grid grid-cols-1 gap-1">
+                    {(
+                      [
+                        ['linkPosition', 'Posición vinculada'],
+                        ['linkRotation', 'Rotación vinculada'],
+                        ['linkScale', 'Escala vinculada'],
+                      ] as const
+                    ).map(([field, label]) => (
+                      <label key={field} className="flex items-center gap-1.5 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={selectedJointAnchor[field]}
+                          onChange={(e) =>
+                            onChangePose(
+                              updateJointAnchor(pose, selectedJoint.id, { [field]: e.target.checked })
+                            )
+                          }
+                          className="accent-yellow-400"
+                        />
+                        <span>{label}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Control por Secciones (7 Anatomical Groups) */}
+            <div className="flex flex-col gap-1">
+              <span className="text-[9px] uppercase tracking-wider font-bold" style={{ color: 'var(--studio-text-muted)' }}>
+                Control por Secciones
+              </span>
+              <div className="grid grid-cols-2 gap-1">
+                {DUMMIE_ANCHOR_SECTIONS.map((sec) => {
+                  const isAnchored = sectionAnchorMap[sec.id] ?? true;
+                  return (
+                    <label
+                      key={sec.id}
+                      className="flex items-center gap-1.5 px-1.5 py-1 rounded border cursor-pointer hover:bg-white/5"
+                      style={{
+                        borderColor: isAnchored ? 'rgba(34,197,94,0.4)' : 'rgba(239,68,68,0.4)',
+                        backgroundColor: 'var(--studio-bg-elevated)',
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isAnchored}
+                        onChange={(e) =>
+                          onChangePose(toggleSectionAnchors(pose, sec.id, e.target.checked))
+                        }
+                        className="accent-emerald-500"
+                      />
+                      <span className="truncate text-[10px]">{sec.label}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Perfiles de Anclaje */}
+            <div
+              className="p-2 rounded border flex flex-col gap-1.5"
+              style={{ backgroundColor: 'var(--studio-bg-elevated)', borderColor: 'var(--studio-border)' }}
+            >
+              <span className="text-[9px] uppercase tracking-wider font-bold" style={{ color: 'var(--studio-text-muted)' }}>
+                Perfiles de Anclaje
+              </span>
+              <div className="flex items-center gap-1">
+                <select
+                  value={selectedProfileId}
+                  onChange={(e) => handleApplyAnchorProfile(e.target.value)}
+                  className="flex-1 px-1.5 py-1 rounded border text-[10px]"
+                  style={{
+                    backgroundColor: 'var(--studio-bg-card)',
+                    borderColor: 'var(--studio-border-strong)',
+                    color: 'var(--studio-text)',
+                  }}
+                >
+                  {anchorProfiles.map((prof) => (
+                    <option key={prof.id} value={prof.id}>
+                      {prof.builtIn ? prof.name : `★ ${prof.name}`}
+                    </option>
+                  ))}
+                </select>
+                {selectedProfileObj && !selectedProfileObj.builtIn && (
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteAnchorProfile(selectedProfileObj.id)}
+                    className="p-1 rounded border text-rose-400 hover:bg-rose-500/15"
+                    style={{ borderColor: 'var(--studio-border-strong)' }}
+                    title="Eliminar perfil personalizado"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+              {selectedProfileObj && (
+                <p className="text-[9px] leading-snug opacity-75">{selectedProfileObj.description}</p>
+              )}
+              <div className="flex items-center gap-1 pt-0.5">
+                <input
+                  type="text"
+                  value={newProfileName}
+                  onChange={(e) => setNewProfileName(e.target.value)}
+                  placeholder="Guardar perfil de anclaje..."
+                  className="flex-1 px-1.5 py-0.5 rounded border text-[10px]"
+                  style={{
+                    backgroundColor: 'var(--studio-bg-card)',
+                    borderColor: 'var(--studio-border-strong)',
+                    color: 'var(--studio-text)',
+                  }}
+                />
+                <button
+                  type="button"
+                  disabled={!newProfileName.trim()}
+                  onClick={handleSaveCurrentAnchorProfile}
+                  className="px-2 py-0.5 rounded border font-semibold disabled:opacity-40"
+                  style={{
+                    backgroundColor: 'var(--studio-accent)',
+                    color: 'var(--studio-accent-text)',
+                    borderColor: 'var(--studio-accent)',
+                  }}
+                  title="Guardar configuración actual de anclajes"
+                >
+                  <Save className="w-3 h-3" />
+                </button>
+              </div>
+            </div>
+
+            {/* Modo Rig (Rig View) Hierarchy Tree */}
+            <div className="flex flex-col gap-1.5">
+              <button
+                type="button"
+                onClick={() =>
+                  onChangePose({ ...pose, rigViewEnabled: !pose.rigViewEnabled })
+                }
+                className="w-full py-1 px-2 rounded border font-semibold flex items-center justify-between hover:bg-white/5"
+                style={{
+                  backgroundColor: pose.rigViewEnabled
+                    ? 'rgba(56, 189, 248, 0.16)'
+                    : 'var(--studio-bg-elevated)',
+                  borderColor: pose.rigViewEnabled ? '#38bdf8' : 'var(--studio-border-strong)',
+                  color: pose.rigViewEnabled ? '#7dd3fc' : 'var(--studio-text)',
+                }}
+              >
+                <span className="flex items-center gap-1.5">
+                  <GitBranch className="w-3.5 h-3.5" />
+                  <span>Modo Rig (Rig View · Jerarquía)</span>
+                </span>
+                <span className="font-mono text-[9px]">
+                  {pose.rigViewEnabled ? 'ACTIVO' : 'OFF'}
+                </span>
+              </button>
+
+              {pose.rigViewEnabled && (
+                <div
+                  className="max-h-44 overflow-y-auto rounded border p-1 flex flex-col gap-0.5"
+                  style={{
+                    backgroundColor: 'var(--studio-bg-canvas)',
+                    borderColor: 'var(--studio-border-strong)',
+                  }}
+                >
+                  {rigTree.map((root) => renderRigTreeNode(root))}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -764,6 +1349,36 @@ export const DummiePosePanel: React.FC<DummiePosePanelProps> = ({
             </select>
           </label>
         </div>
+
+        {/* Respect Active Canvas Perspective Guides Toggle */}
+        <label
+          className="flex items-center justify-between gap-1.5 px-2 py-1 rounded border cursor-pointer text-[10px]"
+          style={{
+            backgroundColor: pose.respectPerspective
+              ? 'rgba(56, 189, 248, 0.12)'
+              : 'var(--studio-bg-elevated)',
+            borderColor: pose.respectPerspective
+              ? 'rgba(56, 189, 248, 0.45)'
+              : 'var(--studio-border)',
+          }}
+        >
+          <span className="flex items-center gap-1.5 font-semibold">
+            <Compass className="w-3.5 h-3.5 text-sky-400" />
+            <span>Seguir Perspectiva del Escenario</span>
+          </span>
+          <input
+            type="checkbox"
+            checked={Boolean(pose.respectPerspective)}
+            onChange={(e) => {
+              const enabled = e.target.checked;
+              onChangePose({ ...pose, respectPerspective: enabled });
+              if (guidesConfig && onChangeGuidesConfig) {
+                onChangeGuidesConfig({ ...guidesConfig, dummieFollowPerspective: enabled });
+              }
+            }}
+            className="accent-sky-400"
+          />
+        </label>
 
         {/* Overlay Placement */}
         <div className="flex items-center justify-between gap-1 text-[10px]">
@@ -969,6 +1584,9 @@ export const DummiePosePanel: React.FC<DummiePosePanelProps> = ({
                   overlayColor: pose.overlayColor,
                   overlayOpacity: pose.overlayOpacity,
                   lineWidth: pose.lineWidth,
+                  respectPerspective: pose.respectPerspective,
+                  chainMoveScope: pose.chainMoveScope,
+                  rigViewEnabled: pose.rigViewEnabled,
                   modifiers: {
                     ...next.modifiers,
                     perspectiveMode: perspMode,

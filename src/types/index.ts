@@ -1117,6 +1117,42 @@ export type DummieDisplayMode =
   | 'solid_silhouette';
 export type DummiePerspectiveMode = 'off' | 'light' | 'dynamic';
 
+export type DummieAnchorSection =
+  | 'head_neck'
+  | 'arm_left'
+  | 'arm_right'
+  | 'torso'
+  | 'leg_left'
+  | 'leg_right'
+  | 'tail';
+
+export interface DummieJointAnchor {
+  anchored: boolean;
+  linkPosition: boolean;
+  linkRotation: boolean;
+  linkScale: boolean;
+}
+
+export type DummieAnchorVisualState = 'anchored' | 'partial' | 'independent' | 'locked';
+
+export type DummieChainMoveScope =
+  | 'piece'
+  | 'branch'
+  | 'upper_body'
+  | 'lower_body'
+  | 'full_body';
+
+export interface DummieAnchorProfile {
+  id: string;
+  name: string;
+  rigType: DummieRigType;
+  description: string;
+  builtIn?: boolean;
+  sectionAnchors: Record<DummieAnchorSection, boolean>;
+  jointAnchors: Record<string, DummieJointAnchor>;
+  createdAt?: string;
+}
+
 export interface DummieJoint {
   id: string;
   label: string;
@@ -1127,7 +1163,9 @@ export interface DummieJoint {
   ry?: number; // yaw (-90..90 deg)
   rz?: number; // roll (-180..180 deg)
   depth?: number; // Z depth offset (-1..1)
+  scale?: number; // per-joint local scale multiplier (0.5..1.8)
   locked?: boolean;
+  anchor?: DummieJointAnchor;
   mirrorId?: string;
   radius?: number;
   group: 'head' | 'torso' | 'arm_l' | 'arm_r' | 'leg_l' | 'leg_r' | 'extra';
@@ -1168,6 +1206,16 @@ export interface DummiePose {
   canvasX: number; // offset over main canvas
   canvasY: number;
   canvasScale: number;
+  /** Contextual chain move scope (piece / branch / upper_body / lower_body / full_body) */
+  chainMoveScope?: DummieChainMoveScope;
+  /** Visual Rig hierarchy tree mode */
+  rigViewEnabled?: boolean;
+  /** Respect active perspective guides (auto-scale & ground depth alignment) */
+  respectPerspective?: boolean;
+  /** Section-level anchor toggles */
+  sectionAnchors?: Record<DummieAnchorSection, boolean>;
+  /** Currently active anchor profile ID */
+  activeAnchorProfileId?: string;
 }
 
 export type DummieApplyTarget =
@@ -1303,6 +1351,138 @@ export type GuideOrientation = 'horizontal' | 'vertical';
 
 export type GuidePresetKind = 'horizon' | 'hud' | 'character' | 'stage';
 
+export type GuidesModalTab =
+  | 'perspective'
+  | 'floor_stage'
+  | 'camera'
+  | 'groups'
+  | 'presets'
+  | 'exact'
+  | 'list';
+
+export type PerspectiveGuideType =
+  | '1point'
+  | '2point'
+  | '3point'
+  | 'curvilinear'
+  | 'isometric'
+  | 'dimetric'
+  | 'trimetric';
+
+export type ScenarioGuidePresetId =
+  | 'fighting'
+  | 'beatemup'
+  | 'platformer'
+  | 'rpg'
+  | 'visual_novel';
+
+export interface VanishingPoint {
+  id: string;
+  label: string;
+  /** Canvas pixel coordinates — may be negative or exceed canvas dimensions (outside canvas) */
+  x: number;
+  y: number;
+  locked: boolean;
+  visible: boolean;
+  color?: string;
+}
+
+export interface AutoFloorGridConfig {
+  enabled: boolean;
+  /** Spacing in canvas pixels along ground baseline */
+  spacing: number;
+  /** Radial/column subdivisions (3..28) */
+  density: number;
+  color: string;
+  opacity: number; // 0.1..1
+  /** Floor plane bottom reference as fraction of canvas height (0.6..1.05) */
+  floorYRatio: number;
+  /** Horizontal receding depth subdivisions */
+  depthRows: number;
+}
+
+export interface PerspectiveGuidesConfig {
+  enabled: boolean;
+  type: PerspectiveGuideType;
+  vanishingPoints: VanishingPoint[];
+  /** Horizon line Y in canvas pixels (can sit outside canvas) */
+  horizonY: number;
+  horizonLocked: boolean;
+  showHorizon: boolean;
+  showRays: boolean;
+  rayDensity: number; // 4..32 rays per VP
+  showConstructionGrid: boolean;
+  color: string;
+  thickness: number; // 1..4
+  opacity: number; // 0.1..1
+  /** Angles in degrees for isometric/dimetric/trimetric grids */
+  isoAngleLeft: number;
+  isoAngleRight: number;
+  isoCellSize: number;
+  floorGrid: AutoFloorGridConfig;
+  activeScenarioPreset?: ScenarioGuidePresetId | null;
+  configName?: string;
+}
+
+export interface CameraGuidesConfig {
+  enabled: boolean;
+  showVisibleArea: boolean;
+  visibleAreaInsetPct: number;
+  showSafeMargins: boolean;
+  safeMarginPct: number;
+  showCombatZone: boolean;
+  combatZoneInsetXPct: number;
+  combatZoneTopPct: number;
+  combatZoneFloorPct: number;
+  showScrollLimits: boolean;
+  scrollLimitInsetPct: number;
+  showCameraCenter: boolean;
+  color: string;
+  thickness: number;
+  opacity: number;
+}
+
+export interface StageDepthGuidesConfig {
+  enabled: boolean;
+  autoShowInStageMode: boolean;
+  showHorizon: boolean;
+  horizonPct: number;
+  showGroundPlane: boolean;
+  groundPlanePct: number;
+  showVisualDepth: boolean;
+  showFarBackground: boolean;
+  farBgPct: number;
+  showMidBackground: boolean;
+  midBgPct: number;
+  showForeground: boolean;
+  foregroundPct: number;
+  color: string;
+  thickness: number;
+  opacity: number;
+}
+
+export interface GuideGroup {
+  id: string;
+  name: string;
+  visible: boolean;
+  locked: boolean;
+  color: string;
+  thickness: number;
+  opacity: number;
+}
+
+export interface SavedPerspectiveConfiguration {
+  id: string;
+  name: string;
+  category: string;
+  description?: string;
+  builtIn?: boolean;
+  createdAt: string;
+  perspective: PerspectiveGuidesConfig;
+  cameraGuides?: CameraGuidesConfig;
+  stageDepth?: StageDepthGuidesConfig;
+}
+
 export interface CanvasGuide {
   id: string;
   orientation: GuideOrientation;
@@ -1310,6 +1490,9 @@ export interface CanvasGuide {
   position: number;
   label?: string;
   color?: string;
+  thickness?: number;
+  opacity?: number;
+  groupId?: string;
   locked?: boolean;
   preset?: GuidePresetKind;
 }
@@ -1326,10 +1509,27 @@ export interface GuidesConfig {
   snapToGuides: boolean;
   snapToRulers: boolean;
   snapToGrid: boolean;
+  /** Snap lines, shapes, vectors, selections & objects to active perspective rays/grids */
+  snapToPerspective: boolean;
+  /** Allow Pose Dummie to follow active perspective scale & depth plane */
+  dummieFollowPerspective: boolean;
   /** Snap radius in canvas pixels */
   snapThresholdPx: number;
   /** Grid snap step in canvas pixels (e.g. 1, 4, 8, 16) */
   gridStep: number;
+  /** Global default guide styling */
+  defaultGuideColor: string;
+  defaultGuideThickness: number;
+  defaultGuideOpacity: number;
+  /** Named guide groups (Escenario, Personajes, HUD, Cámara, etc.) */
+  groups: GuideGroup[];
+  activeGroupId: string;
+  /** 7-Mode Perspective, Vanishing Points & Auto Floor Grid */
+  perspective: PerspectiveGuidesConfig;
+  /** Fighting/Stage Camera Guides */
+  cameraGuides: CameraGuidesConfig;
+  /** Stage Mode Depth Layers Guides */
+  stageDepth: StageDepthGuidesConfig;
 }
 
 export type WheelNavigationMode = 'pan' | 'zoom';

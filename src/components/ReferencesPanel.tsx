@@ -37,6 +37,7 @@ import {
 } from 'lucide-react';
 import {
   DummiePose,
+  GuidesConfig,
   PureRefConfig,
   ReferenceAnchorMode,
   ReferenceBlendMode,
@@ -70,6 +71,10 @@ interface ReferencesPanelProps {
   onCenterAllReferences?: () => void;
   onBringReferenceToFront?: (id: string) => void;
   onActivateMoveReferenceTool?: () => void;
+  guidesConfig?: GuidesConfig;
+  canvasWidth?: number;
+  canvasHeight?: number;
+  onChangeGuidesConfig?: (next: GuidesConfig) => void;
 }
 
 const BLEND_MODES: { id: ReferenceBlendMode; label: string }[] = [
@@ -106,6 +111,10 @@ export const ReferencesPanel: React.FC<ReferencesPanelProps> = ({
   onCenterAllReferences,
   onBringReferenceToFront,
   onActivateMoveReferenceTool,
+  guidesConfig,
+  canvasWidth,
+  canvasHeight,
+  onChangeGuidesConfig,
 }) => {
   const [subTab, setSubTab] = useState<'board' | 'images' | 'groups' | 'ai_refs' | 'dummie'>('board');
   const [boardExpanded, setBoardExpanded] = useState(false);
@@ -968,6 +977,10 @@ export const ReferencesPanel: React.FC<ReferencesPanelProps> = ({
           onDeleteSavedPose={(id) => onDeleteSavedDummiePose?.(id)}
           onOpenApplyModal={() => onOpenApplyPoseModal?.()}
           references={references}
+          guidesConfig={guidesConfig}
+          canvasWidth={canvasWidth}
+          canvasHeight={canvasHeight}
+          onChangeGuidesConfig={onChangeGuidesConfig}
         />
       ) : subTab === 'ai_refs' ? (
         <div className="flex flex-col gap-2">

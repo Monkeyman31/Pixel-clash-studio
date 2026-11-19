@@ -69,6 +69,7 @@ import {
   Compass,
   FlaskConical,
   Wand2,
+  Camera,
 } from 'lucide-react';
 import { ExportModalTab } from './ExportModal';
 import {
@@ -81,12 +82,16 @@ import {
 import {
   GuidePresetKind,
   GuidesConfig,
+  GuidesModalTab,
+  PerspectiveGuideType,
   ProjectWorkMode,
   RecentProjectEntry,
   RulerUnit,
+  ScenarioGuidePresetId,
   TransformActionId,
   WheelNavigationMode,
 } from '../types';
+import { PERSPECTIVE_TYPE_META, SCENARIO_GUIDE_PRESETS } from '../utils/guidesEngine';
 import { WORK_MODES_REGISTRY, WORK_MODE_ORDER } from '../utils/workModesEngine';
 import { STUDIO_Z } from './StudioTopLayer';
 import {
@@ -195,17 +200,20 @@ interface MenuBarProps {
   onTogglePinRecentProject?: (id: string) => void;
   onRemoveRecentProject?: (id: string) => void;
   onClearRecentProjects?: () => void;
-  // Rulers, Guides, Snapping & Wheel Navigation (Ver)
+  // Rulers, Guides, Perspective, Snapping & Wheel Navigation (Ver)
   guidesConfig?: GuidesConfig;
   guidesCount?: number;
   onToggleRulers?: () => void;
   onToggleGuidesVisible?: () => void;
   onToggleLockGuides?: () => void;
   onChangeRulerUnit?: (unit: RulerUnit) => void;
-  onToggleSnapOption?: (key: 'snapToGuides' | 'snapToRulers' | 'snapToGrid') => void;
-  onOpenGuidesModal?: (tab?: 'exact' | 'presets' | 'list') => void;
+  onToggleSnapOption?: (key: 'snapToGuides' | 'snapToRulers' | 'snapToGrid' | 'snapToPerspective') => void;
+  onOpenGuidesModal?: (tab?: GuidesModalTab) => void;
   onApplyGuidePreset?: (preset: GuidePresetKind) => void;
   onClearAllGuides?: () => void;
+  onChangeGuidesConfig?: (next: GuidesConfig) => void;
+  onSelectPerspectiveType?: (type: PerspectiveGuideType) => void;
+  onApplyScenarioGuidePreset?: (preset: ScenarioGuidePresetId) => void;
   wheelNavMode?: WheelNavigationMode;
   onToggleWheelNavMode?: () => void;
   // Work Modes & FX Studio (Proyecto)
@@ -348,6 +356,9 @@ export const MenuBar: React.FC<MenuBarProps> = ({
   onOpenGuidesModal,
   onApplyGuidePreset,
   onClearAllGuides,
+  onChangeGuidesConfig,
+  onSelectPerspectiveType,
+  onApplyScenarioGuidePreset,
   wheelNavMode = 'pan',
   onToggleWheelNavMode,
   workMode = 'fighter',
@@ -2027,6 +2038,16 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         {guidesConfig.snapToGrid ? '✓' : ''}
                       </span>
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => onToggleSnapOption('snapToPerspective')}
+                      className="px-3 py-1.5 flex items-center justify-between hover:bg-[#20273a] text-left"
+                    >
+                      <span>Ajustar a Perspectiva</span>
+                      <span className="text-[10px] text-amber-400 font-mono">
+                        {guidesConfig.snapToPerspective ? '✓' : ''}
+                      </span>
+                    </button>
                   </SubMenu>
                 )}
 
@@ -2037,7 +2058,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     className="px-3 py-1.5 flex items-center gap-2 hover:bg-[#20273a] text-left text-slate-300"
                   >
                     <SlidersHorizontal className="w-3.5 h-3.5 text-slate-400" />
-                    <span>Administrar Guías y Reglas...</span>
+                    <span>Administrar Guías y Grupos...</span>
                   </button>
                 )}
 
@@ -2051,6 +2072,184 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                       <span>Eliminar Todas las Guías</span>
+                    </button>
+                  </>
+                )}
+              </SubMenu>
+            )}
+
+            {guidesConfig && (
+              <SubMenu
+                label={`Guías de Perspectiva${guidesConfig.perspective?.enabled ? ' (ON)' : ''}`}
+                icon={<Compass className="w-3.5 h-3.5 text-sky-400" />}
+                widthClass="w-72"
+              >
+                {onChangeGuidesConfig && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onChangeGuidesConfig({
+                        ...guidesConfig,
+                        showGuides: true,
+                        perspective: {
+                          ...guidesConfig.perspective,
+                          enabled: !guidesConfig.perspective.enabled,
+                        },
+                      })
+                    }
+                    className="px-3 py-1.5 flex items-center justify-between hover:bg-[#20273a] text-left font-medium"
+                  >
+                    <span className="flex items-center gap-2">
+                      <Compass className="w-3.5 h-3.5 text-sky-400" />
+                      <span>Mostrar Guías de Perspectiva</span>
+                    </span>
+                    <span className="text-[10px] text-amber-400 font-mono">
+                      {guidesConfig.perspective.enabled ? '✓' : ''}
+                    </span>
+                  </button>
+                )}
+
+                <div className="h-[1px] bg-[#22283a] my-1" />
+
+                {onSelectPerspectiveType &&
+                  PERSPECTIVE_TYPE_META.map((pm) => {
+                    const isActive =
+                      guidesConfig.perspective.enabled && guidesConfig.perspective.type === pm.id;
+                    return (
+                      <button
+                        key={pm.id}
+                        type="button"
+                        onClick={() => handleItemClick(() => onSelectPerspectiveType(pm.id))}
+                        className="px-3 py-1.5 flex items-center justify-between hover:bg-[#20273a] text-left"
+                      >
+                        <span>{pm.label}</span>
+                        <span className="text-[10px] text-sky-400 font-mono">
+                          {isActive ? '✓' : ''}
+                        </span>
+                      </button>
+                    );
+                  })}
+
+                <div className="h-[1px] bg-[#22283a] my-1" />
+
+                {onChangeGuidesConfig && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onChangeGuidesConfig({
+                          ...guidesConfig,
+                          showGuides: true,
+                          perspective: {
+                            ...guidesConfig.perspective,
+                            enabled: true,
+                            floorGrid: {
+                              ...guidesConfig.perspective.floorGrid,
+                              enabled: !guidesConfig.perspective.floorGrid.enabled,
+                            },
+                          },
+                        })
+                      }
+                      className="px-3 py-1.5 flex items-center justify-between hover:bg-[#20273a] text-left"
+                    >
+                      <span className="flex items-center gap-2">
+                        <Grid3X3 className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>Guía de Piso Automática</span>
+                      </span>
+                      <span className="text-[10px] text-emerald-400 font-mono">
+                        {guidesConfig.perspective.floorGrid.enabled ? '✓' : ''}
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onChangeGuidesConfig({
+                          ...guidesConfig,
+                          showGuides: true,
+                          cameraGuides: {
+                            ...guidesConfig.cameraGuides,
+                            enabled: !guidesConfig.cameraGuides.enabled,
+                          },
+                        })
+                      }
+                      className="px-3 py-1.5 flex items-center justify-between hover:bg-[#20273a] text-left"
+                    >
+                      <span className="flex items-center gap-2">
+                        <Camera className="w-3.5 h-3.5 text-amber-400" />
+                        <span>Guías de Cámara</span>
+                      </span>
+                      <span className="text-[10px] text-amber-400 font-mono">
+                        {guidesConfig.cameraGuides.enabled ? '✓' : ''}
+                      </span>
+                    </button>
+                  </>
+                )}
+
+                {onToggleSnapOption && (
+                  <button
+                    type="button"
+                    onClick={() => onToggleSnapOption('snapToPerspective')}
+                    className="px-3 py-1.5 flex items-center justify-between hover:bg-[#20273a] text-left"
+                  >
+                    <span className="flex items-center gap-2">
+                      <Magnet className="w-3.5 h-3.5 text-purple-400" />
+                      <span>Ajustar a Perspectiva</span>
+                    </span>
+                    <span className="text-[10px] text-amber-400 font-mono">
+                      {guidesConfig.snapToPerspective ? '✓' : ''}
+                    </span>
+                  </button>
+                )}
+
+                {onApplyScenarioGuidePreset && (
+                  <SubMenu
+                    label="Presets para Escenarios"
+                    icon={<LayoutGrid className="w-3.5 h-3.5 text-emerald-400" />}
+                    widthClass="w-60"
+                  >
+                    {SCENARIO_GUIDE_PRESETS.map((sp) => (
+                      <button
+                        key={sp.id}
+                        type="button"
+                        onClick={() => handleItemClick(() => onApplyScenarioGuidePreset(sp.id))}
+                        className="px-3 py-1.5 flex items-center justify-between hover:bg-[#20273a] text-left"
+                      >
+                        <span>{sp.label}</span>
+                        <span className="text-[10px] text-emerald-400 font-mono">
+                          {guidesConfig.perspective.activeScenarioPreset === sp.id ? '✓' : ''}
+                        </span>
+                      </button>
+                    ))}
+                  </SubMenu>
+                )}
+
+                {onOpenGuidesModal && (
+                  <>
+                    <div className="h-[1px] bg-[#22283a] my-1" />
+                    <button
+                      type="button"
+                      onClick={() => handleItemClick(() => onOpenGuidesModal('perspective'))}
+                      className="px-3 py-1.5 flex items-center gap-2 hover:bg-[#20273a] text-left font-medium text-sky-300"
+                    >
+                      <SlidersHorizontal className="w-3.5 h-3.5 text-sky-400" />
+                      <span>Puntos de Fuga y Perspectiva...</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleItemClick(() => onOpenGuidesModal('camera'))}
+                      className="px-3 py-1.5 flex items-center gap-2 hover:bg-[#20273a] text-left text-slate-300"
+                    >
+                      <Camera className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Configurar Guías de Cámara...</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleItemClick(() => onOpenGuidesModal('presets'))}
+                      className="px-3 py-1.5 flex items-center gap-2 hover:bg-[#20273a] text-left text-slate-300"
+                    >
+                      <Save className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>Guardar / Exportar Configuraciones...</span>
                     </button>
                   </>
                 )}

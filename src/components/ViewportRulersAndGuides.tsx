@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { STUDIO_Z } from './StudioTopLayer';
 import {
@@ -13,11 +13,17 @@ import {
   CanvasGuide,
   GuideOrientation,
   GuidesConfig,
+  GuidesModalTab,
+  ProjectWorkMode,
   RulerUnit,
 } from '../types';
 import {
+  computeAutoFloorGridSegments,
+  computePerspectiveGeometry,
   computeRulerStepPx,
   formatRulerCoordinate,
+  isGuideLockedInGroups,
+  isGuideVisibleInGroups,
 } from '../utils/guidesEngine';
 
 export const RULER_THICKNESS = 22;
@@ -32,6 +38,7 @@ interface ViewportRulersAndGuidesProps {
   cameraTransform: { camX: number; camY: number; camZoom: number };
   guides: CanvasGuide[];
   guidesConfig: GuidesConfig;
+  workMode?: ProjectWorkMode;
   selectedGuideId: string | null;
   snappedGuideIds?: { xId: string | null; yId: string | null };
   cursorClientPos: { x: number; y: number } | null;
@@ -42,7 +49,7 @@ interface ViewportRulersAndGuidesProps {
   onDuplicateGuide?: (id: string) => void;
   onDeleteGuide?: (id: string) => void;
   onChangeGuidesConfig?: (next: GuidesConfig) => void;
-  onOpenGuidesModal?: (tab?: 'exact' | 'presets' | 'list') => void;
+  onOpenGuidesModal?: (tab?: GuidesModalTab) => void;
   onFocusGuidesContext?: () => void;
 }
 
@@ -54,6 +61,11 @@ interface GuideDragState {
   overRulerToDelete: boolean;
   color: string;
   label?: string;
+}
+
+interface PerspectiveDragState {
+  kind: 'vp' | 'horizon';
+  vpId?: string;
 }
 
 interface GuideContextMenuState {
@@ -72,6 +84,7 @@ export const ViewportRulersAndGuides: React.FC<ViewportRulersAndGuidesProps> = (
   cameraTransform,
   guides,
   guidesConfig,
+  workMode = 'fighter',
   selectedGuideId,
   snappedGuideIds,
   cursorClientPos,
@@ -96,7 +109,9 @@ export const ViewportRulersAndGuides: React.FC<ViewportRulersAndGuidesProps> = (
   }>({ vw: 800, vh: 600, originX: 100, originY: 100, effZoom: zoom });
 
   const [dragState, setDragState] = useState<GuideDragState | null>(null);
+  const [perspDrag, setPerspDrag] = useState<PerspectiveDragState | null>(null);
   const [hoveredGuideId, setHoveredGuideId] = useState<string | null>(null);
+  const [hoveredVpId, setHoveredVpId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<GuideContextMenuState | null>(null);
 
   const measureGeometry = useCallback(() => {
@@ -129,7 +144,17 @@ export const ViewportRulersAndGuides: React.FC<ViewportRulersAndGuidesProps> = (
       }
       return { vw: cRect.width, vh: cRect.height, originX, originY, effZoom };
     });
-  }, [containerRef, canvasRef, pan.x, pan.y, zoom, width, cameraTransform.camX, cameraTransform.camY, cameraTransform.camZoom]);
+  }, [
+    containerRef,
+    canvasRef,
+    pan.x,
+    pan.y,
+    zoom,
+    width,
+    cameraTransform.camX,
+    cameraTransform.camY,
+    cameraTransform.camZoom,
+  ]);
 
   useEffect(() => {
     measureGeometry();
@@ -144,7 +169,15 @@ export const ViewportRulersAndGuides: React.FC<ViewportRulersAndGuidesProps> = (
       window.cancelAnimationFrame(rafId);
       ro?.disconnect();
     };
-  }, [measureGeometry, containerRef, guidesConfig.showRulers, guidesConfig.showGuides, width, height]);
+  }, [
+    measureGeometry,
+    containerRef,
+    guidesConfig.showRulers,
+    guidesConfig.showGuides,
+    guidesConfig.perspective.enabled,
+    width,
+    height,
+  ]);
 
   // Draw Top Horizontal & Left Vertical Rulers
   useEffect(() => {
@@ -173,7 +206,6 @@ export const ViewportRulersAndGuides: React.FC<ViewportRulersAndGuidesProps> = (
         ctx.fillStyle = '#111522';
         ctx.fillRect(0, 0, rw, rh);
 
-        // Subtle highlight spanning [0..width] canvas range
         const canvasStartX = originX - RULER_THICKNESS;
         const canvasEndX = canvasStartX + width * effZoom;
         ctx.fillStyle = 'rgba(56, 189, 248, 0.08)';
@@ -232,14 +264,12 @@ export const ViewportRulersAndGuides: React.FC<ViewportRulersAndGuidesProps> = (
           }
         }
 
-        // Bottom hairline
         ctx.strokeStyle = 'rgba(71, 85, 105, 0.65)';
         ctx.beginPath();
         ctx.moveTo(0, rh - 0.5);
         ctx.lineTo(rw, rh - 0.5);
         ctx.stroke();
 
-        // Live cursor needle
         if (cursorLocalX !== null) {
           const cx = cursorLocalX - RULER_THICKNESS;
           if (cx >= 0 && cx <= rw) {
@@ -334,14 +364,12 @@ export const ViewportRulersAndGuides: React.FC<ViewportRulersAndGuidesProps> = (
           }
         }
 
-        // Right hairline
         ctx.strokeStyle = 'rgba(71, 85, 105, 0.65)';
         ctx.beginPath();
         ctx.moveTo(rw - 0.5, 0);
         ctx.lineTo(rw - 0.5, rh);
         ctx.stroke();
 
-        // Live cursor needle
         if (cursorLocalY !== null) {
           const cy = cursorLocalY - RULER_THICKNESS;
           if (cy >= 0 && cy <= rh) {
@@ -368,7 +396,7 @@ export const ViewportRulersAndGuides: React.FC<ViewportRulersAndGuidesProps> = (
     containerRef,
   ]);
 
-  // Global Pointer Listeners while dragging/creating/duplicating a guide
+  // Global Pointer Listeners while dragging/creating/duplicating a linear guide
   useEffect(() => {
     if (!dragState) return;
 
@@ -385,7 +413,6 @@ export const ViewportRulersAndGuides: React.FC<ViewportRulersAndGuidesProps> = (
           ? (localX - originX) / effZoom
           : (localY - originY) / effZoom;
 
-      // Shift snaps to clean integer / 4px step while dragging
       const pos = ev.shiftKey ? Math.round(rawPos / 4) * 4 : Math.round(rawPos);
       const overRuler =
         dragState.orientation === 'vertical'
@@ -410,11 +437,15 @@ export const ViewportRulersAndGuides: React.FC<ViewportRulersAndGuidesProps> = (
           }
         } else if (cur.mode === 'create' || cur.mode === 'duplicate') {
           const newId = `guide-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+          const activeGroup = guidesConfig.groups?.find((gr) => gr.id === guidesConfig.activeGroupId);
           onAddGuide?.({
             id: newId,
             orientation: cur.orientation,
             position: cur.positionPx,
-            color: cur.color,
+            color: cur.color || activeGroup?.color || guidesConfig.defaultGuideColor || '#38bdf8',
+            thickness: activeGroup?.thickness ?? guidesConfig.defaultGuideThickness ?? 1,
+            opacity: activeGroup?.opacity ?? guidesConfig.defaultGuideOpacity ?? 0.8,
+            groupId: guidesConfig.activeGroupId || 'grp-stage',
             label: cur.label,
             locked: false,
           });
@@ -448,6 +479,82 @@ export const ViewportRulersAndGuides: React.FC<ViewportRulersAndGuidesProps> = (
     guidesConfig,
     onChangeGuidesConfig,
   ]);
+
+  // Global Pointer Listeners while dragging a Vanishing Point or Horizon line (allows outside-canvas coordinates!)
+  useEffect(() => {
+    if (!perspDrag || !onChangeGuidesConfig) return;
+
+    const handleMove = (ev: PointerEvent) => {
+      const container = containerRef.current;
+      if (!container) return;
+      const cRect = container.getBoundingClientRect();
+      const localX = ev.clientX - cRect.left;
+      const localY = ev.clientY - cRect.top;
+      const { originX, originY, effZoom } = viewportMetrics;
+
+      const rawX = (localX - originX) / effZoom;
+      const rawY = (localY - originY) / effZoom;
+      const cx = ev.shiftKey ? Math.round(rawX / 4) * 4 : Math.round(rawX);
+      const cy = ev.shiftKey ? Math.round(rawY / 4) * 4 : Math.round(rawY);
+
+      const persp = guidesConfig.perspective;
+      if (perspDrag.kind === 'horizon') {
+        if (persp.horizonLocked) return;
+        const deltaY = cy - persp.horizonY;
+        // Keep horizon-aligned VPs synced with the horizon line while leaving zenith/nadir independent
+        const nextVps = persp.vanishingPoints.map((vp) => {
+          if (vp.locked) return vp;
+          if (Math.abs(vp.y - persp.horizonY) <= 4) {
+            return { ...vp, y: vp.y + deltaY };
+          }
+          return vp;
+        });
+        onChangeGuidesConfig({
+          ...guidesConfig,
+          perspective: {
+            ...persp,
+            horizonY: cy,
+            vanishingPoints: nextVps,
+          },
+        });
+      } else if (perspDrag.kind === 'vp' && perspDrag.vpId) {
+        const target = persp.vanishingPoints.find((vp) => vp.id === perspDrag.vpId);
+        if (!target || target.locked) return;
+        // Shift locks horizon-aligned VPs onto horizonY while dragging horizontally
+        const lockToHorizon =
+          ev.shiftKey &&
+          persp.type !== '3point' &&
+          !target.id.includes('vertical') &&
+          !target.id.includes('top') &&
+          !target.id.includes('bottom');
+        const nextY = lockToHorizon ? persp.horizonY : cy;
+        const nextVps = persp.vanishingPoints.map((vp) =>
+          vp.id === perspDrag.vpId ? { ...vp, x: cx, y: nextY } : vp
+        );
+        // For 1-point perspective, moving the sole VP updates horizonY cleanly unless horizonLocked
+        const nextHorizonY =
+          persp.type === '1point' && !persp.horizonLocked ? nextY : persp.horizonY;
+        onChangeGuidesConfig({
+          ...guidesConfig,
+          perspective: {
+            ...persp,
+            horizonY: nextHorizonY,
+            vanishingPoints: nextVps,
+          },
+        });
+      }
+    };
+
+    const handleUp = () => setPerspDrag(null);
+    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointerup', handleUp);
+    window.addEventListener('pointercancel', handleUp);
+    return () => {
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleUp);
+      window.removeEventListener('pointercancel', handleUp);
+    };
+  }, [perspDrag, containerRef, viewportMetrics, guidesConfig, onChangeGuidesConfig]);
 
   // Close guide context menu on outside click / Esc
   useEffect(() => {
@@ -487,16 +594,47 @@ export const ViewportRulersAndGuides: React.FC<ViewportRulersAndGuidesProps> = (
       orientation === 'vertical'
         ? Math.round((localX - originX) / effZoom)
         : Math.round((localY - originY) / effZoom);
+    const activeGroup = guidesConfig.groups?.find((gr) => gr.id === guidesConfig.activeGroupId);
     setDragState({
       mode: 'create',
       orientation,
       positionPx: pos,
       overRulerToDelete: false,
-      color: '#38bdf8',
+      color: activeGroup?.color || guidesConfig.defaultGuideColor || '#38bdf8',
     });
   };
 
   const { originX, originY, effZoom, vw, vh } = viewportMetrics;
+  const toScreenX = useCallback((cx: number) => originX + cx * effZoom, [originX, effZoom]);
+  const toScreenY = useCallback((cy: number) => originY + cy * effZoom, [originY, effZoom]);
+
+  const persp = guidesConfig.perspective;
+  const camG = guidesConfig.cameraGuides;
+  const stageD = guidesConfig.stageDepth;
+  const showStageDepthNow = Boolean(
+    guidesConfig.showGuides &&
+      (stageD?.enabled || (workMode === 'stage' && stageD?.autoShowInStageMode))
+  );
+
+  const perspectiveGeom = useMemo(() => {
+    if (!guidesConfig.showGuides || !persp?.enabled) {
+      return { segments: [], arcs: [] };
+    }
+    return computePerspectiveGeometry(persp, width, height);
+  }, [guidesConfig.showGuides, persp, width, height]);
+
+  const floorGridSegments = useMemo(() => {
+    if (!guidesConfig.showGuides || !persp?.enabled || !persp?.floorGrid?.enabled) {
+      return [];
+    }
+    return computeAutoFloorGridSegments(persp, width, height);
+  }, [guidesConfig.showGuides, persp, width, height]);
+
+  const visibleGuides = useMemo(
+    () => guides.filter((g) => isGuideVisibleInGroups(g, guidesConfig)),
+    [guides, guidesConfig]
+  );
+
   const unitBadge =
     guidesConfig.unit === 'px'
       ? 'px'
@@ -504,12 +642,399 @@ export const ViewportRulersAndGuides: React.FC<ViewportRulersAndGuidesProps> = (
       ? '%'
       : (guidesConfig.customLabel || 'u').slice(0, 3);
 
+  const rulerOffset = guidesConfig.showRulers ? RULER_THICKNESS : 0;
+
   return (
     <>
-      {/* Interactive Guide Lines Layer */}
+      {/* Perspective Guides, Auto Floor Grid, Camera Guides & Stage Depth Layer (full viewport so VPs work OUTSIDE canvas!) */}
+      {guidesConfig.showGuides && (persp?.enabled || camG?.enabled || showStageDepthNow) && (
+        <div
+          className="absolute inset-0 pointer-events-none z-[31] overflow-hidden"
+          style={{ left: `${rulerOffset}px`, top: `${rulerOffset}px` }}
+        >
+          <svg
+            width={Math.max(1, vw - rulerOffset)}
+            height={Math.max(1, vh - rulerOffset)}
+            className="w-full h-full block"
+          >
+            <g transform={`translate(${-rulerOffset}, ${-rulerOffset})`}>
+              {/* 1. Perspective Rays, Construction Grids & Curvilinear Arcs */}
+              {persp?.enabled && (
+                <g opacity={persp.opacity}>
+                  {perspectiveGeom.segments.map((seg, i) => (
+                    <line
+                      key={`pseg-${i}`}
+                      x1={toScreenX(seg.x1)}
+                      y1={toScreenY(seg.y1)}
+                      x2={toScreenX(seg.x2)}
+                      y2={toScreenY(seg.y2)}
+                      stroke={seg.color || persp.color}
+                      strokeWidth={seg.kind === 'grid' ? Math.max(0.75, persp.thickness * 0.8) : persp.thickness}
+                      strokeDasharray={seg.kind === 'grid' ? '4 4' : undefined}
+                      opacity={seg.kind === 'grid' ? 0.65 : 0.9}
+                    />
+                  ))}
+                  {perspectiveGeom.arcs.map((arc, i) => (
+                    <path
+                      key={`parc-${i}`}
+                      d={`M ${toScreenX(arc.x1)} ${toScreenY(arc.y1)} Q ${toScreenX(arc.cx)} ${toScreenY(arc.cy)} ${toScreenX(arc.x2)} ${toScreenY(arc.y2)}`}
+                      fill="none"
+                      stroke={arc.color || persp.color}
+                      strokeWidth={persp.thickness}
+                      opacity={0.78}
+                    />
+                  ))}
+                </g>
+              )}
+
+              {/* 2. Automatic Perspective Floor Grid */}
+              {persp?.enabled && persp.floorGrid?.enabled && floorGridSegments.length > 0 && (
+                <g opacity={persp.floorGrid.opacity}>
+                  {floorGridSegments.map((seg, i) => (
+                    <line
+                      key={`fgrid-${i}`}
+                      x1={toScreenX(seg.x1)}
+                      y1={toScreenY(seg.y1)}
+                      x2={toScreenX(seg.x2)}
+                      y2={toScreenY(seg.y2)}
+                      stroke={seg.color || persp.floorGrid.color}
+                      strokeWidth={seg.kind === 'floor_depth' ? Math.max(1, persp.thickness) : Math.max(0.85, persp.thickness * 0.9)}
+                      strokeDasharray={seg.kind === 'floor_depth' ? undefined : '2 2'}
+                    />
+                  ))}
+                </g>
+              )}
+
+              {/* 3. Perspective Horizon Line */}
+              {persp?.enabled && persp.showHorizon && (
+                <g>
+                  <line
+                    x1={0}
+                    y1={toScreenY(persp.horizonY)}
+                    x2={vw}
+                    y2={toScreenY(persp.horizonY)}
+                    stroke="#f59e0b"
+                    strokeWidth={Math.max(1.5, persp.thickness + 0.5)}
+                    strokeDasharray="8 4"
+                    opacity={Math.min(1, persp.opacity + 0.25)}
+                  />
+                  {/* Interactive Hit Strip for Dragging Horizon Line */}
+                  {!persp.horizonLocked && !isPanInteractionActive && (
+                    <line
+                      x1={0}
+                      y1={toScreenY(persp.horizonY)}
+                      x2={vw}
+                      y2={toScreenY(persp.horizonY)}
+                      stroke="transparent"
+                      strokeWidth={10}
+                      style={{ pointerEvents: 'stroke', cursor: 'ns-resize' }}
+                      onPointerDown={(e) => {
+                        if (e.button !== 0) return;
+                        e.stopPropagation();
+                        setPerspDrag({ kind: 'horizon' });
+                      }}
+                    />
+                  )}
+                  <g transform={`translate(${Math.max(rulerOffset + 8, toScreenX(2))}, ${toScreenY(persp.horizonY) - 16})`}>
+                    <rect
+                      x={0}
+                      y={0}
+                      width={118}
+                      height={14}
+                      rx={3}
+                      fill="rgba(15, 19, 32, 0.88)"
+                      stroke="#f59e0b"
+                      strokeWidth={0.8}
+                    />
+                    <text
+                      x={5}
+                      y={10}
+                      fill="#fde68a"
+                      fontSize={9}
+                      fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
+                    >
+                      Horizonte Y:{Math.round(persp.horizonY)}px{persp.horizonLocked ? ' · Bloq' : ''}
+                    </text>
+                  </g>
+                </g>
+              )}
+
+              {/* 4. Stage Mode Depth Planes (Horizon, Ground Plane, Far BG, Mid BG, Foreground, Visual Depth) */}
+              {showStageDepthNow && stageD && (() => {
+                const cLeft = toScreenX(0);
+                const cRight = toScreenX(width);
+                const cW = cRight - cLeft;
+                const planes: { show: boolean; pct: number; label: string; color: string; dash?: string }[] = [
+                  { show: stageD.showFarBackground, pct: stageD.farBgPct, label: 'Fondo Lejano', color: '#38bdf8', dash: '5 4' },
+                  { show: stageD.showHorizon, pct: stageD.horizonPct, label: 'Horizonte Escenario', color: '#f59e0b', dash: '7 3' },
+                  { show: stageD.showMidBackground, pct: stageD.midBgPct, label: 'Fondo Medio', color: '#a855f7', dash: '4 4' },
+                  { show: stageD.showGroundPlane, pct: stageD.groundPlanePct, label: 'Plano del Suelo', color: '#10b981' },
+                  { show: stageD.showForeground, pct: stageD.foregroundPct, label: 'Primer Plano', color: '#f43f5e', dash: '3 3' },
+                ];
+                const horY = toScreenY((stageD.horizonPct / 100) * height);
+                const gndY = toScreenY((stageD.groundPlanePct / 100) * height);
+                const midX = toScreenX(width * 0.5);
+
+                return (
+                  <g opacity={stageD.opacity}>
+                    {/* Visual Depth Convergence Corridor */}
+                    {stageD.showVisualDepth && (
+                      <g opacity={0.45}>
+                        <line x1={midX} y1={horY} x2={cLeft} y2={gndY} stroke={stageD.color} strokeWidth={stageD.thickness} strokeDasharray="3 4" />
+                        <line x1={midX} y1={horY} x2={cRight} y2={gndY} stroke={stageD.color} strokeWidth={stageD.thickness} strokeDasharray="3 4" />
+                        <line x1={midX} y1={horY} x2={cLeft + cW * 0.25} y2={toScreenY(height)} stroke={stageD.color} strokeWidth={stageD.thickness} strokeDasharray="2 5" />
+                        <line x1={midX} y1={horY} x2={cLeft + cW * 0.75} y2={toScreenY(height)} stroke={stageD.color} strokeWidth={stageD.thickness} strokeDasharray="2 5" />
+                      </g>
+                    )}
+                    {planes
+                      .filter((p) => p.show)
+                      .map((p) => {
+                        const sy = toScreenY((p.pct / 100) * height);
+                        return (
+                          <g key={p.label}>
+                            <line
+                              x1={cLeft}
+                              y1={sy}
+                              x2={cRight}
+                              y2={sy}
+                              stroke={p.color}
+                              strokeWidth={stageD.thickness}
+                              strokeDasharray={p.dash}
+                            />
+                            <text
+                              x={cRight - 4}
+                              y={sy - 3}
+                              textAnchor="end"
+                              fill={p.color}
+                              fontSize={9}
+                              fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
+                            >
+                              {p.label} ({p.pct}%)
+                            </text>
+                          </g>
+                        );
+                      })}
+                  </g>
+                );
+              })()}
+
+              {/* 5. Camera Guides (Visible Area, Safe Margins, Combat Zone, Scroll Limits, Camera Center) */}
+              {camG?.enabled && (() => {
+                const cLeft = toScreenX(0);
+                const cTop = toScreenY(0);
+                const cW = width * effZoom;
+                const cH = height * effZoom;
+                const visX = cLeft + (camG.visibleAreaInsetPct / 100) * cW;
+                const visY = cTop + (camG.visibleAreaInsetPct / 100) * cH;
+                const visW = Math.max(2, cW * (1 - (camG.visibleAreaInsetPct * 2) / 100));
+                const visH = Math.max(2, cH * (1 - (camG.visibleAreaInsetPct * 2) / 100));
+
+                const safeX = cLeft + (camG.safeMarginPct / 100) * cW;
+                const safeY = cTop + (camG.safeMarginPct / 100) * cH;
+                const safeW = Math.max(2, cW * (1 - (camG.safeMarginPct * 2) / 100));
+                const safeH = Math.max(2, cH * (1 - (camG.safeMarginPct * 2) / 100));
+
+                const combatX = cLeft + (camG.combatZoneInsetXPct / 100) * cW;
+                const combatW = Math.max(2, cW * (1 - (camG.combatZoneInsetXPct * 2) / 100));
+                const combatY = cTop + (camG.combatZoneTopPct / 100) * cH;
+                const combatH = Math.max(2, ((camG.combatZoneFloorPct - camG.combatZoneTopPct) / 100) * cH);
+
+                const scrollLeft = cLeft + (camG.scrollLimitInsetPct / 100) * cW;
+                const scrollRight = cLeft + cW - (camG.scrollLimitInsetPct / 100) * cW;
+                const centerX = cLeft + cW * 0.5;
+                const centerY = cTop + cH * 0.5;
+
+                return (
+                  <g opacity={camG.opacity}>
+                    {camG.showVisibleArea && (
+                      <g>
+                        <rect
+                          x={visX}
+                          y={visY}
+                          width={visW}
+                          height={visH}
+                          fill="none"
+                          stroke="#38bdf8"
+                          strokeWidth={camG.thickness}
+                        />
+                        <text
+                          x={visX + 4}
+                          y={visY + 11}
+                          fill="#7dd3fc"
+                          fontSize={9}
+                          fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
+                        >
+                          Área visible
+                        </text>
+                      </g>
+                    )}
+
+                    {camG.showSafeMargins && (
+                      <g>
+                        <rect
+                          x={safeX}
+                          y={safeY}
+                          width={safeW}
+                          height={safeH}
+                          fill="none"
+                          stroke={camG.color}
+                          strokeWidth={camG.thickness}
+                          strokeDasharray="6 4"
+                        />
+                        <text
+                          x={safeX + 4}
+                          y={safeY + 11}
+                          fill="#fde68a"
+                          fontSize={9}
+                          fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
+                        >
+                          Margen seguro ({camG.safeMarginPct}%)
+                        </text>
+                      </g>
+                    )}
+
+                    {camG.showCombatZone && (
+                      <g>
+                        <rect
+                          x={combatX}
+                          y={combatY}
+                          width={combatW}
+                          height={combatH}
+                          fill="rgba(244, 63, 94, 0.05)"
+                          stroke="#f43f5e"
+                          strokeWidth={Math.max(1.2, camG.thickness)}
+                          strokeDasharray="4 3"
+                        />
+                        <text
+                          x={combatX + 4}
+                          y={combatY + 11}
+                          fill="#fda4af"
+                          fontSize={9}
+                          fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
+                        >
+                          Zona de combate
+                        </text>
+                      </g>
+                    )}
+
+                    {camG.showScrollLimits && (
+                      <g>
+                        <line
+                          x1={scrollLeft}
+                          y1={cTop}
+                          x2={scrollLeft}
+                          y2={cTop + cH}
+                          stroke="#10b981"
+                          strokeWidth={Math.max(1.2, camG.thickness)}
+                          strokeDasharray="8 3 2 3"
+                        />
+                        <line
+                          x1={scrollRight}
+                          y1={cTop}
+                          x2={scrollRight}
+                          y2={cTop + cH}
+                          stroke="#10b981"
+                          strokeWidth={Math.max(1.2, camG.thickness)}
+                          strokeDasharray="8 3 2 3"
+                        />
+                        <text
+                          x={scrollLeft + 4}
+                          y={cTop + cH - 5}
+                          fill="#6ee7b7"
+                          fontSize={9}
+                          fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
+                        >
+                          Límite scroll
+                        </text>
+                      </g>
+                    )}
+
+                    {camG.showCameraCenter && (
+                      <g>
+                        <line x1={centerX - 10} y1={centerY} x2={centerX + 10} y2={centerY} stroke={camG.color} strokeWidth={1.3} />
+                        <line x1={centerX} y1={centerY - 10} x2={centerX} y2={centerY + 10} stroke={camG.color} strokeWidth={1.3} />
+                        <circle cx={centerX} cy={centerY} r={4} fill="none" stroke={camG.color} strokeWidth={1.2} />
+                      </g>
+                    )}
+                  </g>
+                );
+              })()}
+
+              {/* 6. Interactive Draggable Vanishing Point Handles (work BOTH inside & outside canvas!) */}
+              {persp?.enabled &&
+                persp.vanishingPoints
+                  .filter((vp) => vp.visible)
+                  .map((vp) => {
+                    const sx = toScreenX(vp.x);
+                    const sy = toScreenY(vp.y);
+                    const isOutOfCanvas = vp.x < 0 || vp.x > width || vp.y < 0 || vp.y > height;
+                    const isHovered = hoveredVpId === vp.id || (perspDrag?.kind === 'vp' && perspDrag.vpId === vp.id);
+                    const col = vp.locked ? '#94a3b8' : vp.color || persp.color || '#38bdf8';
+
+                    return (
+                      <g
+                        key={vp.id}
+                        transform={`translate(${sx}, ${sy})`}
+                        style={{
+                          pointerEvents: isPanInteractionActive ? 'none' : 'all',
+                          cursor: vp.locked ? 'not-allowed' : 'move',
+                        }}
+                        onPointerEnter={() => setHoveredVpId(vp.id)}
+                        onPointerLeave={() => setHoveredVpId((cur) => (cur === vp.id ? null : cur))}
+                        onPointerDown={(e) => {
+                          if (isPanInteractionActive || e.button !== 0 || vp.locked) return;
+                          e.stopPropagation();
+                          setPerspDrag({ kind: 'vp', vpId: vp.id });
+                        }}
+                        onDoubleClick={(e) => {
+                          e.stopPropagation();
+                          onOpenGuidesModal?.('perspective');
+                        }}
+                      >
+                        {/* Outer target ring */}
+                        <circle
+                          r={isHovered ? 11 : 8.5}
+                          fill="rgba(9, 13, 22, 0.82)"
+                          stroke={col}
+                          strokeWidth={isHovered ? 2 : 1.5}
+                        />
+                        <line x1={-12} y1={0} x2={12} y2={0} stroke={col} strokeWidth={1.1} />
+                        <line x1={0} y1={-12} x2={0} y2={12} stroke={col} strokeWidth={1.1} />
+                        <circle r={2.5} fill={col} />
+                        {/* Label badge */}
+                        <g transform="translate(12, -12)">
+                          <rect
+                            x={0}
+                            y={0}
+                            width={Math.max(88, (vp.label.length + 14) * 5.2)}
+                            height={16}
+                            rx={3}
+                            fill="rgba(15, 19, 32, 0.92)"
+                            stroke={col}
+                            strokeWidth={0.9}
+                          />
+                          <text
+                            x={5}
+                            y={11}
+                            fill="#f8fafc"
+                            fontSize={9}
+                            fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
+                          >
+                            {vp.label} ({Math.round(vp.x)},{Math.round(vp.y)}){isOutOfCanvas ? ' ext' : ''}{vp.locked ? ' 🔒' : ''}
+                          </text>
+                        </g>
+                      </g>
+                    );
+                  })}
+            </g>
+          </svg>
+        </div>
+      )}
+
+      {/* Interactive Linear Guide Lines Layer */}
       {guidesConfig.showGuides && (
         <div className="absolute inset-0 pointer-events-none z-[32] overflow-hidden">
-          {guides.map((g) => {
+          {visibleGuides.map((g) => {
             const isVertical = g.orientation === 'vertical';
             const screenCoord = isVertical
               ? originX + g.position * effZoom
@@ -517,6 +1042,7 @@ export const ViewportRulersAndGuides: React.FC<ViewportRulersAndGuidesProps> = (
             if (isVertical && (screenCoord < -20 || screenCoord > vw + 20)) return null;
             if (!isVertical && (screenCoord < -20 || screenCoord > vh + 20)) return null;
 
+            const grp = g.groupId ? guidesConfig.groups?.find((gr) => gr.id === g.groupId) : undefined;
             const isSelected = selectedGuideId === g.id;
             const isHovered = hoveredGuideId === g.id;
             const isSnapped =
@@ -524,12 +1050,20 @@ export const ViewportRulersAndGuides: React.FC<ViewportRulersAndGuidesProps> = (
               (!isVertical && snappedGuideIds?.yId === g.id);
             const isBeingDragged = dragState?.mode === 'move' && dragState.guideId === g.id;
             const isDeleting = isBeingDragged && dragState.overRulerToDelete;
-            const isLocked = Boolean(g.locked || guidesConfig.lockGuides);
+            const isLocked = isGuideLockedInGroups(g, guidesConfig);
             const baseColor = isDeleting
               ? '#f43f5e'
               : isSnapped
               ? '#fbbf24'
-              : g.color || '#38bdf8';
+              : g.color || grp?.color || guidesConfig.defaultGuideColor || '#38bdf8';
+            const baseThickness = Math.max(
+              1,
+              Math.min(4, g.thickness ?? grp?.thickness ?? guidesConfig.defaultGuideThickness ?? 1)
+            );
+            const baseOpacity = Math.max(
+              0.15,
+              Math.min(1, g.opacity ?? grp?.opacity ?? guidesConfig.defaultGuideOpacity ?? 0.8)
+            );
 
             const axisLen = isVertical ? width : height;
             const coordLabel = formatRulerCoordinate(
@@ -565,7 +1099,7 @@ export const ViewportRulersAndGuides: React.FC<ViewportRulersAndGuidesProps> = (
                     guideId: g.id,
                     positionPx: g.position,
                     overRulerToDelete: false,
-                    color: g.color || '#38bdf8',
+                    color: baseColor,
                     label: g.label,
                   });
                 }}
@@ -579,14 +1113,14 @@ export const ViewportRulersAndGuides: React.FC<ViewportRulersAndGuidesProps> = (
                 onDoubleClick={(e) => {
                   e.stopPropagation();
                   onSelectGuide?.(g.id);
-                  onOpenGuidesModal?.('list');
+                  onOpenGuidesModal?.('groups');
                 }}
                 style={{
                   position: 'absolute',
-                  left: isVertical ? `${screenCoord - 4}px` : `${guidesConfig.showRulers ? RULER_THICKNESS : 0}px`,
-                  top: isVertical ? `${guidesConfig.showRulers ? RULER_THICKNESS : 0}px` : `${screenCoord - 4}px`,
-                  width: isVertical ? '9px' : `calc(100% - ${guidesConfig.showRulers ? RULER_THICKNESS : 0}px)`,
-                  height: isVertical ? `calc(100% - ${guidesConfig.showRulers ? RULER_THICKNESS : 0}px)` : '9px',
+                  left: isVertical ? `${screenCoord - 4}px` : `${rulerOffset}px`,
+                  top: isVertical ? `${rulerOffset}px` : `${screenCoord - 4}px`,
+                  width: isVertical ? '9px' : `calc(100% - ${rulerOffset}px)`,
+                  height: isVertical ? `calc(100% - ${rulerOffset}px)` : '9px',
                   pointerEvents: isPanInteractionActive ? 'none' : 'auto',
                   cursor: isLocked
                     ? 'pointer'
@@ -594,7 +1128,7 @@ export const ViewportRulersAndGuides: React.FC<ViewportRulersAndGuidesProps> = (
                     ? 'ew-resize'
                     : 'ns-resize',
                 }}
-                title={`${g.label ? `${g.label} · ` : ''}${isVertical ? 'X' : 'Y'} = ${coordLabel}${isLocked ? ' (Bloqueada)' : ' · Arrastrar mover · Alt+Arrastrar duplicar · Clic derecho opciones'}`}
+                title={`${g.label ? `${g.label} · ` : ''}${grp ? `[${grp.name}] · ` : ''}${isVertical ? 'X' : 'Y'} = ${coordLabel}${isLocked ? ' (Bloqueada)' : ' · Arrastrar mover · Alt+Arrastrar duplicar · Clic derecho opciones'}`}
               >
                 {/* Visual Line */}
                 <div
@@ -602,10 +1136,14 @@ export const ViewportRulersAndGuides: React.FC<ViewportRulersAndGuidesProps> = (
                     position: 'absolute',
                     left: isVertical ? '4px' : 0,
                     top: isVertical ? 0 : '4px',
-                    width: isVertical ? (isSelected || isSnapped || isHovered ? '2px' : '1px') : '100%',
-                    height: isVertical ? '100%' : (isSelected || isSnapped || isHovered ? '2px' : '1px'),
+                    width: isVertical
+                      ? `${isSelected || isSnapped || isHovered ? Math.max(2, baseThickness + 1) : baseThickness}px`
+                      : '100%',
+                    height: isVertical
+                      ? '100%'
+                      : `${isSelected || isSnapped || isHovered ? Math.max(2, baseThickness + 1) : baseThickness}px`,
                     backgroundColor: baseColor,
-                    opacity: isSelected || isSnapped || isHovered ? 0.96 : 0.72,
+                    opacity: isSelected || isSnapped || isHovered ? Math.min(1, baseOpacity + 0.2) : baseOpacity,
                     boxShadow: isSnapped ? `0 0 8px ${baseColor}` : undefined,
                   }}
                 />
@@ -685,7 +1223,6 @@ export const ViewportRulersAndGuides: React.FC<ViewportRulersAndGuidesProps> = (
       {/* Rulers Overlay (Top Horizontal + Left Vertical + Top-Left Unit Corner) */}
       {guidesConfig.showRulers && (
         <>
-          {/* Corner Unit Button (cycles px / % / custom) */}
           <button
             type="button"
             onClick={(e) => {
@@ -694,9 +1231,9 @@ export const ViewportRulersAndGuides: React.FC<ViewportRulersAndGuidesProps> = (
             }}
             onDoubleClick={(e) => {
               e.stopPropagation();
-              onOpenGuidesModal?.('list');
+              onOpenGuidesModal?.('perspective');
             }}
-            title={`Unidad de regla actual: ${guidesConfig.unit === 'px' ? 'Píxeles (px)' : guidesConfig.unit === 'percent' ? 'Porcentaje (%)' : `Personalizado (${guidesConfig.customScale}px = 1 ${guidesConfig.customLabel})`}. Clic para cambiar · Doble clic para administrar guías.`}
+            title={`Unidad de regla actual: ${guidesConfig.unit === 'px' ? 'Píxeles (px)' : guidesConfig.unit === 'percent' ? 'Porcentaje (%)' : `Personalizado (${guidesConfig.customScale}px = 1 ${guidesConfig.customLabel})`}. Clic para cambiar · Doble clic para administrar guías y perspectiva.`}
             className="absolute top-0 left-0 z-[36] flex items-center justify-center text-[9px] font-mono font-bold text-amber-300 hover:text-amber-200 hover:bg-[#1b2236] border-r border-b border-slate-700/80 select-none cursor-pointer transition-colors"
             style={{
               width: `${RULER_THICKNESS}px`,
@@ -707,7 +1244,6 @@ export const ViewportRulersAndGuides: React.FC<ViewportRulersAndGuidesProps> = (
             {unitBadge}
           </button>
 
-          {/* Horizontal Ruler (drag down to create Horizontal guide) */}
           <canvas
             ref={hRulerCanvasRef}
             onPointerDown={(e) => startCreateFromRuler('horizontal', e)}
@@ -724,7 +1260,6 @@ export const ViewportRulersAndGuides: React.FC<ViewportRulersAndGuidesProps> = (
             }}
           />
 
-          {/* Vertical Ruler (drag right to create Vertical guide) */}
           <canvas
             ref={vRulerCanvasRef}
             onPointerDown={(e) => startCreateFromRuler('vertical', e)}
@@ -764,13 +1299,13 @@ export const ViewportRulersAndGuides: React.FC<ViewportRulersAndGuidesProps> = (
             <button
               type="button"
               onClick={() => {
-                onOpenGuidesModal?.('list');
+                onOpenGuidesModal?.('groups');
                 setContextMenu(null);
               }}
               className="px-3 py-1.5 flex items-center gap-2 hover:bg-[#20273a] text-left"
             >
               <SlidersHorizontal className="w-3.5 h-3.5 text-amber-400" />
-              <span>Editar posición exacta...</span>
+              <span>Editar posición, grupo y color...</span>
             </button>
             <button
               type="button"
