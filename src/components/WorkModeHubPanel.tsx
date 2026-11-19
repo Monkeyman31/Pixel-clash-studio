@@ -1,0 +1,762 @@
+import React, { useEffect, useMemo, useRef } from 'react';
+import {
+  CheckCircle2,
+  Compass,
+  Download,
+  Film,
+  Flame,
+  Grid,
+  Layers,
+  LayoutTemplate,
+  Mountain,
+  Pause,
+  Play,
+  RotateCcw,
+  ShieldAlert,
+  Sliders,
+  Sparkles,
+  Swords,
+  UserSquare2,
+  Wand2,
+  AlertTriangle,
+} from 'lucide-react';
+import {
+  EditableFxRecipe,
+  Layer,
+  ProjectWorkMode,
+  StageParallaxConfig,
+  TilesetWorkspaceConfig,
+} from '../types';
+import {
+  analyzeTilesetSeams,
+  PARALLAX_SPEED_PRESETS,
+  WORK_MODE_ORDER,
+  WORK_MODES_REGISTRY,
+} from '../utils/workModesEngine';
+import { StudioSlider } from './StudioSlider';
+
+interface WorkModeHubPanelProps {
+  workMode: ProjectWorkMode;
+  onChangeWorkMode: (mode: ProjectWorkMode) => void;
+  canvasWidth: number;
+  canvasHeight: number;
+  layers: Layer[];
+  compositeGrid: (string | null)[][];
+  // Stage Parallax & Guides
+  stageParallaxConfig: StageParallaxConfig;
+  onChangeStageParallaxConfig: (next: StageParallaxConfig) => void;
+  onUpdateLayerParallaxSpeed: (layerIndex: number, speed: number) => void;
+  // Tileset Studio
+  tilesetConfig: TilesetWorkspaceConfig;
+  onChangeTilesetConfig: (next: TilesetWorkspaceConfig) => void;
+  // Non-destructive actions
+  onCreateSuggestedLayers: (mode: ProjectWorkMode) => void;
+  onApplyModeGuides: (mode: ProjectWorkMode) => void;
+  onInsertTemplate: (templateId: string) => void;
+  onTriggerModeAi: (kind: 'stage' | 'hud' | 'fx', promptHint: string, categoryLabel: string) => void;
+  // FX Studio shortcuts
+  onOpenFxStudio: (tab?: 'generator' | 'lab' | 'library', recipe?: EditableFxRecipe | null) => void;
+  lastGeneratedFxRecipe?: EditableFxRecipe | null;
+  activeLayerFxRecipe?: EditableFxRecipe | null;
+  onOpenExportModal: () => void;
+}
+
+const MODE_ICON_MAP: Record<ProjectWorkMode, React.FC<{ className?: string }>> = {
+  fighter: Swords,
+  stage: Mountain,
+  hud_ui: LayoutTemplate,
+  fx: Flame,
+  tileset: Grid,
+  portrait: UserSquare2,
+  cutscene: Film,
+  custom: Sliders,
+};
+
+export const WorkModeHubPanel: React.FC<WorkModeHubPanelProps> = ({
+  workMode,
+  onChangeWorkMode,
+  canvasWidth,
+  canvasHeight,
+  layers,
+  compositeGrid,
+  stageParallaxConfig,
+  onChangeStageParallaxConfig,
+  onUpdateLayerParallaxSpeed,
+  tilesetConfig,
+  onChangeTilesetConfig,
+  onCreateSuggestedLayers,
+  onApplyModeGuides,
+  onInsertTemplate,
+  onTriggerModeAi,
+  onOpenFxStudio,
+  lastGeneratedFxRecipe,
+  activeLayerFxRecipe,
+  onOpenExportModal,
+}) => {
+  const modeDef = WORK_MODES_REGISTRY[workMode];
+  const repeatCanvasRef = useRef<HTMLCanvasElement>(null);
+  const autotileCanvasRef = useRef<HTMLCanvasElement>(null);
+
+  const seamReport = useMemo(() => {
+    if (workMode !== 'tileset') return null;
+    return analyzeTilesetSeams(compositeGrid, canvasWidth, canvasHeight);
+  }, [workMode, compositeGrid, canvasWidth, canvasHeight]);
+
+  // Render live 3x3 Tileset Seamless Repeat Preview
+  useEffect(() => {
+    if (workMode !== 'tileset') return;
+    const canvas = repeatCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const cw = canvas.width;
+    const ch = canvas.height;
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.fillStyle = '#0f172a';
+    ctx.fillRect(0, 0, cw, ch);
+
+    const tileW = cw / 3;
+    const tileH = ch / 3;
+    const cellW = tileW / Math.max(1, canvasWidth);
+    const cellH = tileH / Math.max(1, canvasHeight);
+
+    for (let ty = 0; ty < 3; ty++) {
+      for (let tx = 0; tx < 3; tx++) {
+        const ox = tx * tileW;
+        const oy = ty * tileH;
+        for (let y = 0; y < canvasHeight; y++) {
+          const row = compositeGrid[y];
+          if (!row) continue;
+          for (let x = 0; x < canvasWidth; x++) {
+            const col = row[x];
+            if (!col) continue;
+            ctx.fillStyle = col;
+            ctx.fillRect(
+              Math.floor(ox + x * cellW),
+              Math.floor(oy + y * cellH),
+              Math.ceil(cellW),
+              Math.ceil(cellH)
+            );
+          }
+        }
+      }
+    }
+
+    // Center tile frame indicator
+    ctx.strokeStyle = 'rgba(168, 85, 247, 0.75)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(Math.floor(tileW) + 0.5, Math.floor(tileH) + 0.5, Math.floor(tileW), Math.floor(tileH));
+  }, [workMode, compositeGrid, canvasWidth, canvasHeight]);
+
+  // Render 16-tile Autotile bitmask preview (4x4 island / corridor / corner configurations)
+  useEffect(() => {
+    if (workMode !== 'tileset' || !tilesetConfig.showAutotilePreview) return;
+    const canvas = autotileCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const cw = canvas.width;
+    const ch = canvas.height;
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.fillStyle = '#090d16';
+    ctx.fillRect(0, 0, cw, ch);
+
+    // Build offscreen tile bitmap first
+    const off = document.createElement('canvas');
+    off.width = canvasWidth;
+    off.height = canvasHeight;
+    const octx = off.getContext('2d');
+    if (!octx) return;
+    for (let y = 0; y < canvasHeight; y++) {
+      const row = compositeGrid[y];
+      if (!row) continue;
+      for (let x = 0; x < canvasWidth; x++) {
+        if (row[x]) {
+          octx.fillStyle = row[x]!;
+          octx.fillRect(x, y, 1, 1);
+        }
+      }
+    }
+
+    // Draw 4x4 autotile layout (N/E/S/W bitmask visualization)
+    const slotW = Math.floor(cw / 4);
+    const slotH = Math.floor(ch / 4);
+    ctx.imageSmoothingEnabled = false;
+    for (let mask = 0; mask < 16; mask++) {
+      const col = mask % 4;
+      const row = Math.floor(mask / 4);
+      const x = col * slotW + 2;
+      const y = row * slotH + 2;
+      const w = slotW - 4;
+      const h = slotH - 4;
+      ctx.drawImage(off, x, y, w, h);
+
+      // Highlight open edges according to bitmask (1=N, 2=E, 4=S, 8=W)
+      ctx.strokeStyle = 'rgba(56, 189, 248, 0.85)';
+      ctx.lineWidth = 1.5;
+      if ((mask & 1) === 0) {
+        ctx.beginPath(); ctx.moveTo(x, y + 0.5); ctx.lineTo(x + w, y + 0.5); ctx.stroke();
+      }
+      if ((mask & 2) === 0) {
+        ctx.beginPath(); ctx.moveTo(x + w - 0.5, y); ctx.lineTo(x + w - 0.5, y + h); ctx.stroke();
+      }
+      if ((mask & 4) === 0) {
+        ctx.beginPath(); ctx.moveTo(x, y + h - 0.5); ctx.lineTo(x + w, y + h - 0.5); ctx.stroke();
+      }
+      if ((mask & 8) === 0) {
+        ctx.beginPath(); ctx.moveTo(x + 0.5, y); ctx.lineTo(x + 0.5, y + h); ctx.stroke();
+      }
+    }
+  }, [workMode, tilesetConfig.showAutotilePreview, compositeGrid, canvasWidth, canvasHeight]);
+
+  const editableRecipe = activeLayerFxRecipe || lastGeneratedFxRecipe;
+
+  return (
+    <div className="flex flex-col gap-3 text-[11px]">
+      {/* 8-Mode Non-Destructive Selector Grid */}
+      <div className="flex flex-col gap-1.5">
+        <div className="flex items-center justify-between text-[10px] font-mono">
+          <span className="uppercase tracking-wider opacity-75">Modo de Proyecto</span>
+          <span className="text-[9px] text-emerald-400">No destructivo</span>
+        </div>
+        <div className="grid grid-cols-4 gap-1">
+          {WORK_MODE_ORDER.map((id) => {
+            const def = WORK_MODES_REGISTRY[id];
+            const Icon = MODE_ICON_MAP[id];
+            const active = workMode === id;
+            return (
+              <button
+                key={id}
+                type="button"
+                onClick={() => onChangeWorkMode(id)}
+                title={def.description}
+                className="py-1.5 px-1 rounded-md border flex flex-col items-center gap-0.5 transition-colors"
+                style={{
+                  backgroundColor: active ? `color-mix(in srgb, ${def.accentColor} 20%, var(--studio-bg-elevated))` : 'var(--studio-bg-elevated)',
+                  borderColor: active ? def.accentColor : 'var(--studio-border)',
+                  color: active ? 'var(--studio-text)' : 'var(--studio-text-muted)',
+                }}
+              >
+                <Icon className="w-3.5 h-3.5" />
+                <span className="text-[9px] font-semibold truncate w-full text-center">{def.shortLabel}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Active Mode Summary Banner */}
+        <div
+          className="p-2 rounded-lg border text-[10px] leading-snug"
+          style={{
+            backgroundColor: `color-mix(in srgb, ${modeDef.accentColor} 10%, var(--studio-bg-elevated))`,
+            borderColor: `color-mix(in srgb, ${modeDef.accentColor} 40%, var(--studio-border))`,
+          }}
+        >
+          <div className="flex items-center justify-between font-bold mb-0.5">
+            <span>Modo {modeDef.label}</span>
+            <span
+              className="px-1.5 py-0.2 rounded text-[9px] font-mono"
+              style={{ backgroundColor: modeDef.accentColor, color: '#090d16' }}
+            >
+              {modeDef.badge}
+            </span>
+          </div>
+          <p className="opacity-80">{modeDef.description}</p>
+        </div>
+
+        {/* Quick Mode Setup Actions */}
+        <div className="grid grid-cols-2 gap-1.5">
+          <button
+            type="button"
+            onClick={() => onCreateSuggestedLayers(workMode)}
+            className="py-1.5 px-2 rounded border text-[10px] font-semibold flex items-center justify-center gap-1 hover:bg-white/5"
+            style={{ borderColor: 'var(--studio-border-strong)', backgroundColor: 'var(--studio-bg-elevated)' }}
+            title={`Añadir ${modeDef.suggestedLayers.length} capas sugeridas sin borrar las existentes`}
+          >
+            <Layers className="w-3 h-3 text-sky-400" />
+            <span>+{modeDef.suggestedLayers.length} Capas Base</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => onApplyModeGuides(workMode)}
+            className="py-1.5 px-2 rounded border text-[10px] font-semibold flex items-center justify-center gap-1 hover:bg-white/5"
+            style={{ borderColor: 'var(--studio-border-strong)', backgroundColor: 'var(--studio-bg-elevated)' }}
+            title="Aplicar guías inteligentes para este modo"
+          >
+            <Compass className="w-3 h-3 text-amber-400" />
+            <span>Guías del Modo</span>
+          </button>
+        </div>
+      </div>
+
+      {/* ===================== STAGE MODE CONTROLS ===================== */}
+      {workMode === 'stage' && (
+        <div className="flex flex-col gap-3 pt-2 border-t" style={{ borderColor: 'var(--studio-border)' }}>
+          {/* Parallax Controller */}
+          <div className="p-2.5 rounded-lg border flex flex-col gap-2" style={{ borderColor: 'var(--studio-border)', backgroundColor: 'var(--studio-bg-elevated)' }}>
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400">
+                Sistema Parallax en Vivo
+              </span>
+              <label className="flex items-center gap-1 text-[10px] cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={stageParallaxConfig.enabled}
+                  onChange={(e) =>
+                    onChangeStageParallaxConfig({ ...stageParallaxConfig, enabled: e.target.checked })
+                  }
+                  style={{ accentColor: '#10b981' }}
+                />
+                <span>Activo</span>
+              </label>
+            </div>
+
+            <StudioSlider
+              variant="panel"
+              label="Desplazamiento Cámara"
+              value={Math.round(stageParallaxConfig.scrollOffset)}
+              min={-canvasWidth * 2}
+              max={canvasWidth * 2}
+              step={1}
+              unit="px"
+              defaultValue={0}
+              accentColor="#10b981"
+              onChange={(v) =>
+                onChangeStageParallaxConfig({ ...stageParallaxConfig, enabled: true, scrollOffset: v })
+              }
+            />
+
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() =>
+                  onChangeStageParallaxConfig({
+                    ...stageParallaxConfig,
+                    enabled: true,
+                    autoScroll: !stageParallaxConfig.autoScroll,
+                  })
+                }
+                className="flex-1 py-1 px-2 rounded border text-[10px] font-semibold flex items-center justify-center gap-1"
+                style={{
+                  backgroundColor: stageParallaxConfig.autoScroll ? '#10b981' : 'var(--studio-bg-card)',
+                  borderColor: stageParallaxConfig.autoScroll ? '#10b981' : 'var(--studio-border)',
+                  color: stageParallaxConfig.autoScroll ? '#020617' : 'var(--studio-text)',
+                }}
+              >
+                {stageParallaxConfig.autoScroll ? <Pause className="w-3 h-3" /> : <Play className="w-3 h-3" />}
+                <span>{stageParallaxConfig.autoScroll ? 'Detener Scroll' : 'Auto-Parallax'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  onChangeStageParallaxConfig({ ...stageParallaxConfig, autoScroll: false, scrollOffset: 0 })
+                }
+                className="p-1.5 rounded border hover:bg-white/10"
+                style={{ borderColor: 'var(--studio-border)' }}
+                title="Centrar cámara (0 px)"
+              >
+                <RotateCcw className="w-3 h-3" />
+              </button>
+            </div>
+
+            {/* Per-layer Parallax Speed Matrix */}
+            <div className="flex flex-col gap-1 pt-1 border-t" style={{ borderColor: 'var(--studio-border)' }}>
+              <span className="text-[9px] font-mono opacity-70">Velocidad Parallax por Capa:</span>
+              <div className="flex flex-col gap-1 max-h-40 overflow-y-auto pr-0.5">
+                {layers.map((layer, idx) => {
+                  const spd = layer.parallaxSpeed ?? 1.0;
+                  return (
+                    <div
+                      key={layer.id}
+                      className="p-1.5 rounded border flex flex-col gap-1"
+                      style={{ borderColor: 'var(--studio-border)', backgroundColor: 'var(--studio-bg-card)' }}
+                    >
+                      <div className="flex items-center justify-between gap-1 text-[10px]">
+                        <span className="truncate font-medium">{layer.name}</span>
+                        <span className="font-mono tabular-nums text-emerald-400 font-bold">{spd.toFixed(2)}×</span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        {PARALLAX_SPEED_PRESETS.map((p) => (
+                          <button
+                            key={p.label}
+                            type="button"
+                            onClick={() => onUpdateLayerParallaxSpeed(idx, p.speed)}
+                            className="flex-1 py-0.5 rounded text-[8px] font-mono border transition-colors"
+                            style={{
+                              backgroundColor: Math.abs(spd - p.speed) < 0.05 ? '#10b981' : 'transparent',
+                              borderColor: Math.abs(spd - p.speed) < 0.05 ? '#10b981' : 'var(--studio-border)',
+                              color: Math.abs(spd - p.speed) < 0.05 ? '#020617' : 'var(--studio-text-muted)',
+                            }}
+                            title={`${p.label} (${p.desc})`}
+                          >
+                            {p.desc}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
+          {/* Stage Composition Guides */}
+          <div className="p-2.5 rounded-lg border flex flex-col gap-1.5" style={{ borderColor: 'var(--studio-border)', backgroundColor: 'var(--studio-bg-elevated)' }}>
+            <span className="text-[10px] font-bold uppercase tracking-wider opacity-80">Guías de Escenario</span>
+            <div className="grid grid-cols-2 gap-1 text-[10px]">
+              {(
+                [
+                  ['horizon', 'Línea horizonte'],
+                  ['playableArea', 'Área jugable'],
+                  ['sideBounds', 'Límites laterales'],
+                  ['jumpHeight', 'Altura de salto'],
+                  ['cameraZone', 'Zona de cámara'],
+                ] as const
+              ).map(([key, label]) => (
+                <label key={key} className="flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={stageParallaxConfig.guides[key]}
+                    onChange={(e) =>
+                      onChangeStageParallaxConfig({
+                        ...stageParallaxConfig,
+                        guides: { ...stageParallaxConfig.guides, [key]: e.target.checked },
+                      })
+                    }
+                    style={{ accentColor: '#10b981' }}
+                  />
+                  <span className="truncate">{label}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+
+          {/* Stage Templates */}
+          <div className="flex flex-col gap-1.5">
+            <span className="text-[10px] font-bold uppercase tracking-wider opacity-80">
+              Plantillas Parallax (Multi-Capa)
+            </span>
+            <div className="grid grid-cols-2 gap-1">
+              {modeDef.templates.map((tpl) => (
+                <button
+                  key={tpl.id}
+                  type="button"
+                  onClick={() => onInsertTemplate(tpl.id)}
+                  className="p-1.5 rounded border text-left hover:bg-white/5 transition-colors"
+                  style={{ borderColor: 'var(--studio-border)', backgroundColor: 'var(--studio-bg-elevated)' }}
+                >
+                  <div className="text-[10px] font-semibold truncate">{tpl.name}</div>
+                  <div className="text-[9px] opacity-65 truncate">{tpl.subtitle}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Stage AI Biomes */}
+          <div className="flex flex-col gap-1.5">
+            <span className="text-[10px] font-bold uppercase tracking-wider opacity-80 flex items-center gap-1">
+              <Sparkles className="w-3 h-3 text-emerald-400" />
+              <span>Generar Escenario con IA</span>
+            </span>
+            <div className="flex flex-wrap gap-1">
+              {modeDef.aiCategories.map((cat) => (
+                <button
+                  key={cat.id}
+                  type="button"
+                  onClick={() => onTriggerModeAi('stage', cat.promptHint, cat.label)}
+                  className="px-2 py-1 rounded border text-[9px] font-medium hover:border-emerald-400 transition-colors"
+                  style={{ borderColor: 'var(--studio-border)', backgroundColor: 'var(--studio-bg-elevated)' }}
+                >
+                  {cat.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===================== HUD / UI MODE CONTROLS ===================== */}
+      {workMode === 'hud_ui' && (
+        <div className="flex flex-col gap-3 pt-2 border-t" style={{ borderColor: 'var(--studio-border)' }}>
+          <div className="flex flex-col gap-1.5">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-sky-400">
+              Plantillas HUD / UI ({modeDef.templates.length})
+            </span>
+            <div className="grid grid-cols-2 gap-1">
+              {modeDef.templates.map((tpl) => (
+                <button
+                  key={tpl.id}
+                  type="button"
+                  onClick={() => onInsertTemplate(tpl.id)}
+                  className="p-1.5 rounded border text-left hover:border-sky-400/70 transition-colors"
+                  style={{ borderColor: 'var(--studio-border)', backgroundColor: 'var(--studio-bg-elevated)' }}
+                >
+                  <div className="text-[10px] font-semibold truncate">{tpl.name}</div>
+                  <div className="text-[9px] opacity-65 truncate">{tpl.subtitle}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <span className="text-[10px] font-bold uppercase tracking-wider opacity-80 flex items-center gap-1">
+              <Sparkles className="w-3 h-3 text-sky-400" />
+              <span>Generar Elemento UI con IA</span>
+            </span>
+            <div className="grid grid-cols-3 gap-1">
+              {modeDef.aiCategories.map((cat) => (
+                <button
+                  key={cat.id}
+                  type="button"
+                  onClick={() => onTriggerModeAi('hud', cat.promptHint, cat.label)}
+                  className="py-1 px-1.5 rounded border text-[10px] font-medium hover:border-sky-400 transition-colors"
+                  style={{ borderColor: 'var(--studio-border)', backgroundColor: 'var(--studio-bg-elevated)' }}
+                >
+                  {cat.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===================== FX MODE CONTROLS ===================== */}
+      {workMode === 'fx' && (
+        <div className="flex flex-col gap-2.5 pt-2 border-t" style={{ borderColor: 'var(--studio-border)' }}>
+          <button
+            type="button"
+            onClick={() => onOpenFxStudio('generator')}
+            className="w-full py-2 px-3 rounded-lg font-bold text-xs flex items-center justify-center gap-1.5 shadow-md"
+            style={{ backgroundColor: '#f97316', color: '#090d16' }}
+          >
+            <Flame className="w-4 h-4" />
+            <span>Abrir Generador de Efectos (IA FX)</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onOpenFxStudio('lab')}
+            className="w-full py-2 px-3 rounded-lg border font-semibold text-xs flex items-center justify-center gap-1.5 hover:bg-white/5"
+            style={{ borderColor: '#fb923c', color: '#fed7aa', backgroundColor: 'rgba(249,115,22,0.12)' }}
+          >
+            <Sliders className="w-3.5 h-3.5" />
+            <span>Abrir FX Lab (Editor Visual Modular)</span>
+          </button>
+
+          {editableRecipe && (
+            <button
+              type="button"
+              onClick={() =>
+                onOpenFxStudio(editableRecipe.source === 'lab' ? 'lab' : 'generator', editableRecipe)
+              }
+              className="w-full py-1.5 px-2.5 rounded-lg border text-[10px] font-semibold flex items-center justify-center gap-1.5 hover:bg-white/5"
+              style={{ borderColor: 'var(--studio-border-strong)', backgroundColor: 'var(--studio-bg-elevated)' }}
+            >
+              <Wand2 className="w-3.5 h-3.5 text-amber-400" />
+              <span className="truncate">Re-editar: {editableRecipe.name}</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={() => onOpenFxStudio('library')}
+            className="w-full py-1.5 px-2.5 rounded-lg border text-[10px] font-medium flex items-center justify-center gap-1.5 hover:bg-white/5"
+            style={{ borderColor: 'var(--studio-border)', backgroundColor: 'var(--studio-bg-elevated)' }}
+          >
+            <Sparkles className="w-3.5 h-3.5 text-sky-400" />
+            <span>Explorar Biblioteca FX (.pxfx.json)</span>
+          </button>
+        </div>
+      )}
+
+      {/* ===================== TILESET MODE CONTROLS ===================== */}
+      {workMode === 'tileset' && (
+        <div className="flex flex-col gap-2.5 pt-2 border-t" style={{ borderColor: 'var(--studio-border)' }}>
+          <div className="p-2.5 rounded-lg border flex flex-col gap-2" style={{ borderColor: 'var(--studio-border)', backgroundColor: 'var(--studio-bg-elevated)' }}>
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-purple-400">
+                Tileset Studio · Repetición 3×3
+              </span>
+              <select
+                value={tilesetConfig.tileSize}
+                onChange={(e) =>
+                  onChangeTilesetConfig({ ...tilesetConfig, tileSize: Number(e.target.value) || 16 })
+                }
+                className="px-1.5 py-0.5 rounded border text-[10px] font-mono"
+                style={{ backgroundColor: 'var(--studio-bg-card)', borderColor: 'var(--studio-border)' }}
+              >
+                {[8, 16, 24, 32, 48, 64].map((sz) => (
+                  <option key={sz} value={sz} style={{ backgroundColor: '#131722' }}>
+                    {sz}×{sz} px
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* Live 3x3 seamless preview */}
+            <canvas
+              ref={repeatCanvasRef}
+              width={180}
+              height={180}
+              className="w-full max-w-[180px] mx-auto aspect-square rounded border"
+              style={{ imageRendering: 'pixelated', borderColor: 'var(--studio-border-strong)' }}
+            />
+
+            {/* Seam Checker Readout */}
+            {seamReport && (
+              <div className="p-2 rounded border text-[10px] font-mono flex flex-col gap-1" style={{ borderColor: 'var(--studio-border)', backgroundColor: 'var(--studio-bg-card)' }}>
+                <div className="flex items-center justify-between">
+                  <span className="flex items-center gap-1 font-semibold">
+                    {seamReport.overallScore >= 85 ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                    ) : (
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                    )}
+                    <span>Encaje Seamless</span>
+                  </span>
+                  <span
+                    className={`font-bold tabular-nums ${
+                      seamReport.overallScore >= 85 ? 'text-emerald-400' : 'text-amber-400'
+                    }`}
+                  >
+                    {seamReport.overallScore}%
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-[9px] opacity-75 tabular-nums">
+                  <span>Izq ↔ Der: {seamReport.horizontalScore}%</span>
+                  <span>Sup ↔ Inf: {seamReport.verticalScore}%</span>
+                </div>
+              </div>
+            )}
+
+            {/* Tileset Canvas Overlay Toggles */}
+            <div className="grid grid-cols-2 gap-1 text-[10px]">
+              {(
+                [
+                  ['showBlockGrid', 'Vista bloques'],
+                  ['showRepeat3x3', 'Repetir 3×3 lienzo'],
+                  ['showSeamChecker', 'Marcar costuras'],
+                  ['showAutotilePreview', 'Autotiling 16'],
+                ] as const
+              ).map(([key, label]) => (
+                <label key={key} className="flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={tilesetConfig[key]}
+                    onChange={(e) =>
+                      onChangeTilesetConfig({ ...tilesetConfig, [key]: e.target.checked })
+                    }
+                    style={{ accentColor: '#a855f7' }}
+                  />
+                  <span className="truncate">{label}</span>
+                </label>
+              ))}
+            </div>
+
+            {tilesetConfig.showAutotilePreview && (
+              <div className="flex flex-col gap-1 pt-1 border-t" style={{ borderColor: 'var(--studio-border)' }}>
+                <span className="text-[9px] font-mono opacity-70">Vista Autotiling (16 bitmasks N/E/S/O):</span>
+                <canvas
+                  ref={autotileCanvasRef}
+                  width={160}
+                  height={160}
+                  className="w-full max-w-[160px] mx-auto aspect-square rounded border"
+                  style={{ imageRendering: 'pixelated', borderColor: 'var(--studio-border)' }}
+                />
+              </div>
+            )}
+          </div>
+
+          {/* Tileset Starter Templates */}
+          <div className="flex flex-col gap-1">
+            <span className="text-[10px] font-bold uppercase tracking-wider opacity-80">
+              Bases Modulares (RPG / Plataforma / Metroidvania)
+            </span>
+            {modeDef.templates.map((tpl) => (
+              <button
+                key={tpl.id}
+                type="button"
+                onClick={() => onInsertTemplate(tpl.id)}
+                className="p-1.5 rounded border text-left hover:border-purple-400 transition-colors flex items-center justify-between"
+                style={{ borderColor: 'var(--studio-border)', backgroundColor: 'var(--studio-bg-elevated)' }}
+              >
+                <div>
+                  <div className="text-[10px] font-semibold">{tpl.name}</div>
+                  <div className="text-[9px] opacity-65">{tpl.subtitle}</div>
+                </div>
+                <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300">
+                  {tpl.category}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ===================== PORTRAIT & CUTSCENE TEMPLATES ===================== */}
+      {(workMode === 'portrait' || workMode === 'cutscene') && modeDef.templates.length > 0 && (
+        <div className="flex flex-col gap-1.5 pt-2 border-t" style={{ borderColor: 'var(--studio-border)' }}>
+          <span className="text-[10px] font-bold uppercase tracking-wider opacity-80">
+            Plantillas de {modeDef.label}
+          </span>
+          {modeDef.templates.map((tpl) => (
+            <button
+              key={tpl.id}
+              type="button"
+              onClick={() => onInsertTemplate(tpl.id)}
+              className="p-2 rounded border text-left hover:bg-white/5 transition-colors flex items-center justify-between"
+              style={{ borderColor: 'var(--studio-border)', backgroundColor: 'var(--studio-bg-elevated)' }}
+            >
+              <div>
+                <div className="text-[10px] font-semibold">{tpl.name}</div>
+                <div className="text-[9px] opacity-65">{tpl.subtitle}</div>
+              </div>
+              <span className="text-[9px] font-mono opacity-75">{tpl.category}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* ===================== FIGHTER QUICK ACTIONS ===================== */}
+      {workMode === 'fighter' && (
+        <div className="flex flex-col gap-1.5 pt-2 border-t" style={{ borderColor: 'var(--studio-border)' }}>
+          <div className="grid grid-cols-2 gap-1.5">
+            <button
+              type="button"
+              onClick={() => onOpenFxStudio('generator')}
+              className="p-2 rounded border text-[10px] font-semibold flex items-center justify-center gap-1 hover:bg-white/5"
+              style={{ borderColor: 'var(--studio-border)', backgroundColor: 'var(--studio-bg-elevated)' }}
+            >
+              <Flame className="w-3.5 h-3.5 text-orange-400" />
+              <span>FX Combate</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onOpenFxStudio('lab')}
+              className="p-2 rounded border text-[10px] font-semibold flex items-center justify-center gap-1 hover:bg-white/5"
+              style={{ borderColor: 'var(--studio-border)', backgroundColor: 'var(--studio-bg-elevated)' }}
+            >
+              <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
+              <span>FX Lab</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Mode-Specialized Export Button */}
+      <div className="pt-2 border-t" style={{ borderColor: 'var(--studio-border)' }}>
+        <button
+          type="button"
+          onClick={onOpenExportModal}
+          className="w-full py-1.5 px-2.5 rounded-lg border text-[10px] font-semibold flex items-center justify-center gap-1.5 hover:bg-white/5"
+          style={{ borderColor: 'var(--studio-border-strong)', backgroundColor: 'var(--studio-bg-elevated)' }}
+        >
+          <Download className="w-3.5 h-3.5 text-emerald-400" />
+          <span>Exportación Especializada ({modeDef.shortLabel})</span>
+        </button>
+      </div>
+    </div>
+  );
+};

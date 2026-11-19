@@ -1,0 +1,40 @@
+name: Compilar Instaladores Windows (.EXE y .MSI)
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-windows-installers:
+    runs-on: windows-latest
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Instalar dependencias del proyecto y empaquetado Electron
+        run: |
+          npm install
+          npm install --save-dev electron electron-builder
+
+      - name: Verificar icono Windows (.ICO)
+        run: node installer/ensure-icon.mjs
+
+      - name: Compilar aplicación para escritorio y generar .EXE + .MSI
+        run: |
+          npx vite build --base=./
+          npx electron-builder --win nsis msi --x64 --config electron-builder.yml
+
+      - name: Publicar instaladores finales (.EXE y .MSI)
+        uses: actions/upload-artifact@v4
+        with:
+          name: PixelClashStudio-Installers-Windows-x64
+          path: |
+            release/*.exe
+            release/*.msi

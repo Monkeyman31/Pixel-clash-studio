@@ -1,0 +1,6 @@
+{
+  "name": "PixelClash Studio",
+  "description": "Suite profesional de pixel art y animación para personajes de juegos de pelea con herramientas ergonómicas, hitboxes, frame data y asistencia inteligente.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

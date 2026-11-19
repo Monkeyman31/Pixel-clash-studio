@@ -1,0 +1,916 @@
+import { RightPanelId } from '../constants/workspaceThemes';
+import { ToolType } from '../types';
+
+export type HelpCategory =
+  | 'Herramientas'
+  | 'Dibujo y Simetría'
+  | 'Capas y Transformación'
+  | 'Animación y Combate'
+  | 'Referencias e IA'
+  | 'Interfaz y Proyecto';
+
+export type HelpDemoType =
+  | 'pixel_draw'
+  | 'symmetry'
+  | 'transform_rotate'
+  | 'layers_blend'
+  | 'vector_curve'
+  | 'hitbox_combat'
+  | 'timeline_anim'
+  | 'references_board'
+  | 'eyedropper_loupe'
+  | 'dummie_pose'
+  | 'workspace_ui'
+  | 'ai_gen';
+
+export interface HelpCatalogItem {
+  id: string; // matches data-help-id="..."
+  name: string;
+  category: HelpCategory;
+  location: string;
+  locationHierarchy?: string[];
+  panelLocation?: string;
+  menuLocation?: string;
+  controlsLocation?: string;
+  subTabHint?: string;
+  searchKeywords?: string;
+  howToAccess: string;
+  hotkey: string;
+  description: string;
+  useCases: string[];
+  demoType: HelpDemoType;
+  panelId?: RightPanelId;
+  toolId?: ToolType;
+  actionId?:
+    | 'open_appearance'
+    | 'open_new_project'
+    | 'open_transform'
+    | 'toggle_ui_edit'
+    | 'open_workspace'
+    | 'open_camera_shake'
+    | 'open_timeline_curves';
+}
+
+export interface HelpTutorialStep {
+  title: string;
+  detail: string;
+  targetHelpId?: string;
+}
+
+export interface HelpTutorial {
+  id: string;
+  title: string;
+  level: 'Principiante' | 'Intermedio' | 'Avanzado';
+  duration: string;
+  summary: string;
+  steps: HelpTutorialStep[];
+}
+
+export const HELP_CATALOG_ITEMS: HelpCatalogItem[] = [
+  // HERRAMIENTAS DE BARRA LATERAL
+  {
+    id: 'tool.move',
+    name: 'Mover Inteligente y Subherramientas',
+    category: 'Herramientas',
+    location: 'Barra de Herramientas (Izquierda) · Mantén pulsado para subherramientas',
+    searchKeywords: 'mover general capa referencia seleccion directa flecha blanca inteligente',
+    howToAccess: 'Pulsa V o mantén pulsado el icono de Mover para desplegar: Mover General, Mover Capa, Mover Referencia, Mover Selección y Selección Directa (Flecha Blanca).',
+    hotkey: 'V',
+    description: 'Detección automática del elemento bajo el cursor (referencia, vector, hitbox o capa) con menú de desambiguación si hay solapamiento, además de 5 subherramientas dedicadas.',
+    useCases: [
+      'Mover capas, referencias, selecciones o nodos vectoriales desde un único bloque limpio.',
+      'Elegir con precisión qué objeto mover cuando varios elementos se superponen.',
+      'Alternar instantáneamente a Selección Directa con A o desde el submenú de Mover.',
+    ],
+    demoType: 'pixel_draw',
+    toolId: 'move',
+    panelId: 'toolbar',
+  },
+  {
+    id: 'tool.zoom',
+    name: 'Lupa (Zoom Profesional)',
+    category: 'Herramientas',
+    location: 'Barra de Herramientas · Navegación y Zoom',
+    searchKeywords: 'lupa zoom acercar alejar region ajustar pantalla 100% 200% 400% 800%',
+    howToAccess: 'Pulsa Z o elige la Lupa. Clic acerca al cursor, Alt+Clic aleja, arrastrar hace zoom a la región exacta. Atajos: Ctrl++, Ctrl+-, Ctrl+0, Ctrl+1.',
+    hotkey: 'Z',
+    description: 'Control de ampliación profesional con zoom al cursor, zoom por caja de región, ajuste automático a ventana y saltos exactos a 100%, 200%, 400%, 800% o valor personalizado.',
+    useCases: [
+      'Acercar rápidamente un detalle exacto arrastrando una caja de región.',
+      'Alternar entre vista 100% (Ctrl+1) y ajuste completo de pantalla (Ctrl+0).',
+    ],
+    demoType: 'eyedropper_loupe',
+    toolId: 'zoom',
+    panelId: 'toolbar',
+  },
+  {
+    id: 'tool.pencil',
+    name: 'Lápiz / Pincel Universal (con Dithering, Smear y Cel Shading)',
+    category: 'Herramientas',
+    location: 'Barra de Herramientas · Panel Pinceles',
+    searchKeywords: 'lapiz pincel aerografo dithering smear cel shading textura flujo estabilizador',
+    howToAccess: 'Pulsa B para Lápiz/Pincel. Activa Dithering (D), Smear (S) o Cel Shading (J) directamente como modificadores universales dentro del Panel Pinceles.',
+    hotkey: 'B',
+    description: 'Motor unificado de dibujo pixel art compatible con Aerógrafo, Textura, Estabilización, Smear, Cel Shading y Dithering universal configurable en una sola herramienta.',
+    useCases: [
+      'Trazar lineart Pixel Perfect y activar Dithering en cualquier pincel sin cambiar de herramienta.',
+      'Combinar Smear o Cel Shading con tramas Bayer u ordenadas.',
+    ],
+    demoType: 'pixel_draw',
+    toolId: 'pencil',
+    panelId: 'brushes',
+  },
+  {
+    id: 'tool.eraser',
+    name: 'Borrador Pixel',
+    category: 'Herramientas',
+    location: 'Barra de Herramientas · Dibujo principal',
+    howToAccess: 'Pulsa E o selecciona el borrador. Respeta el tamaño de pincel, forma y simetría activa.',
+    hotkey: 'E',
+    description: 'Elimina píxeles a transparencia pura o pinta en negro sobre máscaras de capa. Compatible con trazos simétricos en tiempo real.',
+    useCases: [
+      'Limpiar rebabas de boceto y siluetas.',
+      'Recortar zonas en máscaras de capa de forma no destructiva.',
+    ],
+    demoType: 'pixel_draw',
+    toolId: 'eraser',
+    panelId: 'toolbar',
+  },
+  {
+    id: 'tool.bucket',
+    name: 'Bote de Pintura, Degradado y Degradado con Dithering',
+    category: 'Herramientas',
+    location: 'Barra de Herramientas · Mantén pulsado para subherramientas',
+    searchKeywords: 'bote pintura relleno solido degradado gradient dithering bayer lineal radial angular reflejado diamante',
+    howToAccess: 'Pulsa G o mantén pulsado el icono del Bote de Pintura para elegir Relleno Sólido, Degradado (Lineal/Radial/Angular/Reflejado/Diamante) o Degradado con Dithering.',
+    hotkey: 'G',
+    description: 'Consolida relleno sólido contiguo, degradados vectoriales en tiempo real y motor de degradado con dithering pixel art (Bayer, Ordered, Custom, Noise) usando la paleta activa.',
+    useCases: [
+      'Crear cielos, metales y sombras retro con Degradado con Dithering en tiempo real.',
+      'Rellenar colores base (flats) con soporte de simetría.',
+    ],
+    demoType: 'pixel_draw',
+    toolId: 'bucket',
+    panelId: 'toolbar',
+  },
+  {
+    id: 'tool.eyedropper',
+    name: 'Cuentagotas Pro + Lupa',
+    category: 'Herramientas',
+    location: 'Barra de Herramientas · Muestra de color',
+    howToAccess: 'Pulsa I o mantén Alt mientras dibujas para muestrear temporalmente.',
+    hotkey: 'I',
+    description: 'Captura el color exacto bajo el cursor mostrando una lupa ampliada (4x–32x), valores RGB/HEX/HSL y tonos más claros u oscuros de la paleta.',
+    useCases: [
+      'Muestrear colores desde referencias o capas visibles.',
+      'Elegir automáticamente sombras y brillos coherentes.',
+    ],
+    demoType: 'eyedropper_loupe',
+    toolId: 'eyedropper',
+    panelId: 'toolbar',
+  },
+  {
+    id: 'tool.shading',
+    name: 'Modificador Cel-Shading (Panel Pinceles)',
+    category: 'Herramientas',
+    location: 'Panel Pinceles → Sección ▼ Cel Shading',
+    searchKeywords: 'cel shading luz sombra pincel modificador volumen',
+    howToAccess: 'Pulsa J o activa la sección ▼ Cel Shading en el Panel Pinceles. Compatible con Dithering universal.',
+    hotkey: 'J',
+    description: 'Modificador de iluminación y sombreado integrado en Lápiz/Pincel para dar volumen arcade sin salir de tu pincel actual.',
+    useCases: [
+      'Sombrear músculos y metales directamente desde Lápiz/Pincel.',
+      'Combinar Cel Shading + Dithering para degradados estilo 16-bit.',
+    ],
+    demoType: 'pixel_draw',
+    toolId: 'pencil',
+    panelId: 'brushes',
+  },
+  {
+    id: 'tool.smear',
+    name: 'Modificador Smear (Panel Pinceles)',
+    category: 'Herramientas',
+    location: 'Panel Pinceles → Sección ▼ Smear',
+    searchKeywords: 'smear barrido motion blur arrastre modificador pincel',
+    howToAccess: 'Pulsa S o activa la sección ▼ Smear en el Panel Pinceles. Arrastra en dirección del golpe.',
+    hotkey: 'S',
+    description: 'Modificador direccional de barrido integrado en el Panel Pinceles, totalmente compatible con Dithering y presión.',
+    useCases: [
+      'Crear estelas de velocidad e in-betweens de impacto.',
+      'Mezclar bordes de energía o fuego con tramado retro.',
+    ],
+    demoType: 'pixel_draw',
+    toolId: 'pencil',
+    panelId: 'brushes',
+  },
+  {
+    id: 'tool.dither',
+    name: 'Modificador Universal Dithering (Panel Pinceles)',
+    category: 'Herramientas',
+    location: 'Panel Pinceles → Sección ▼ Dithering',
+    searchKeywords: 'dithering dither tramado bayer densidad escala contraste rotacion aleatoriedad mezcla',
+    howToAccess: 'Pulsa D o marca □ Activar Dithering en el Panel Pinceles. Funciona con Lápiz, Pincel, Aerógrafo, Smear y Cel Shading.',
+    hotkey: 'D',
+    description: 'Sistema universal de dithering integrado en el Panel Pinceles con control de patrón, densidad, escala, contraste, rotación, aleatoriedad y modo de mezcla.',
+    useCases: [
+      'Aplicar tramas pixel art con cualquier pincel o aerógrafo.',
+      'Mezclar colores de paleta limitada con precisión retro.',
+    ],
+    demoType: 'pixel_draw',
+    toolId: 'pencil',
+    panelId: 'brushes',
+  },
+  {
+    id: 'tool.line',
+    name: 'Línea / Curva Vectorial (Ctrl → Selección Directa)',
+    category: 'Herramientas',
+    location: 'Barra de Herramientas · Vectores y geometría',
+    searchKeywords: 'linea curva vectorial bezier ctrl seleccion directa nodos tangentes previsualizacion',
+    howToAccess: 'Pulsa L. Al trazar o editar una línea, mantén pulsado Ctrl para cambiar temporalmente a Selección Directa (ajustar nodos y tangentes) y suelta Ctrl para seguir dibujando.',
+    hotkey: 'L',
+    description: 'Previsualización en tiempo real al mover el ratón, métricas de longitud/ángulo, vista Pixel-Perfect simultánea y acceso instantáneo a nodos manteniendo Ctrl.',
+    useCases: [
+      'Ajustar curvas y tangentes al vuelo con Ctrl sin cambiar de herramienta.',
+      'Trazar siluetas, espadas y arcos limpios antes de rasterizar.',
+    ],
+    demoType: 'vector_curve',
+    toolId: 'line',
+    panelId: 'toolbar',
+  },
+  {
+    id: 'tool.direct_select',
+    name: 'Selección Directa (Nodos)',
+    category: 'Herramientas',
+    location: 'Barra de Herramientas · Vectores',
+    howToAccess: 'Pulsa A para seleccionar y editar nodos individuales o manejadores de curvas vectoriales.',
+    hotkey: 'A',
+    description: 'Permite ajustar la posición de cada nodo y las manijas Bézier de los trazos vectoriales en vivo.',
+    useCases: [
+      'Corregir la curvatura de un slash o capa ondeante.',
+      'Cambiar nodos de esquina a suaves sin redibujar.',
+    ],
+    demoType: 'vector_curve',
+    toolId: 'direct_select',
+    panelId: 'toolbar',
+  },
+  {
+    id: 'tool.rectangle',
+    name: 'Rectángulo Pixel',
+    category: 'Herramientas',
+    location: 'Barra de Herramientas · Formas',
+    howToAccess: 'Pulsa U y arrastra en el lienzo. Mantén Shift para cuadrado perfecto.',
+    hotkey: 'U',
+    description: 'Dibuja rectángulos huecos o rellenos alineados a la rejilla de píxeles, con espejo automático si la simetría está activa.',
+    useCases: [
+      'Bloqueo inicial de edificios, plataformas y tiles.',
+      'Marcos de interfaz HUD y barras de vida.',
+    ],
+    demoType: 'pixel_draw',
+    toolId: 'rectangle',
+    panelId: 'toolbar',
+  },
+  {
+    id: 'tool.circle',
+    name: 'Círculo / Elipse Pixel',
+    category: 'Herramientas',
+    location: 'Barra de Herramientas · Formas',
+    howToAccess: 'Pulsa C y arrastra en el lienzo. Mantén Shift para proporción 1:1.',
+    hotkey: 'C',
+    description: 'Traza círculos y elipses pixel-art balanceados para cabezas, escudos, orbes de energía o ruedas.',
+    useCases: [
+      'Base proporcional para cráneos, hombreras y proyectiles.',
+      'Aros mágicos y ondas expansivas.',
+    ],
+    demoType: 'pixel_draw',
+    toolId: 'circle',
+    panelId: 'toolbar',
+  },
+  {
+    id: 'tool.text',
+    name: 'Texto Pixel y Arcade',
+    category: 'Herramientas',
+    location: 'Barra de Herramientas · Tipografía',
+    howToAccess: 'Pulsa T y haz clic donde quieras colocar texto. Configura tamaño, fuente y estilos arcade.',
+    hotkey: 'T',
+    description: 'Inserta rótulos nítidos con fuentes pixel o modernas, contorno automático, sombra proyectada y degradados arcade.',
+    useCases: [
+      'Títulos K.O., COMBO, READY y marcadores de HUD.',
+      'Etiquetas dentro de tiles o carteles de escenario.',
+    ],
+    demoType: 'pixel_draw',
+    toolId: 'text',
+    panelId: 'toolbar',
+  },
+  {
+    id: 'tool.select',
+    name: 'Marco Rectangular de Selección',
+    category: 'Herramientas',
+    location: 'Barra de Herramientas · Selección',
+    howToAccess: 'Pulsa M y arrastra para acotar una región rectangular. Usa Ctrl+D para deseleccionar.',
+    hotkey: 'M',
+    description: 'Aísla un área rectangular del lienzo para copiar, mover, borrar o aplicar transformaciones sin afectar el resto de la capa.',
+    useCases: [
+      'Recortar la cabeza o un brazo para reubicarlos.',
+      'Transformar únicamente una zona del sprite con Ctrl+T.',
+    ],
+    demoType: 'pixel_draw',
+    toolId: 'select',
+    panelId: 'toolbar',
+  },
+  {
+    id: 'tool.lasso',
+    name: 'Lazo de Selección Libre',
+    category: 'Herramientas',
+    location: 'Barra de Herramientas · Selección',
+    howToAccess: 'Pulsa Q y rodea con el cursor la silueta exacta que deseas seleccionar.',
+    hotkey: 'Q',
+    description: 'Permite dibujar contornos de selección orgánicos a mano alzada alrededor de partes complejas del personaje.',
+    useCases: [
+      'Seleccionar una extremidad en diagonal sin tocar el torso.',
+      'Aislar partículas o cabello para animarlos aparte.',
+    ],
+    demoType: 'pixel_draw',
+    toolId: 'lasso',
+    panelId: 'toolbar',
+  },
+  {
+    id: 'tool.magic_wand',
+    name: 'Varita Mágica',
+    category: 'Herramientas',
+    location: 'Barra de Herramientas · Selección',
+    howToAccess: 'Pulsa W y haz clic en cualquier zona de color uniforme para seleccionarla al instante.',
+    hotkey: 'W',
+    description: 'Detecta y selecciona automáticamente todos los píxeles contiguos del mismo color para editarlos o enmascararlos.',
+    useCases: [
+      'Seleccionar el fondo sólido para eliminarlo.',
+      'Aislar una pieza de ropa para cambiarle el tono.',
+    ],
+    demoType: 'pixel_draw',
+    toolId: 'magic_wand',
+    panelId: 'toolbar',
+  },
+  {
+    id: 'tool.hitbox',
+    name: 'Editor de Hitboxes / Hurtboxes',
+    category: 'Animación y Combate',
+    location: 'Barra de Herramientas · Fighting Game',
+    howToAccess: 'Pulsa K para crear cajas de ataque, daño o empuje arrastrando sobre el sprite.',
+    hotkey: 'K',
+    description: 'Dibuja y edita rectángulos de colisión (Hitbox, Hurtbox, Pushbox, Throwbox, Counter, Clash, Armor) vinculados al fotograma actual.',
+    useCases: [
+      'Definir el alcance exacto de un puñetazo o proyectil.',
+      'Exportar datos de combate JSON listos para motores de juego.',
+    ],
+    demoType: 'hitbox_combat',
+    toolId: 'hitbox',
+    panelId: 'combat',
+  },
+  {
+    id: 'tool.hand',
+    name: 'Mano (Panear Vista)',
+    category: 'Herramientas',
+    location: 'Barra de Herramientas · Navegación',
+    howToAccess: 'Pulsa H o mantén la barra Espaciadora mientras arrastras sobre el lienzo.',
+    hotkey: 'H / Espacio',
+    description: 'Desplaza la cámara del lienzo libremente sin modificar ningún píxel.',
+    useCases: [
+      'Moverte rápido por sprites grandes cuando trabajas con mucho zoom.',
+    ],
+    demoType: 'pixel_draw',
+    toolId: 'hand',
+    panelId: 'toolbar',
+  },
+
+  // PANELES Y SISTEMAS PRINCIPALES
+  {
+    id: 'panel.symmetry',
+    name: 'Panel de Simetría Avanzado',
+    category: 'Dibujo y Simetría',
+    location: 'Dock lateral derecho (Mini Panel) · Barra superior (Botón Simetría)',
+    howToAccess: 'Haz clic en el icono de Simetría en la barra superior o en el panel lateral derecho "Simetría Avanzada".',
+    hotkey: 'Panel Simetría',
+    description: 'Sistema multi-eje con vista previa en vivo antes de dibujar: Vertical, Horizontal, 4 ejes, 8 ejes, Radial (2–32), Espejo Doble, Ángulo Libre, Punto Central y Línea Personalizada arrastrable.',
+    useCases: [
+      'Ver exactamente dónde caerán tus píxeles reflejados antes de hacer clic.',
+      'Diseñar mandalas, insignias, rostros frontales o escudos simétricos.',
+      'Mover libremente el eje central o los extremos P1/P2 directamente en el lienzo.',
+    ],
+    demoType: 'symmetry',
+    panelId: 'symmetry',
+  },
+  {
+    id: 'action.transform',
+    name: 'Transformación y Rotación Visual',
+    category: 'Capas y Transformación',
+    location: 'Menú Edición > Transformar (Ctrl+T)',
+    howToAccess: 'Pulsa Ctrl+T o abre Edición > Transformar > Transformación Libre / Rotación. Arrastra justo por fuera de las esquinas para rotar estilo Photoshop.',
+    hotkey: 'Ctrl+T',
+    description: 'Caja de transformación no destructiva con escala, rotación libre visual por fuera de las esquinas, inclinar, distorsionar, perspectiva, warp y punto de pivote editable.',
+    useCases: [
+      'Rotar un brazo o arma viendo la inclinación exacta en tiempo real.',
+      'Mantener Shift al rotar para ajustar en pasos de 15°.',
+      'Ajustar valores numéricos exactos desde el panel Propiedades.',
+    ],
+    demoType: 'transform_rotate',
+    actionId: 'open_transform',
+    panelId: 'properties',
+  },
+  {
+    id: 'panel.layers',
+    name: 'Panel de Capas y Carpetas (Photoshop)',
+    category: 'Capas y Transformación',
+    location: 'Dock lateral derecho (Panel principal)',
+    howToAccess: 'Visible por defecto a la derecha o desde Ventana / Interfaz > Capas.',
+    hotkey: 'Ctrl+Shift+N (Nueva)',
+    description: 'Organización jerárquica con 16 modos de fusión, Opacidad y Fill independientes, carpetas anidadas, máscaras de capa, capas globales compartidas entre frames y etiquetas de color.',
+    useCases: [
+      'Separar lineart, sombras (Multiplicar) y brillos (Trama/Color Dodge).',
+      'Usar Capas Globales para fondos o accesorios que permanecen en todos los frames.',
+    ],
+    demoType: 'layers_blend',
+    panelId: 'layers',
+  },
+  {
+    id: 'panel.references',
+    name: 'Mesa Infinita de Referencias',
+    category: 'Referencias e IA',
+    location: 'Dock lateral derecho · Mini panel Referencias',
+    howToAccess: 'Haz clic en el icono de imagen (Ref) en la barra de mini paneles o carga imágenes PNG/JPG.',
+    hotkey: 'Panel Ref',
+    description: 'Tablero de trabajo amplio e infinito independiente del lienzo para colocar, mover, escalar, rotar, agrupar y navegar con Minimapa múltiples referencias sin quedar restringido al canvas.',
+    useCases: [
+      'Construir moodboards de anatomía, paletas y armaduras junto al dibujo.',
+      'Hacer zoom y paneo dentro de la mesa infinita y volver rápido con el Minimapa.',
+    ],
+    demoType: 'references_board',
+    panelId: 'references',
+  },
+  {
+    id: 'panel.dummie',
+    name: 'Dummie 2D & Poses Articuladas',
+    category: 'Referencias e IA',
+    location: 'Dock lateral / Paneles > Dummie 2D',
+    howToAccess: 'Activa el panel Dummie desde Interfaz o desde Referencias.',
+    hotkey: 'Ctrl+Alt+D',
+    description: 'Maniquí anatómico articulado independiente con 9 tipos de cuerpo (masculino, femenino, chibi, anime, cuadrúpedo, dragón, etc.) para guiar poses de combate.',
+    useCases: [
+      'Probar poses de patada alta o guardia antes de dibujar píxeles.',
+      'Superponer silueta semitransparente encima del lienzo como guía.',
+    ],
+    demoType: 'dummie_pose',
+    panelId: 'dummie',
+  },
+  {
+    id: 'panel.ai',
+    name: 'Suite IA Contextual',
+    category: 'Referencias e IA',
+    location: 'Dock lateral derecho · Mini panel IA',
+    howToAccess: 'Pulsa Ctrl+Alt+A o abre el panel IA en el lateral.',
+    hotkey: 'Ctrl+Alt+A',
+    description: 'Genera VFX, escenarios, HUD o convierte imágenes a pixel art respetando automáticamente la paleta, escala y estilo de tu proyecto sin sobrescribir capas existentes.',
+    useCases: [
+      'Crear explosiones o auras con la misma paleta del personaje.',
+      'Convertir una referencia o boceto a sprite limpio en una capa separada.',
+    ],
+    demoType: 'ai_gen',
+    panelId: 'ai',
+  },
+  {
+    id: 'panel.timeline',
+    name: 'Línea de Tiempo y Grupos de Animación',
+    category: 'Animación y Combate',
+    location: 'Zona inferior (o superior según plantilla)',
+    howToAccess: 'Panel inferior continuo. Pulsa P para reproducir/pausar o N para añadir fotograma.',
+    hotkey: 'P (Play) · N (+Frame)',
+    description: 'Control de fotogramas arrastrables, duraciones precisas (0.0s, 0.01s, 0.05s, 0.1s, 0.5s, 1s, 5s o libre), papel cebolla y grupos nombrables que rotulan cada fila al exportar Sprite Sheets.',
+    useCases: [
+      'Organizar animaciones como "Idle", "Walk" y "Hadouken" en grupos.',
+      'Ajustar tiempos de anticipación e impacto fotograma por fotograma.',
+    ],
+    demoType: 'timeline_anim',
+    panelId: 'timeline',
+  },
+  {
+    id: 'panel.combat',
+    name: 'Fighting Game Studio & Sparring',
+    category: 'Animación y Combate',
+    location: 'Dock lateral derecho · Mini panel Combat',
+    howToAccess: 'Haz clic en el icono de Espadas/Combate en la barra lateral.',
+    hotkey: 'F8 (Hitboxes) · F9 (Test)',
+    description: 'Configura datos de frame (Startup/Active/Recovery, ventaja on-hit/on-block), hitstop, sacudida de cámara y prueba combos en tiempo real contra el dummy sparring.',
+    useCases: [
+      'Validar alcances de ataques y balanceo competitivo.',
+      'Probar animaciones con hitstop y feedback visual real.',
+    ],
+    demoType: 'hitbox_combat',
+    panelId: 'combat',
+  },
+  {
+    id: 'panel.toolbar',
+    name: 'Barra de Herramientas Modular',
+    category: 'Interfaz y Proyecto',
+    location: 'Lateral izquierdo (acoplable a cualquier lado o flotante)',
+    howToAccess: 'Usa los botones 1 / 2 / 3 / Auto en su cabecera, arrastra sus bordes para redimensionarla o pulsa Flotar para convertirla en ventana móvil.',
+    hotkey: 'Ctrl+Alt+Shift+D (Editar UI)',
+    description: 'Barra personalizable en 1, 2, 3 columnas o ajuste automático según tamaño. Puedes reordenar herramientas arrastrándolas en modo edición y acoplarla en cualquier borde.',
+    useCases: [
+      'Expandir en 2 o 3 columnas en monitores pequeños para ver más lienzo.',
+      'Desacoplarla como ventana flotante junto a tu zona de dibujo.',
+    ],
+    demoType: 'workspace_ui',
+    panelId: 'toolbar',
+  },
+  {
+    id: 'action.appearance',
+    name: 'Personalización Avanzada de Apariencia',
+    category: 'Interfaz y Proyecto',
+    location: 'Menú Interfaz > Apariencia...',
+    howToAccess: 'Abre el menú superior Interfaz > Apariencia... para editar tema, colores personalizados, gradientes, densidad, iconos y esquinas.',
+    hotkey: 'Menú Interfaz',
+    description: 'Permite elegir entre 8 estilos visuales (Moderna, Minimalista, Photoshop, Aseprite, Retro, Flat, Profesional, Pixel UI), personalizar los 8 colores clave, ajustar esquinas, botones, densidad e iconos y exportar temas.',
+    useCases: [
+      'Adaptar el programa a una estética clásica Aseprite, Photoshop o Pixel UI.',
+      'Guardar y compartir tu propio tema visual personalizado.',
+    ],
+    demoType: 'workspace_ui',
+    actionId: 'open_appearance',
+  },
+  {
+    id: 'action.new_project',
+    name: 'Diálogo Nuevo Archivo y Plantillas',
+    category: 'Interfaz y Proyecto',
+    location: 'Menú Archivo > Nuevo (Ctrl+N)',
+    howToAccess: 'Pulsa Ctrl+N o abre Archivo > Nuevo para crear un lienzo con plantillas visuales, fondo, paleta inicial y proyectos recientes.',
+    hotkey: 'Ctrl+N',
+    description: 'Asistente visual por categorías (Personajes, Spritesheets, Tilesets, Escenarios, HUD, Animación, VFX, Fighting Game) con vista previa proporcional en vivo, opciones de inicio rápido e historial reciente.',
+    useCases: [
+      'Comenzar un luchador arcade 64x64 o un tileset 16x16 con cuadrícula y capa inicial listas.',
+      'Reabrir rápidamente tus dimensiones y proyectos recientes.',
+    ],
+    demoType: 'workspace_ui',
+    actionId: 'open_new_project',
+  },
+  {
+    id: 'action.what_is_this',
+    name: 'Modo "¿Dónde está?" (Inspector Visual Shift+F1)',
+    category: 'Interfaz y Proyecto',
+    location: 'Barra Superior (?) · Menú Ayuda > Modo "¿Dónde está?"',
+    locationHierarchy: ['Menú Ayuda', 'Modo "¿Dónde está?"'],
+    menuLocation: 'Ayuda > Modo "¿Dónde está?"',
+    controlsLocation: 'Botón "?" en Barra Superior o Shift+F1',
+    searchKeywords: 'donde esta inspector ayuda tooltip cursor',
+    howToAccess: 'Pulsa Shift+F1 o haz clic en el botón "?" en la barra superior y pasa el cursor sobre cualquier botón o panel.',
+    hotkey: 'Shift+F1',
+    description: 'Inspector interactivo en vivo: al pasar el ratón sobre cualquier herramienta, botón o panel muestra instantáneamente su nombre, función, ubicación exacta, atajo y acceso directo al manual.',
+    useCases: [
+      'Descubrir qué hace un icono sin tener que hacer clic ni perder tu flujo.',
+      'Aprender atajos de teclado mientras trabajas.',
+    ],
+    demoType: 'workspace_ui',
+  },
+  // CONTROLADORES DE ANIMACIÓN Y CÁMARA
+  {
+    id: 'anim.camera_shake',
+    name: 'Temblor de Cámara (Camera Shake)',
+    category: 'Animación y Combate',
+    location: 'Paneles > Animación > Controladores de Cámara > Temblor de Cámara',
+    locationHierarchy: ['Paneles', 'Animación', 'Controladores de Cámara', 'Temblor de Cámara'],
+    panelLocation: 'Panel Animación (o Fighting Studio)',
+    menuLocation: 'Ventana / Interfaz > Paneles > Animación · Ayuda > ¿Dónde está?',
+    controlsLocation: 'Intensidad (px), Duración (ms), Frecuencia (Hz), Dirección y botón "Probar Temblor"',
+    subTabHint: 'camera_shake',
+    searchKeywords: 'camara cámara temblor shake sacudida vibracion impacto screen shake animacion hitstop',
+    howToAccess: 'Abre el panel Animación > Controladores de Cámara y Temblor, o activa Screen Shake en Fighting Studio. Pulsa "Probar Temblor" o Ctrl+Alt+T.',
+    hotkey: 'Ctrl+Alt+T',
+    description: 'Sistema configurable de vibración de cámara para impactos, explosiones y cinemáticas. Permite definir intensidad en píxeles, duración en milisegundos, frecuencia en Hz, dirección (horizontal, vertical o ambos) y disparos automáticos por fotograma.',
+    useCases: [
+      'Dar peso cinematográfico a golpes fuertes, lanzamientos y súper movimientos.',
+      'Sincronizar disparos de temblor en fotogramas clave o eventos de cámara de la Línea de Tiempo.',
+      'Previsualizar el temblor en vivo sobre el lienzo antes de exportar.',
+    ],
+    demoType: 'timeline_anim',
+    panelId: 'animation',
+    actionId: 'open_camera_shake',
+  },
+  {
+    id: 'anim.camera_keyframes',
+    name: 'Keyframes de Cámara (Paneo, Zoom y Disparador Shake)',
+    category: 'Animación y Combate',
+    location: 'Paneles > Animación > Keyframes de Cámara',
+    locationHierarchy: ['Paneles', 'Animación', 'Keyframes de Cámara'],
+    panelLocation: 'Panel Animación / Panel Keyframes',
+    menuLocation: 'Interfaz > Paneles > Animación',
+    controlsLocation: 'Cam X, Cam Y, Zoom %, Activar Shake en Frame, Curva de interpolación',
+    subTabHint: 'camera_keyframes',
+    searchKeywords: 'camara cámara keyframe zoom paneo desplazamiento movimiento animacion',
+    howToAccess: 'En el panel Animación (sección Keyframes de Cámara), ajusta Cam X / Cam Y / Zoom y pulsa "+ Fijar Cam KF".',
+    hotkey: '—',
+    description: 'Controla el encuadre de cámara por fotograma mediante interpolación suave de desplazamiento (X/Y), acercamiento (Zoom) y disparo automático de Temblor de Cámara.',
+    useCases: [
+      'Crear zooms dramáticos durante súper ataques o introducciones de escenario.',
+      'Seguir el movimiento lateral de un personaje a lo largo de la animación.',
+    ],
+    demoType: 'timeline_anim',
+    panelId: 'animation',
+    actionId: 'open_camera_shake',
+  },
+  {
+    id: 'anim.timeline',
+    name: 'Línea de Tiempo (Timeline Arcade + After Effects)',
+    category: 'Animación y Combate',
+    location: 'Zona Inferior > Línea de Tiempo',
+    locationHierarchy: ['Espacio de Trabajo', 'Zona Inferior', 'Línea de Tiempo'],
+    panelLocation: 'Timeline (Acoplado abajo o modular)',
+    menuLocation: 'Animación > Reproducir / Nuevo Fotograma',
+    controlsLocation: 'Reproducción (P), FPS, Fases Startup/Active/Recovery, Dope Sheet de Capas, Marcadores',
+    searchKeywords: 'timeline linea de tiempo fotogramas frames reproduccion loop pingpong dope sheet',
+    howToAccess: 'Usa la barra inferior del estudio para navegar entre fotogramas, ajustar duración en ticks/ms o duplicar secuencias.',
+    hotkey: 'P',
+    description: 'Línea de tiempo híbrida pensada para videojuegos 2D: combina gestión rápida de fotogramas, duración por ticks de 60fps, fases de combate, curvas de capas y eventos sincronizados.',
+    useCases: [
+      'Editar timing preciso cuadro por cuadro en sprites de lucha o plataformas.',
+      'Reordenar fotogramas, crear clips independientes y etiquetar marcadores.',
+    ],
+    demoType: 'timeline_anim',
+    panelId: 'timeline',
+  },
+  {
+    id: 'anim.keyframes',
+    name: 'Keyframes de Capas (Animación Híbrida)',
+    category: 'Animación y Combate',
+    location: 'Paneles > Keyframes · Timeline > Curvas y Keyframes',
+    locationHierarchy: ['Paneles', 'Keyframes', 'Propiedades de Fotograma Clave'],
+    panelLocation: 'Panel Keyframes y barra inferior Curvas de Timeline',
+    menuLocation: 'Interfaz > Paneles > Keyframes',
+    controlsLocation: '+ Keyframe, Offset X/Y, Escala, Opacidad y Curva Easing',
+    searchKeywords: 'keyframe fotograma clave capa interpolacion movimiento posicion escala opacidad',
+    howToAccess: 'Abre el panel Keyframes o pulsa el botón de rombo "Curvas / Keyframes" en la Línea de Tiempo.',
+    hotkey: '—',
+    description: 'Permite animar posición, escala y opacidad de capas individuales entre fotogramas sin duplicar ni destruir los píxeles dibujados.',
+    useCases: [
+      'Desplazar proyectiles, capas o auras de energía automáticamente entre fotogramas.',
+      'Aplicar fade-in / fade-out y escalado dinámico con interpolación.',
+    ],
+    demoType: 'timeline_anim',
+    panelId: 'keyframes',
+    actionId: 'open_timeline_curves',
+  },
+  {
+    id: 'anim.onion_skin',
+    name: 'Papel Cebolla (Onion Skin)',
+    category: 'Animación y Combate',
+    location: 'Paneles > Animación · Línea de Tiempo > Botón Cebolla',
+    locationHierarchy: ['Paneles', 'Animación', 'Papel Cebolla (Onion Skin)'],
+    panelLocation: 'Panel Animación y barra de controles de Timeline',
+    menuLocation: 'Animación > Papel Cebolla',
+    controlsLocation: 'Activar (O), Frames Anteriores (-1..-3), Frames Siguientes (+1..+3), Opacidad',
+    searchKeywords: 'onion skin papel cebolla fantasmas frames anteriores siguientes calco animacion',
+    howToAccess: 'Pulsa la tecla O o activa el interruptor "Papel Cebolla" en la Línea de Tiempo o panel Animación.',
+    hotkey: 'O',
+    description: 'Muestra los fotogramas previos en tinte cálido y los posteriores en tinte frío semitransparentes para mantener arcos de movimiento y volumen coherentes.',
+    useCases: [
+      'Dibujar intercalados (in-betweens) suaves entre poses clave.',
+      'Alinear pies y cabeza respecto al fotograma anterior.',
+    ],
+    demoType: 'timeline_anim',
+    panelId: 'animation',
+  },
+  {
+    id: 'anim.curves',
+    name: 'Curvas de Animación',
+    category: 'Animación y Combate',
+    location: 'Timeline > Curvas / Keyframes · Panel Keyframes',
+    locationHierarchy: ['Timeline', 'Curvas y Keyframes', 'Visor de Curva SVG'],
+    panelLocation: 'Línea de Tiempo (barra desplegable de Curvas) / Panel Keyframes',
+    menuLocation: 'Interfaz > Paneles > Keyframes',
+    controlsLocation: 'Selector de curva (linear, ease-in, ease-out, ease-in-out, hold) y gráfica en vivo',
+    searchKeywords: 'curva curvas graficas aceleracion desaceleracion easing animacion',
+    howToAccess: 'Abre la barra de Curvas/Keyframes en el Timeline o en el panel lateral Keyframes.',
+    hotkey: '—',
+    description: 'Visualiza y controla la aceleración de movimiento entre dos fotogramas clave para evitar animaciones robóticas.',
+    useCases: [
+      'Hacer inicios explosivos (ease-out) para puñetazos y saltos.',
+      'Frenar suavemente al aterrizar o detener una capa.',
+    ],
+    demoType: 'timeline_anim',
+    panelId: 'keyframes',
+    actionId: 'open_timeline_curves',
+  },
+  {
+    id: 'anim.interpolation',
+    name: 'Modos de Interpolación (Animación y Transformación)',
+    category: 'Animación y Combate',
+    location: 'Panel Keyframes (Easing) · Barra Transformar (Nearest/Bilinear/Bicubic)',
+    locationHierarchy: ['Paneles', 'Animación & Transformar', 'Modos de Interpolación'],
+    panelLocation: 'Panel Keyframes y Barra de Transformación',
+    controlsLocation: 'Linear, Ease-In, Ease-Out, Ease-In-Out, Hold (Stepped) · Nearest Neighbor para Pixel Art',
+    searchKeywords: 'interpolacion easing linear ease hold nearest neighbor pixel art',
+    howToAccess: 'Elige el tipo de curva dentro de Keyframes/Timeline o el método de muestreo pixel-art al transformar con Ctrl+T.',
+    hotkey: '—',
+    description: 'Controla tanto la interpolación temporal de animación (Ease/Linear/Hold) como la interpolación espacial de píxeles (Nearest para pixel art puro sin desenfoque).',
+    useCases: [
+      'Mantener pasos discretos estilo sprite clásico con modo Hold (Stepped).',
+      'Preservar bordes duros sin antialiasing usando Nearest al escalar o rotar.',
+    ],
+    demoType: 'timeline_anim',
+    panelId: 'keyframes',
+    actionId: 'open_timeline_curves',
+  },
+  {
+    id: 'anim.events',
+    name: 'Eventos de Timeline (SFX / VFX / Cámara / Hitbox)',
+    category: 'Animación y Combate',
+    location: 'Timeline > Barra de Curvas y Eventos (+ Evt)',
+    locationHierarchy: ['Timeline', 'Inspector de Fotograma', 'Eventos (+ Evt)'],
+    panelLocation: 'Línea de Tiempo (panel desplegable inferior)',
+    controlsLocation: 'Selector de tipo (SFX / VFX / Cámara / Hitbox), etiqueta y botón "+ Evt"',
+    searchKeywords: 'eventos sfx vfx camara cámara sonido particula trigger timeline',
+    howToAccess: 'Activa el panel de Curvas/Eventos en el Timeline, elige tipo "Cámara", "SFX" o "VFX" y pulsa "+ Evt".',
+    hotkey: '—',
+    description: 'Adjunta disparadores a fotogramas concretos para efectos visuales, sonidos, hitboxes o disparos automáticos de Temblor de Cámara durante la reproducción.',
+    useCases: [
+      'Disparar un evento "Cámara" en el frame exacto de impacto.',
+      'Documentar cues de audio y partículas listos para exportar al motor del juego.',
+    ],
+    demoType: 'timeline_anim',
+    panelId: 'timeline',
+    actionId: 'open_timeline_curves',
+  },
+  {
+    id: 'anim.controllers',
+    name: 'Controladores de Animación y Reproducción',
+    category: 'Animación y Combate',
+    location: 'Paneles > Animación',
+    locationHierarchy: ['Paneles', 'Animación', 'Controladores de Animación'],
+    panelLocation: 'Panel Animación',
+    menuLocation: 'Interfaz > Paneles > Animación · Menú Animación',
+    controlsLocation: 'FPS (8/12/24/60), Ciclo (Loop/Ping-Pong/Once), Papel Cebolla, Cámara y Temblor',
+    searchKeywords: 'controladores animacion fps ciclo loop pingpong camara cámara velocidad',
+    howToAccess: 'Abre el panel Animación en el lateral derecho o desde Interfaz > Paneles > Animación.',
+    hotkey: 'P',
+    description: 'Centro unificado para ajustar velocidad en FPS, modo de reproducción, papel cebolla, keyframes de cámara y temblor de cámara.',
+    useCases: [
+      'Alternar rápidamente entre 12 fps tradicionales y 60 fps arcade.',
+      'Centralizar todos los controladores visuales de animación y cámara en un panel.',
+    ],
+    demoType: 'timeline_anim',
+    panelId: 'animation',
+  },
+  {
+    id: 'action.smart_delete',
+    name: 'Eliminación Inteligente Universal (Tecla Suprimir)',
+    category: 'Interfaz y Proyecto',
+    location: 'Global · Tecla Suprimir (Delete / Backspace)',
+    locationHierarchy: ['Edición', 'Eliminación Inteligente Contextual'],
+    menuLocation: 'Edición > Limpiar / Contextual con Suprimir',
+    controlsLocation: 'Tecla Suprimir (Delete) · Soporta Ctrl+Z para restaurar cualquier eliminación',
+    searchKeywords: 'suprimir delete eliminar borrar capa grupo nodo vector referencia frame keyframe pose asset guia',
+    howToAccess: 'Selecciona cualquier elemento (capa, grupo, nodo, vector, referencia, fotograma, keyframe, pose, asset, hitbox o selección) y pulsa Suprimir.',
+    hotkey: 'Delete',
+    description: 'Detecta automáticamente el elemento seleccionado activo. Si hay ambigüedad muestra "¿Desea eliminar?" para elegir qué borrar; si es un bloque crítico (grupo, varios frames o capas) muestra resumen y conteo; y todo queda guardado en Ctrl+Z.',
+    useCases: [
+      'Borrar nodos o trazos vectoriales directamente con Suprimir sin tocar capas.',
+      'Eliminar referencias, frames, hitboxes o poses con deshacer completo en Ctrl+Z.',
+    ],
+    demoType: 'workspace_ui',
+  },
+  {
+    id: 'tool.move_reference',
+    name: 'Subherramienta Mover Referencia',
+    category: 'Referencias e IA',
+    location: 'Barra de Herramientas > Mover (V) > Submenú > Mover Referencia',
+    locationHierarchy: ['Herramientas', 'Mover (V)', 'Mover Referencia'],
+    panelLocation: 'Barra de Herramientas (botón Mover)',
+    controlsLocation: 'Clic o mantén pulsado en Mover (V) -> Mover Referencia, o pulsa Shift+R',
+    searchKeywords: 'mover referencia pureref camara imagen escalar rotar sin tocar capa',
+    howToAccess: 'Pulsa Shift+R o abre el submenú de la herramienta Mover (V) y selecciona "Mover Referencia".',
+    hotkey: 'Shift+R',
+    description: 'Permite seleccionar, arrastrar, escalar (rueda/esquinas) y rotar imágenes de referencia en lienzo o modo Cámara sin modificar ni mover accidentalmente ninguna capa de dibujo.',
+    useCases: [
+      'Reorganizar referencias alrededor del canvas mientras dibujas.',
+      'Ajustar tamaño y rotación visual de tu hoja de modelo sin bloquear capas.',
+    ],
+    demoType: 'references_board',
+    toolId: 'move',
+    panelId: 'toolbar',
+  },
+  {
+    id: 'panel.pureref',
+    name: 'Modo PureRef (Mesa de Referencias en Cámara)',
+    category: 'Referencias e IA',
+    location: 'Barra Superior del Lienzo (Modo PureRef) · Panel Referencias',
+    locationHierarchy: ['Paneles', 'Referencias', 'Modo PureRef en Cámara'],
+    panelLocation: 'Panel Referencias y barra superior del Lienzo',
+    controlsLocation: 'Botón "Modo PureRef" (Ctrl+Alt+R), "Siempre visible", Opacidad global y "Centrar Referencias" (Ctrl+Alt+0)',
+    searchKeywords: 'pureref referencias camara espacio exterior lienzo moodboard organizar siempre visible',
+    howToAccess: 'Pulsa Ctrl+Alt+R o activa "Modo PureRef" en el panel de Referencias o en la barra superior del lienzo.',
+    hotkey: 'Ctrl+Alt+R',
+    description: 'Convierte el área exterior alrededor del lienzo en una mesa libre estilo PureRef: bloquea el dibujo por error y permite mover, escalar, rotar, apilar y reorganizar múltiples referencias con opacidad y pin.',
+    useCases: [
+      'Mantener una mesa de referencias alrededor del sprite sin ocupar otro monitor.',
+      'Recuperar todas las referencias perdidas con Ctrl+Alt+0.',
+    ],
+    demoType: 'references_board',
+    panelId: 'references',
+  },
+  {
+    id: 'tool.line_preview',
+    name: 'Línea Vectorial Temporal y Vista Pixel-Perfect Simultánea',
+    category: 'Dibujo y Simetría',
+    location: 'Barra de Herramientas > Línea Vectorial (L) · Inspector Flotante Vectorial',
+    locationHierarchy: ['Herramientas', 'Vectores', 'Línea Vectorial (Vista en Tiempo Real)'],
+    panelLocation: 'Barra de Herramientas + Inspector Vectorial flotante',
+    controlsLocation: 'Vista previa desde 1er clic, longitud/ángulo/dirección en vivo, Confirmar (Enter), Cancelar (Esc), Vista Pixel-Perfect Simultánea',
+    searchKeywords: 'linea vectorial curva bezier preview vista previa pixel perfect confirmar cancelar rasterizar',
+    howToAccess: 'Pulsa L, haz el primer clic para crear el punto inicial, mueve el ratón para previsualizar en tiempo real, edita nodos/curvas tras el segundo clic y confirma con Enter.',
+    hotkey: 'L',
+    description: 'Muestra la línea o curva en tiempo real desde el primer clic con longitud, ángulo, dirección, grosor, color y previsualización simultánea pixel-by-pixel en cuadrícula. Permanece editable tras colocar puntos hasta confirmar (Mantener vector o Rasterizar).',
+    useCases: [
+      'Comprobar exactamente cómo quedará rasterizada una curva antes de aplicarla al sprite.',
+      'Ajustar curvatura, tangentes y grosor sin tener que deshacer y volver a trazar.',
+    ],
+    demoType: 'vector_curve',
+    toolId: 'line',
+    panelId: 'vector_editor',
+  },
+];
+
+export const HELP_TUTORIALS: HelpTutorial[] = [
+  {
+    id: 'tut-first-sprite',
+    title: 'Tu primer sprite simétrico en 3 pasos',
+    level: 'Principiante',
+    duration: '2 min',
+    summary: 'Crea un lienzo limpio, activa la simetría vertical con vista previa en vivo y bloquea tu silueta sin esfuerzo.',
+    steps: [
+      {
+        title: '1. Crea el proyecto ideal',
+        detail: 'Pulsa Ctrl+N, elige "Personajes" > "Sprite Arcade 64×64" y deja activa la cuadrícula + Pixel Perfect.',
+        targetHelpId: 'action.new_project',
+      },
+      {
+        title: '2. Activa Simetría con réplica previa',
+        detail: 'Abre Simetría Avanzada, selecciona "Vertical" y marca "Puntos de réplica". Verás el punto espejo antes de dibujar.',
+        targetHelpId: 'panel.symmetry',
+      },
+      {
+        title: '3. Traza con Lápiz y rellena',
+        detail: 'Pulsa B para trazar la mitad del casco o torso y G para rellenar ambos lados en un clic.',
+        targetHelpId: 'tool.pencil',
+      },
+    ],
+  },
+  {
+    id: 'tut-photoshop-rotate',
+    title: 'Transformar y rotar brazos como en Photoshop',
+    level: 'Intermedio',
+    duration: '2 min',
+    summary: 'Usa el pivote articular y la rotación visual por fuera de las esquinas sin destruir píxeles.',
+    steps: [
+      {
+        title: '1. Selecciona una parte o capa',
+        detail: 'Usa el Lazo (Q) o selecciona la capa del brazo y pulsa Ctrl+T (Edición > Transformar).',
+        targetHelpId: 'action.transform',
+      },
+      {
+        title: '2. Coloca el pivote en el hombro',
+        detail: 'Arrastra la mira circular central hacia la articulación sobre la que quieres girar.',
+        targetHelpId: 'action.transform',
+      },
+      {
+        title: '3. Rota desde fuera de una esquina',
+        detail: 'Acerca el cursor justo por fuera de una esquina hasta ver el icono curvo ↻ y gira (mantén Shift para pasos de 15°).',
+        targetHelpId: 'action.transform',
+      },
+    ],
+  },
+  {
+    id: 'tut-custom-workspace',
+    title: 'Personalizar paneles, barras y apariencia',
+    level: 'Principiante',
+    duration: '3 min',
+    summary: 'Organiza columnas de herramientas, tablero infinito de referencias y estilo visual completo.',
+    steps: [
+      {
+        title: '1. Ajusta columnas de la Barra de Herramientas',
+        detail: 'Usa los botones 1 | 2 | 3 | Auto en la Barra de Herramientas o pulsa Flotar para moverla donde prefieras.',
+        targetHelpId: 'panel.toolbar',
+      },
+      {
+        title: '2. Crea un moodboard en Referencias',
+        detail: 'Abre Referencias y selecciona "Mesa Libre": panea sin límites, haz zoom con la rueda y usa el Minimapa.',
+        targetHelpId: 'panel.references',
+      },
+      {
+        title: '3. Elige tu estilo en Apariencia',
+        detail: 'Ve a Interfaz > Apariencia... y prueba los presets Photoshop Style, Aseprite Style o Pixel UI.',
+        targetHelpId: 'action.appearance',
+      },
+    ],
+  },
+];
+
+export function findHelpItemById(id: string | null | undefined): HelpCatalogItem | undefined {
+  if (!id) return undefined;
+  return HELP_CATALOG_ITEMS.find((item) => item.id === id);
+}
