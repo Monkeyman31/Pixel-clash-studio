@@ -5,6 +5,7 @@ extraMetadata:
   main: electron/main.cjs
   version: "2.0.0"
 npmRebuild: false
+publish: null
 directories:
   output: release
   buildResources: assets

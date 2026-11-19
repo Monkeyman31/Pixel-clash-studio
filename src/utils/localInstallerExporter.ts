@@ -484,6 +484,7 @@ extraMetadata:
   main: electron/main.cjs
   version: "${cfg.version}"
 npmRebuild: false
+publish: null
 directories:
   output: release
   buildResources: assets
@@ -633,11 +634,11 @@ contextBridge.exposeInMainWorld('pixelClashDesktop', {
     main: 'electron/main.cjs',
     scripts: {
       'build:web': 'vite build --base=./',
-      'build:win-exe': 'vite build --base=./ && electron-builder --win nsis --x64 --config electron-builder.yml',
-      'build:win-msi': 'vite build --base=./ && electron-builder --win msi --x64 --config electron-builder.yml',
-      'build:win-all': 'vite build --base=./ && electron-builder --win nsis msi --x64 --config electron-builder.yml',
-      'build:win-unpacked': 'vite build --base=./ && electron-builder --win dir --x64 --config electron-builder.yml',
-      'build:inno': 'vite build --base=./ && electron-builder --win dir --x64 --config electron-builder.yml && iscc installer/pixelclash-setup.iss',
+      'build:win-exe': 'vite build --base=./ && electron-builder --win nsis --x64 --publish never --config electron-builder.yml',
+      'build:win-msi': 'vite build --base=./ && electron-builder --win msi --x64 --publish never --config electron-builder.yml',
+      'build:win-all': 'vite build --base=./ && electron-builder --win nsis msi --x64 --publish never --config electron-builder.yml',
+      'build:win-unpacked': 'vite build --base=./ && electron-builder --win dir --x64 --publish never --config electron-builder.yml',
+      'build:inno': 'vite build --base=./ && electron-builder --win dir --x64 --publish never --config electron-builder.yml && iscc installer/pixelclash-setup.iss',
     },
     devDependencies: {
       electron: '^33.2.0',
@@ -677,7 +678,7 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: false
         run: |
           npx vite build --base=./
-          npx electron-builder --win nsis msi --x64 --config electron-builder.yml
+          npx electron-builder --win nsis msi --x64 --publish never --config electron-builder.yml
 
       - name: Publicar instaladores finales (.EXE y .MSI)
         uses: actions/upload-artifact@v4

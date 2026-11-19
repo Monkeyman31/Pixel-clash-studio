@@ -280,12 +280,12 @@ export const LocalInstallerModal: React.FC<LocalInstallerModalProps> = ({
                   npm install --save-dev --legacy-peer-deps electron@^33.2.0 electron-builder@^25.1.8{'\n'}
                   node installer/ensure-icon.mjs{'\n'}
                   npx vite build --base=./{'\n'}
-                  npx electron-builder --win nsis msi --x64 --config electron-builder.yml
+                  npx electron-builder --win nsis msi --x64 --publish never --config electron-builder.yml
                   <button
                     type="button"
                     onClick={() => {
                       navigator.clipboard?.writeText(
-                        'npm install --legacy-peer-deps\nnpm install --save-dev --legacy-peer-deps electron@^33.2.0 electron-builder@^25.1.8\nnode installer/ensure-icon.mjs\nnpx vite build --base=./\nnpx electron-builder --win nsis msi --x64 --config electron-builder.yml'
+                        'npm install --legacy-peer-deps\nnpm install --save-dev --legacy-peer-deps electron@^33.2.0 electron-builder@^25.1.8\nnode installer/ensure-icon.mjs\nnpx vite build --base=./\nnpx electron-builder --win nsis msi --x64 --publish never --config electron-builder.yml'
                       );
                       setCopiedCmd(true);
                       window.setTimeout(() => setCopiedCmd(false), 1800);
