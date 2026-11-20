@@ -2,6 +2,13 @@ import { BrushSettings, BrushShape, DitherConfig, Frame, Hitbox, KeyframeEasing,
 import { applyAdjustmentToHex } from './colorFilters';
 import { rasterizeVectorPathsToGrid } from './vectorCurveEngine';
 import { rasterizeParametricShapesList } from './parametricShapeEngine';
+import {
+  blitPixelGridSubRectToCanvas,
+  getCachedLayerEffectivePixels,
+  getCachedPixelGridCanvas,
+  getOrComputeCompositeFrame,
+  parseColorToRgbaTupleFast,
+} from './renderCache';
 
 export function createEmptyGrid(width: number, height: number): (string | null)[][] {
   const grid: (string | null)[][] = [];
@@ -75,27 +82,7 @@ export function drawBrush(
 }
 
 function parseRgbaTuple(color: string): [number, number, number, number] {
-  const trimmed = color.trim();
-  const m = trimmed.match(/^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)(?:\s*,\s*([\d.]+))?\s*\)$/i);
-  if (m) {
-    return [
-      Math.max(0, Math.min(255, Math.round(parseFloat(m[1])))),
-      Math.max(0, Math.min(255, Math.round(parseFloat(m[2])))),
-      Math.max(0, Math.min(255, Math.round(parseFloat(m[3])))),
-      m[4] !== undefined ? Math.max(0, Math.min(1, parseFloat(m[4]))) : 1,
-    ];
-  }
-  const clean = trimmed.replace('#', '');
-  const full =
-    clean.length === 3
-      ? `${clean[0]}${clean[0]}${clean[1]}${clean[1]}${clean[2]}${clean[2]}`
-      : clean.padEnd(6, '0').slice(0, 6);
-  return [
-    parseInt(full.slice(0, 2), 16) || 0,
-    parseInt(full.slice(2, 4), 16) || 0,
-    parseInt(full.slice(4, 6), 16) || 0,
-    1,
-  ];
+  return parseColorToRgbaTupleFast(color);
 }
 
 function rgbToHsl01(r: number, g: number, b: number): [number, number, number] {
@@ -1011,95 +998,144 @@ export function compositeFrame(
   excludeTempLayers: boolean = false,
   layerGroups: LayerGroup[] = []
 ): (string | null)[][] {
-  const result = createEmptyGrid(width, height);
-  let lastClippingBasePixels: (string | null)[][] | null = null;
+  return getOrComputeCompositeFrame(
+    frame,
+    width,
+    height,
+    frameIndex,
+    excludeTempLayers,
+    layerGroups,
+    () => {
+      const result = createEmptyGrid(width, height);
+      let lastClippingBasePixels: (string | null)[][] | null = null;
 
-  for (const layer of frame.layers) {
-    const isClipping = Boolean(layer.clippingMask);
-    if (!isClipping && layer.layerType !== 'adjustment') {
-      lastClippingBasePixels = layer.visible ? layer.pixels : null;
-    }
+      for (let li = 0; li < frame.layers.length; li++) {
+        const layer = frame.layers[li];
+        const isClipping = Boolean(layer.clippingMask);
+        if (!isClipping && layer.layerType !== 'adjustment') {
+          lastClippingBasePixels = layer.visible ? layer.pixels : null;
+        }
 
-    if (!layer.visible) continue;
-    if (excludeTempLayers && layer.layerType === 'temp') continue;
+        if (!layer.visible) continue;
+        if (excludeTempLayers && layer.layerType === 'temp') continue;
 
-    const groupState = resolveGroupVisibilityAndOpacity(layer.groupId, layerGroups);
-    if (!groupState.visible) continue;
+        const groupState = resolveGroupVisibilityAndOpacity(layer.groupId, layerGroups);
+        if (!groupState.visible) continue;
 
-    const kf = evaluateLayerKeyframeTransform(layer, frameIndex);
-    const fillOp = layer.fillOpacity ?? 1;
-    const effectiveOpacity = Math.max(
-      0,
-      Math.min(1, (layer.opacity ?? 1) * fillOp * kf.opacityMultiplier * groupState.opacity)
-    );
-    if (effectiveOpacity <= 0.001) continue;
+        const kf = evaluateLayerKeyframeTransform(layer, frameIndex);
+        const fillOp = layer.fillOpacity ?? 1;
+        const effectiveOpacity = Math.max(
+          0,
+          Math.min(1, (layer.opacity ?? 1) * fillOp * kf.opacityMultiplier * groupState.opacity)
+        );
+        if (effectiveOpacity <= 0.001) continue;
 
-    const blendMode: LayerBlendMode = layer.blendMode || 'normal';
+        const blendMode: LayerBlendMode = layer.blendMode || 'normal';
 
-    if (layer.layerType === 'adjustment' && layer.adjustment) {
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          if (isClipping && (!lastClippingBasePixels || !lastClippingBasePixels[y]?.[x])) continue;
-          const existing = result[y][x];
-          if (existing) {
-            const maskAlpha = resolveMaskAlpha(layer.mask, x, y);
-            const pxOp = effectiveOpacity * maskAlpha;
-            if (pxOp > 0.001) {
-              result[y][x] = applyAdjustmentToHex(existing, layer.adjustment, pxOp);
+        if (layer.layerType === 'adjustment' && layer.adjustment) {
+          const hasMask = Boolean(layer.mask && !layer.mask.disabled);
+          for (let y = 0; y < height; y++) {
+            const resRow = result[y];
+            const clipRow = isClipping ? lastClippingBasePixels?.[y] : null;
+            for (let x = 0; x < width; x++) {
+              if (isClipping && (!clipRow || !clipRow[x])) continue;
+              const existing = resRow[x];
+              if (existing) {
+                const maskAlpha = hasMask ? resolveMaskAlpha(layer.mask, x, y) : 1;
+                const pxOp = effectiveOpacity * maskAlpha;
+                if (pxOp > 0.001) {
+                  resRow[x] = applyAdjustmentToHex(existing, layer.adjustment, pxOp);
+                }
+              }
+            }
+          }
+          continue;
+        }
+
+        const effectivePixels = getCachedLayerEffectivePixels(layer, width, height, () => {
+          let pix =
+            layer.vectorPaths && layer.vectorPaths.length > 0
+              ? rasterizeVectorPathsToGrid(
+                  layer.vectorPaths,
+                  width,
+                  height,
+                  layer.layerType === 'vector' ? null : layer.pixels
+                )
+              : layer.pixels;
+          if (layer.parametricShapes && layer.parametricShapes.length > 0) {
+            pix = rasterizeParametricShapesList(layer.parametricShapes, width, height, pix);
+          }
+          return pix;
+        });
+
+        const hasScale = Math.abs(kf.scale - 1) > 0.01;
+        const hasOffset = kf.offsetX !== 0 || kf.offsetY !== 0;
+        const hasMask = Boolean(layer.mask && !layer.mask.disabled);
+        const fastNormalOpaque =
+          !isClipping && !hasScale && !hasOffset && !hasMask && effectiveOpacity >= 0.999 && blendMode === 'normal';
+
+        // Ultra-fast inner loop for standard opaque normal layers (90% of layers!)
+        if (fastNormalOpaque) {
+          const rowLim = Math.min(height, effectivePixels.length);
+          for (let y = 0; y < rowLim; y++) {
+            const srcRow = effectivePixels[y];
+            if (!srcRow) continue;
+            const dstRow = result[y];
+            const colLim = Math.min(width, srcRow.length);
+            for (let x = 0; x < colLim; x++) {
+              const pixel = srcRow[x];
+              if (pixel) {
+                dstRow[x] = pixel;
+              }
+            }
+          }
+          continue;
+        }
+
+        const cx = width / 2;
+        const cy = height / 2;
+        const invScale = kf.scale > 0.05 ? 1 / kf.scale : 1;
+
+        for (let y = 0; y < height; y++) {
+          const dstRow = result[y];
+          const clipRow = isClipping ? lastClippingBasePixels?.[y] : null;
+          let srcYBase = y - kf.offsetY;
+          if (hasScale) {
+            srcYBase = Math.round(cy + (srcYBase - cy) * invScale);
+          }
+          if (srcYBase < 0 || srcYBase >= height) continue;
+          const srcRow = effectivePixels[srcYBase];
+          if (!srcRow) continue;
+
+          for (let x = 0; x < width; x++) {
+            if (isClipping && (!clipRow || !clipRow[x])) continue;
+            let srcX = x - kf.offsetX;
+            if (hasScale) {
+              srcX = Math.round(cx + (srcX - cx) * invScale);
+            }
+            if (srcX < 0 || srcX >= width) continue;
+            const pixel = srcRow[srcX];
+            if (pixel) {
+              const maskAlpha = hasMask
+                ? resolveMaskAlpha(
+                    layer.mask,
+                    layer.mask?.linked !== false ? srcX : x,
+                    layer.mask?.linked !== false ? srcYBase : y
+                  )
+                : 1;
+              const pixelOpacity = effectiveOpacity * maskAlpha;
+              if (pixelOpacity <= 0.001) continue;
+              dstRow[x] =
+                pixelOpacity < 0.999 || blendMode !== 'normal'
+                  ? blendHexColors(dstRow[x], pixel, pixelOpacity, blendMode)
+                  : pixel;
             }
           }
         }
       }
-      continue;
+      return result;
     }
-
-    const cx = width / 2;
-    const cy = height / 2;
-    const invScale = kf.scale > 0.05 ? 1 / kf.scale : 1;
-    let effectivePixels =
-      layer.vectorPaths && layer.vectorPaths.length > 0
-        ? rasterizeVectorPathsToGrid(
-            layer.vectorPaths,
-            width,
-            height,
-            layer.layerType === 'vector' ? null : layer.pixels
-          )
-        : layer.pixels;
-    if (layer.parametricShapes && layer.parametricShapes.length > 0) {
-      effectivePixels = rasterizeParametricShapesList(
-        layer.parametricShapes,
-        width,
-        height,
-        effectivePixels
-      );
-    }
-
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        if (isClipping && (!lastClippingBasePixels || !lastClippingBasePixels[y]?.[x])) continue;
-        let srcX = x - kf.offsetX;
-        let srcY = y - kf.offsetY;
-        if (Math.abs(kf.scale - 1) > 0.01) {
-          srcX = Math.round(cx + (srcX - cx) * invScale);
-          srcY = Math.round(cy + (srcY - cy) * invScale);
-        }
-        if (srcX < 0 || srcX >= width || srcY < 0 || srcY >= height) continue;
-        const pixel = effectivePixels[srcY]?.[srcX];
-        if (pixel) {
-          const maskX = layer.mask?.linked !== false ? srcX : x;
-          const maskY = layer.mask?.linked !== false ? srcY : y;
-          const maskAlpha = resolveMaskAlpha(layer.mask, maskX, maskY);
-          const pixelOpacity = effectiveOpacity * maskAlpha;
-          if (pixelOpacity <= 0.001) continue;
-          result[y][x] =
-            pixelOpacity < 0.999 || blendMode !== 'normal'
-              ? blendHexColors(result[y][x], pixel, pixelOpacity, blendMode)
-              : pixel;
-        }
-      }
-    }
-  }
-  return result;
+  );
 }
 
 // Replace a specific color throughout an entire layer or frame
@@ -1117,7 +1153,7 @@ export function replaceColorInLayer(
   }
 }
 
-// Convert a frame's composited grid to an HTML5 Canvas element
+// Convert a frame's composited grid to an HTML5 Canvas element using cached ImageData blitting
 export function frameToCanvas(
   frame: Frame,
   width: number,
@@ -1126,24 +1162,17 @@ export function frameToCanvas(
   excludeTempLayers: boolean = false,
   layerGroups: LayerGroup[] = []
 ): HTMLCanvasElement {
+  const composited = compositeFrame(frame, width, height, -1, excludeTempLayers, layerGroups);
+  const baseCanvas = getCachedPixelGridCanvas(composited, width, height);
+
   const canvas = document.createElement('canvas');
-  canvas.width = width * scale;
-  canvas.height = height * scale;
+  canvas.width = Math.max(1, Math.round(width * scale));
+  canvas.height = Math.max(1, Math.round(height * scale));
   const ctx = canvas.getContext('2d');
   if (!ctx) return canvas;
 
   ctx.imageSmoothingEnabled = false;
-
-  const composited = compositeFrame(frame, width, height, -1, excludeTempLayers, layerGroups);
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const col = composited[y][x];
-      if (col) {
-        ctx.fillStyle = col;
-        ctx.fillRect(x * scale, y * scale, scale, scale);
-      }
-    }
-  }
+  ctx.drawImage(baseCanvas, 0, 0, canvas.width, canvas.height);
   return canvas;
 }
 
@@ -1614,41 +1643,33 @@ export function renderPixelGridToCanvas(
   const oy = Math.floor((destHeight - drawH) / 2);
 
   if (typeof document === 'undefined') return;
-  if (!sharedThumbOffscreenCanvas) {
-    sharedThumbOffscreenCanvas = document.createElement('canvas');
-  }
-  const off = sharedThumbOffscreenCanvas;
-  if (off.width !== srcW || off.height !== srcH) {
-    off.width = srcW;
-    off.height = srcH;
-  }
-  const offCtx = off.getContext('2d');
-  if (!offCtx) return;
 
-  offCtx.clearRect(0, 0, srcW, srcH);
-
-  let hasAnyPixel = false;
-  const endY = Math.min(safeH, srcY + srcH, pixels.length);
-  for (let y = srcY; y < endY; y++) {
-    const row = pixels[y];
-    if (!row) continue;
-    const endX = Math.min(safeW, srcX + srcW, row.length);
-    for (let x = srcX; x < endX; x++) {
-      const col = row[x];
-      if (col) {
-        hasAnyPixel = true;
-        offCtx.fillStyle = col;
-        offCtx.fillRect(x - srcX, y - srcY, 1, 1);
-      }
-    }
-  }
-
-  if (hasAnyPixel) {
-    // Keep pixel art razor sharp when upscaling or near-1:1; allow smooth downscale
-    // only on high-res canvases so 1px strokes remain visible in tiny thumbnails.
+  if (boundsMode === 'canvas' && srcX === 0 && srcY === 0 && srcW === safeW && srcH === safeH) {
+    // Fast path: reuse WeakMap-cached 1:1 ImageData canvas for this pixel grid
+    const cached = getCachedPixelGridCanvas(pixels, safeW, safeH);
     ctx.imageSmoothingEnabled = scale < 0.72;
-    ctx.drawImage(off, 0, 0, srcW, srcH, ox, oy, drawW, drawH);
+    ctx.drawImage(cached, 0, 0, safeW, safeH, ox, oy, drawW, drawH);
     ctx.imageSmoothingEnabled = false;
+  } else {
+    if (!sharedThumbOffscreenCanvas) {
+      sharedThumbOffscreenCanvas = document.createElement('canvas');
+    }
+    const { canvas: off, hasAnyPixel } = blitPixelGridSubRectToCanvas(
+      pixels,
+      srcX,
+      srcY,
+      srcW,
+      srcH,
+      sharedThumbOffscreenCanvas
+    );
+
+    if (hasAnyPixel) {
+      // Keep pixel art razor sharp when upscaling or near-1:1; allow smooth downscale
+      // only on high-res canvases so 1px strokes remain visible in tiny thumbnails.
+      ctx.imageSmoothingEnabled = scale < 0.72;
+      ctx.drawImage(off, 0, 0, srcW, srcH, ox, oy, drawW, drawH);
+      ctx.imageSmoothingEnabled = false;
+    }
   }
 
   if (showCanvasFrameOutline && boundsMode === 'canvas' && drawW < destWidth - 2 && drawH < destHeight - 2) {

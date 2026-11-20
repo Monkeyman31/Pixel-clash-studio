@@ -1,22 +1,13 @@
 import JSZip from 'jszip';
 import { writePsdUint8Array, Layer as PsdLayer, Psd } from 'ag-psd';
-import { Frame, Layer, ProjectState } from '../types';
-import { frameToCanvas, generateCombatJson } from './pixelMath';
+import { Frame, Layer, ProjectState, SaveAsFormatId } from '../types';
+import { frameToCanvas, generateCombatJson, generateSpritesheet } from './pixelMath';
+import { parseColorToRgbaTupleFast } from './renderCache';
+import { generateAnimatedGif } from './gifExporter';
 
 function parseHexRgb(hex: string): [number, number, number] {
-  const clean = hex.replace('#', '').trim();
-  if (clean.length === 3) {
-    const r = parseInt(clean[0] + clean[0], 16) || 0;
-    const g = parseInt(clean[1] + clean[1], 16) || 0;
-    const b = parseInt(clean[2] + clean[2], 16) || 0;
-    return [r, g, b];
-  }
-  const full = clean.padEnd(6, '0').slice(0, 6);
-  return [
-    parseInt(full.slice(0, 2), 16) || 0,
-    parseInt(full.slice(2, 4), 16) || 0,
-    parseInt(full.slice(4, 6), 16) || 0,
-  ];
+  const [r, g, b] = parseColorToRgbaTupleFast(hex);
+  return [r, g, b];
 }
 
 export function layerToCanvas(
@@ -37,14 +28,14 @@ export function layerToCanvas(
     const row = layer.pixels[y];
     if (!row) continue;
     for (let x = 0; x < width; x++) {
-      const hex = row[x];
-      if (!hex) continue;
-      const [r, g, b] = parseHexRgb(hex);
+      const col = row[x];
+      if (!col) continue;
+      const [r, g, b, a] = parseColorToRgbaTupleFast(col);
       const idx = (y * width + x) * 4;
       data[idx] = r;
       data[idx + 1] = g;
       data[idx + 2] = b;
-      data[idx + 3] = 255;
+      data[idx + 3] = Math.max(0, Math.min(255, Math.round(a * 255)));
     }
   }
 
@@ -358,13 +349,13 @@ function buildCelChunk(
   for (let y = minY; y <= maxY; y++) {
     const row = layer.pixels[y];
     for (let x = minX; x <= maxX; x++) {
-      const hex = row?.[x];
-      if (hex) {
-        const [r, g, b] = parseHexRgb(hex);
+      const col = row?.[x];
+      if (col) {
+        const [r, g, b, a] = parseColorToRgbaTupleFast(col);
         payload[pxOffset] = r;
         payload[pxOffset + 1] = g;
         payload[pxOffset + 2] = b;
-        payload[pxOffset + 3] = 255;
+        payload[pxOffset + 3] = Math.max(0, Math.min(255, Math.round(a * 255)));
       }
       pxOffset += 4;
     }
@@ -465,3 +456,184 @@ export function exportProjectAsAse(project: ProjectState): Uint8Array {
 
   return output;
 }
+
+// -------------------------------------------------------------
+// UNIVERSAL "GUARDAR COMO..." MULTI-FORMAT EXPORTER
+// -------------------------------------------------------------
+function sanitizeFileStem(name: string): string {
+  const cleaned = (name || 'pixelclash_project')
+    .trim()
+    .replace(/[<>:"/\\|?*]+/g, '_')
+    .replace(/\s+/g, '_');
+  return cleaned || 'pixelclash_project';
+}
+
+function canvasToBlobAsync(
+  canvas: HTMLCanvasElement,
+  mimeType: string,
+  quality?: number
+): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => {
+        if (blob) resolve(blob);
+        else reject(new Error(`No se pudo generar el archivo ${mimeType}`));
+      },
+      mimeType,
+      quality
+    );
+  });
+}
+
+export function downloadBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+
+export interface SaveFormatExportOptions {
+  fileName?: string;
+  scale?: number;
+  jpgBackgroundColor?: string;
+  quality?: number;
+  currentFrameIndex?: number;
+}
+
+export async function exportProjectToFormat(
+  project: ProjectState,
+  format: SaveAsFormatId,
+  options: SaveFormatExportOptions = {}
+): Promise<{ blob: Blob; filename: string; mimeType: string }> {
+  const stem = sanitizeFileStem(options.fileName || project.name);
+  const scale = Math.max(1, Math.min(8, Math.round(options.scale || 1)));
+  const frameIdx = Math.max(
+    0,
+    Math.min(project.frames.length - 1, options.currentFrameIndex ?? project.currentFrameIndex ?? 0)
+  );
+  const activeFrame = project.frames[frameIdx] || project.frames[0];
+
+  if (format === 'pcs') {
+    const bytes = await exportProjectAsPcs(project);
+    const copy = new Uint8Array(bytes.byteLength);
+    copy.set(bytes);
+    return {
+      blob: new Blob([copy.buffer], { type: 'application/octet-stream' }),
+      filename: `${stem}.pcs`,
+      mimeType: 'application/octet-stream',
+    };
+  }
+
+  if (format === 'json') {
+    return {
+      blob: new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' }),
+      filename: `${stem}.json`,
+      mimeType: 'application/json',
+    };
+  }
+
+  if (format === 'ase') {
+    const bytes = exportProjectAsAse(project);
+    const copy = new Uint8Array(bytes.byteLength);
+    copy.set(bytes);
+    return {
+      blob: new Blob([copy.buffer], { type: 'application/octet-stream' }),
+      filename: `${stem}.ase`,
+      mimeType: 'application/octet-stream',
+    };
+  }
+
+  if (format === 'psd') {
+    const bytes = exportProjectAsPsd(project, frameIdx);
+    const copy = new Uint8Array(bytes.byteLength);
+    copy.set(bytes);
+    return {
+      blob: new Blob([copy.buffer], { type: 'image/vnd.adobe.photoshop' }),
+      filename: `${stem}.psd`,
+      mimeType: 'image/vnd.adobe.photoshop',
+    };
+  }
+
+  if (format === 'gif') {
+    const gifBytes = generateAnimatedGif(project.frames, project.width, project.height, {
+      scale,
+      fps: project.fps || 12,
+      pingpong: false,
+      transparent: true,
+      loop: 0,
+      layerGroups: project.layerGroups,
+    });
+    const copy = new Uint8Array(gifBytes.byteLength);
+    copy.set(gifBytes);
+    return {
+      blob: new Blob([copy.buffer], { type: 'image/gif' }),
+      filename: `${stem}.gif`,
+      mimeType: 'image/gif',
+    };
+  }
+
+  if (format === 'spritesheet') {
+    const sheetCanvas = generateSpritesheet(
+      project.frames,
+      project.width,
+      project.height,
+      Math.max(1, project.frames.length),
+      0
+    );
+    let finalCanvas = sheetCanvas;
+    if (scale > 1) {
+      const scaled = document.createElement('canvas');
+      scaled.width = sheetCanvas.width * scale;
+      scaled.height = sheetCanvas.height * scale;
+      const sctx = scaled.getContext('2d');
+      if (sctx) {
+        sctx.imageSmoothingEnabled = false;
+        sctx.drawImage(sheetCanvas, 0, 0, scaled.width, scaled.height);
+        finalCanvas = scaled;
+      }
+    }
+    const blob = await canvasToBlobAsync(finalCanvas, 'image/png');
+    return {
+      blob,
+      filename: `${stem}_spritesheet.png`,
+      mimeType: 'image/png',
+    };
+  }
+
+  // Single-frame image formats: PNG (lossless alpha), WEBP (alpha), JPG (matte bg)
+  const frameCanvas = frameToCanvas(
+    activeFrame,
+    project.width,
+    project.height,
+    scale,
+    true,
+    project.layerGroups || []
+  );
+
+  if (format === 'png') {
+    const blob = await canvasToBlobAsync(frameCanvas, 'image/png');
+    return { blob, filename: `${stem}.png`, mimeType: 'image/png' };
+  }
+
+  if (format === 'webp') {
+    const blob = await canvasToBlobAsync(frameCanvas, 'image/webp', options.quality ?? 0.95);
+    return { blob, filename: `${stem}.webp`, mimeType: 'image/webp' };
+  }
+
+  // JPG (no alpha channel; apply solid background color)
+  const jpgCanvas = document.createElement('canvas');
+  jpgCanvas.width = frameCanvas.width;
+  jpgCanvas.height = frameCanvas.height;
+  const jctx = jpgCanvas.getContext('2d');
+  if (jctx) {
+    jctx.fillStyle = options.jpgBackgroundColor || '#11141c';
+    jctx.fillRect(0, 0, jpgCanvas.width, jpgCanvas.height);
+    jctx.imageSmoothingEnabled = false;
+    jctx.drawImage(frameCanvas, 0, 0);
+  }
+  const blob = await canvasToBlobAsync(jpgCanvas, 'image/jpeg', options.quality ?? 0.94);
+  return { blob, filename: `${stem}.jpg`, mimeType: 'image/jpeg' };
+}
+

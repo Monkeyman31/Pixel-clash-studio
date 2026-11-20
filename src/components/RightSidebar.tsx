@@ -88,6 +88,7 @@ import {
   LayerMaskType,
   LayerType,
   PalettePreset,
+  PerformanceMode,
   ProjectState,
   ProjectWorkMode,
   PureRefConfig,
@@ -160,8 +161,9 @@ import {
 } from '../utils/projectContextAi';
 import { StudioSlider } from './StudioSlider';
 import { CustomBrushPreset } from '../utils/customBrushStorage';
+import { getCachedPixelGridCanvas } from '../utils/renderCache';
 
-const PixelGridMiniPreview: React.FC<{ grid: (string | null)[][]; width: number; height: number; className?: string }> = ({
+const PixelGridMiniPreview: React.FC<{ grid: (string | null)[][]; width: number; height: number; className?: string }> = React.memo(({
   grid,
   width,
   height,
@@ -173,22 +175,15 @@ const PixelGridMiniPreview: React.FC<{ grid: (string | null)[][]; width: number;
     if (!c) return;
     const ctx = c.getContext('2d');
     if (!ctx) return;
-    c.width = width;
-    c.height = height;
+    if (c.width !== width) c.width = width;
+    if (c.height !== height) c.height = height;
     ctx.imageSmoothingEnabled = false;
     ctx.clearRect(0, 0, width, height);
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const col = grid[y]?.[x];
-        if (col) {
-          ctx.fillStyle = col;
-          ctx.fillRect(x, y, 1, 1);
-        }
-      }
-    }
+    const cached = getCachedPixelGridCanvas(grid, width, height);
+    ctx.drawImage(cached, 0, 0);
   }, [grid, width, height]);
   return <canvas ref={ref} className={`pixel-canvas canvas-checkerboard ${className}`} />;
-};
+});
 
 function generateFallbackStageGrid(w: number, h: number, mood: string, style: string): (string | null)[][] {
   const g = createEmptyGrid(w, h);
@@ -654,6 +649,7 @@ interface RightSidebarProps {
   guidesConfig?: GuidesConfig;
   onChangeGuidesConfig?: (next: GuidesConfig) => void;
   onOpenGuidesModal?: (tab?: GuidesModalTab) => void;
+  performanceMode?: PerformanceMode;
 }
 
 const PANEL_ICONS: Record<RightPanelId, React.FC<{ className?: string; style?: React.CSSProperties }>> = {
@@ -975,6 +971,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
   guidesConfig,
   onChangeGuidesConfig,
   onOpenGuidesModal,
+  performanceMode = 'balanced',
 }) => {
   const workModeCompositeGrid = useMemo(
     () =>
@@ -2388,6 +2385,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                       onDuplicateLayerToSelectedFrames={onDuplicateLayerToSelectedFrames}
                       onDuplicateLayerToAllFrames={onDuplicateLayerToAllFrames}
                       onDuplicateGroupToAllFrames={onDuplicateGroupToAllFrames}
+                      performanceMode={performanceMode}
                     />
                     </div>
                   )}
@@ -2879,6 +2877,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                         canvasHeight={canvasHeight}
                         selectedPresetId={selectedFxPresetId}
                         styleMode={styleConditioning}
+                        performanceMode={performanceMode}
                         characterPalette={activePaletteColors && activePaletteColors.length > 0 ? activePaletteColors : FIGHTING_GAME_PALETTES[0].colors}
                         onSelectPreset={(preset: FxPreset) => {
                           setSelectedFxPresetId(preset.id);

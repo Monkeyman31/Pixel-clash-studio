@@ -70,6 +70,10 @@ import {
   FlaskConical,
   Wand2,
   Camera,
+  Gauge,
+  LogOut,
+  FilePlus2,
+  Zap,
 } from 'lucide-react';
 import { ExportModalTab } from './ExportModal';
 import {
@@ -83,6 +87,7 @@ import {
   GuidePresetKind,
   GuidesConfig,
   GuidesModalTab,
+  PerformanceMode,
   PerspectiveGuideType,
   ProjectWorkMode,
   RecentProjectEntry,
@@ -106,6 +111,7 @@ export type ImportMenuMode =
   | 'selected_group'
   | 'current_frame'
   | 'all_frames'
+  | 'spritesheet'
   | 'reference'
   | 'references_panel'
   | 'asset'
@@ -222,6 +228,16 @@ interface MenuBarProps {
   onOpenFxStudio?: (tab?: 'generator' | 'lab' | 'library') => void;
   onCreateSuggestedModeLayers?: (mode: ProjectWorkMode) => void;
   onApplyModeGuides?: (mode: ProjectWorkMode) => void;
+  // Performance Mode, Save As / Close Documents & Global Clipboard
+  performanceMode?: PerformanceMode;
+  onChangePerformanceMode?: (mode: PerformanceMode) => void;
+  onOpenSaveAsModal?: () => void;
+  onCloseActiveDocument?: () => void;
+  onRequestCloseAllDocuments?: () => void;
+  onNewDocumentFromClipboard?: () => void;
+  onPasteAsReference?: () => void;
+  quickPasteMode?: boolean;
+  onToggleQuickPasteMode?: () => void;
 }
 
 // Strictly vertical submenu alias (zero horizontal flyouts, preserves main menu structure)
@@ -366,6 +382,15 @@ export const MenuBar: React.FC<MenuBarProps> = ({
   onOpenFxStudio,
   onCreateSuggestedModeLayers,
   onApplyModeGuides,
+  performanceMode = 'balanced',
+  onChangePerformanceMode,
+  onOpenSaveAsModal,
+  onCloseActiveDocument,
+  onRequestCloseAllDocuments,
+  onNewDocumentFromClipboard,
+  onPasteAsReference,
+  quickPasteMode = false,
+  onToggleQuickPasteMode,
 }) => {
   const activeWorkModeDef = WORK_MODES_REGISTRY[workMode] || WORK_MODES_REGISTRY.fighter;
   const [activeMenu, setActiveMenu] = useState<string | null>(null);
@@ -535,10 +560,25 @@ export const MenuBar: React.FC<MenuBarProps> = ({
               <span className="text-[10px] text-slate-500 font-mono">Ctrl+N</span>
             </button>
 
+            {onNewDocumentFromClipboard && (
+              <button
+                type="button"
+                onClick={() => handleItemClick(onNewDocumentFromClipboard)}
+                title="Crea un nuevo documento exacto con el tamaño y transparencia de la imagen en el portapapeles"
+                className="px-3 py-1.5 flex items-center justify-between hover:bg-[#20273a] transition-colors text-left text-emerald-300"
+              >
+                <span className="flex items-center gap-2">
+                  <FilePlus2 className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Nuevo desde Portapapeles</span>
+                </span>
+                <span className="text-[10px] text-emerald-400 font-mono">RGBA</span>
+              </button>
+            )}
+
             <button
               type="button"
               onClick={() => handleItemClick(onOpenFilePicker)}
-              title="Abre PNG, JPG, WEBP, PSD, ASE o PCS como documento independiente"
+              title="Abre PNG, JPG, JPEG, WEBP, GIF animado, BMP, TIFF, TGA, ICO, ASE/ASEPRITE, PSD, PCS, JSON y Spritesheets"
               className="px-3 py-1.5 flex items-center justify-between hover:bg-[#20273a] transition-colors text-left"
             >
               <span className="flex items-center gap-2">
@@ -551,7 +591,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             <SubMenu
               label={`Abrir Recientes${recentProjects.length > 0 ? ` (${recentProjects.length})` : ''}`}
               icon={<Clock className="w-3.5 h-3.5 text-sky-400" />}
-              widthClass="w-80"
+              widthClass="w-96"
             >
               <div
                 className="px-2.5 pt-1.5 pb-1.5 border-b border-[#22283a]"
@@ -564,7 +604,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     type="text"
                     value={recentSearchQuery}
                     onChange={(e) => setRecentSearchQuery(e.target.value)}
-                    placeholder="Buscar proyecto reciente..."
+                    placeholder="Buscar por nombre o ruta..."
                     className="w-full pl-6 pr-6 py-1 rounded-md bg-[#0e111b] border border-[#283148] text-[11px] text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-amber-400"
                   />
                   {recentSearchQuery && (
@@ -587,12 +627,14 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     : 'No se encontraron proyectos con ese filtro.'}
                 </div>
               ) : (
-                <div className="max-h-72 overflow-y-auto divide-y divide-[#1e2436]">
+                <div className="max-h-80 overflow-y-auto divide-y divide-[#1e2436]">
                   {filteredRecentProjects.map((entry) => {
                     const ext = entry.fileFormat || 'pcs';
                     const displayPath =
+                      entry.diskPath ||
                       entry.path ||
                       `Proyectos/${entry.name.replace(/\s+/g, '_')}.${ext}`;
+                    const modDate = entry.modifiedAt || entry.openedAt;
                     return (
                       <div
                         key={entry.id}
@@ -605,9 +647,10 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                               handleItemClick(() => onOpenRecentProject(entry));
                             }
                           }}
+                          title={`${entry.name}\nRuta: ${displayPath}\nModificado: ${modDate}`}
                           className="flex items-center gap-2.5 flex-1 min-w-0 text-left cursor-pointer"
                         >
-                          <div className="w-9 h-9 rounded-md border border-[#2d3650] bg-[#0e111b] shrink-0 overflow-hidden flex items-center justify-center">
+                          <div className="w-10 h-10 rounded-md border border-[#2d3650] canvas-checkerboard shrink-0 overflow-hidden flex items-center justify-center">
                             {entry.thumbnailDataUrl ? (
                               <img
                                 src={entry.thumbnailDataUrl}
@@ -618,7 +661,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                               <FileText className="w-4 h-4 text-slate-500" />
                             )}
                           </div>
-                          <div className="min-w-0 flex-1">
+                          <div className="min-w-0 flex-1 space-y-0.5">
                             <div className="flex items-center gap-1.5">
                               {entry.pinned && (
                                 <Pin className="w-3 h-3 text-amber-400 shrink-0" />
@@ -627,13 +670,22 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                 {entry.name}
                               </span>
                             </div>
-                            <div className="text-[10px] text-slate-400 truncate font-mono">
+                            <div
+                              className="text-[10px] text-slate-400 truncate font-mono"
+                              title={displayPath}
+                            >
                               {displayPath}
                             </div>
                             <div className="text-[10px] text-slate-500 font-mono tabular-nums flex items-center gap-1.5">
                               <span>{entry.width}×{entry.height} px</span>
+                              {entry.frameCount && entry.frameCount > 1 && (
+                                <>
+                                  <span>·</span>
+                                  <span>{entry.frameCount} fr</span>
+                                </>
+                              )}
                               <span>·</span>
-                              <span className="truncate">{entry.openedAt}</span>
+                              <span className="truncate">Mod: {modDate}</span>
                             </div>
                           </div>
                         </button>
@@ -758,6 +810,14 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <Repeat className="w-3.5 h-3.5 text-indigo-400" />
                     <span>Importar a Todos los Frames...</span>
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => handleItemClick(() => onImportAction('spritesheet'))}
+                    className="px-3 py-1.5 flex items-center gap-2 hover:bg-[#20273a] transition-colors text-left"
+                  >
+                    <LayoutGrid className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Abrir / Cortar Spritesheet...</span>
+                  </button>
                 </SubMenu>
 
                 <SubMenu
@@ -864,14 +924,28 @@ export const MenuBar: React.FC<MenuBarProps> = ({
               >
                 <span className="flex items-center gap-2">
                   <Save className="w-3.5 h-3.5 text-amber-400" />
-                  <span>Guardar PixelClash (.pcs)</span>
+                  <span>Guardar</span>
                 </span>
                 <span className="text-[10px] text-amber-400 font-mono">Ctrl+S</span>
               </button>
             )}
 
+            {onOpenSaveAsModal && (
+              <button
+                type="button"
+                onClick={() => handleItemClick(onOpenSaveAsModal)}
+                className="px-3 py-1.5 flex items-center justify-between hover:bg-[#20273a] transition-colors text-left text-slate-200"
+              >
+                <span className="flex items-center gap-2">
+                  <Save className="w-3.5 h-3.5 text-sky-400" />
+                  <span>Guardar como...</span>
+                </span>
+                <span className="text-[10px] text-slate-400 font-mono">Ctrl+Shift+S</span>
+              </button>
+            )}
+
             <SubMenu
-              label="Guardar como"
+              label="Guardar rápido en formato"
               icon={<Save className="w-3.5 h-3.5 text-slate-400" />}
               widthClass="w-60"
             >
@@ -998,6 +1072,38 @@ export const MenuBar: React.FC<MenuBarProps> = ({
               </span>
               <span className="text-[10px] font-mono text-amber-400">EXE/MSI</span>
             </button>
+
+            {(onCloseActiveDocument || onRequestCloseAllDocuments) && (
+              <>
+                <div className="h-[1px] bg-[#22283a] my-1" />
+                {onCloseActiveDocument && (
+                  <button
+                    type="button"
+                    onClick={() => handleItemClick(onCloseActiveDocument)}
+                    className="px-3 py-1.5 flex items-center justify-between hover:bg-[#20273a] transition-colors text-left text-slate-200"
+                  >
+                    <span className="flex items-center gap-2">
+                      <X className="w-3.5 h-3.5 text-slate-400" />
+                      <span>Cerrar Documento</span>
+                    </span>
+                    <span className="text-[10px] text-slate-500 font-mono">Ctrl+W</span>
+                  </button>
+                )}
+                {onRequestCloseAllDocuments && (
+                  <button
+                    type="button"
+                    onClick={() => handleItemClick(onRequestCloseAllDocuments)}
+                    className="px-3 py-1.5 flex items-center justify-between hover:bg-[#20273a] transition-colors text-left text-rose-300"
+                  >
+                    <span className="flex items-center gap-2">
+                      <LogOut className="w-3.5 h-3.5 text-rose-400" />
+                      <span>Cerrar Todo / Salir...</span>
+                    </span>
+                    <span className="text-[10px] text-rose-400 font-mono">Seguro</span>
+                  </button>
+                )}
+              </>
+            )}
       </TopMenuGroup>
 
       {/* ========================================================= */}
@@ -1195,9 +1301,9 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 {onPaste && (
                   <button
                     type="button"
-                    disabled={!hasClipboard}
                     onClick={() => handleItemClick(onPaste)}
-                    className="px-3 py-1.5 flex items-center justify-between hover:bg-[#20273a] transition-colors text-left disabled:opacity-40"
+                    className="px-3 py-1.5 flex items-center justify-between hover:bg-[#20273a] transition-colors text-left"
+                    title="Pega capas internas o imágenes copiadas desde cualquier aplicación del sistema"
                   >
                     <span className="flex items-center gap-2">
                       <ClipboardPaste className="w-3.5 h-3.5 text-emerald-400" />
@@ -1223,6 +1329,39 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                       {shortcutLabels['edit.paste_in_place'] || 'Ctrl+Shift+V'}
                     </span>
                   </button>
+                )}
+                {onPasteAsReference && (
+                  <button
+                    type="button"
+                    onClick={() => handleItemClick(onPasteAsReference)}
+                    className="px-3 py-1.5 flex items-center justify-between hover:bg-[#20273a] transition-colors text-left text-sky-300"
+                    title="Pega la imagen del portapapeles del sistema directamente como referencia flotante"
+                  >
+                    <span className="flex items-center gap-2">
+                      <ImageIcon className="w-3.5 h-3.5 text-sky-400" />
+                      <span>Pegar como Referencia</span>
+                    </span>
+                    <span className="text-[10px] text-sky-400 font-mono">Ref</span>
+                  </button>
+                )}
+                {onToggleQuickPasteMode && (
+                  <>
+                    <div className="h-[1px] bg-[#22283a] my-1" />
+                    <button
+                      type="button"
+                      onClick={() => onToggleQuickPasteMode()}
+                      className="px-3 py-1.5 flex items-center justify-between hover:bg-[#20273a] transition-colors text-left"
+                      title="Al pegar imágenes externas, las coloca automáticamente en una nueva capa del grupo seleccionado sin mostrar el diálogo"
+                    >
+                      <span className="flex items-center gap-2">
+                        <Zap className="w-3.5 h-3.5 text-amber-400" />
+                        <span>Pegado rápido (sin preguntar)</span>
+                      </span>
+                      <span className="text-[10px] text-amber-400 font-mono">
+                        {quickPasteMode ? '✓' : ''}
+                      </span>
+                    </button>
+                  </>
                 )}
               </SubMenu>
             )}
@@ -2367,6 +2506,60 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                   {wheelNavMode === 'pan' ? 'Shift=H · Ctrl=Z' : 'Ctrl=Z'}
                 </span>
               </button>
+            )}
+
+            {onChangePerformanceMode && (
+              <>
+                <div className="h-[1px] bg-[#22283a] my-1" />
+                <SubMenu
+                  label={`Rendimiento (${
+                    performanceMode === 'quality'
+                      ? 'Calidad máxima'
+                      : performanceMode === 'performance'
+                      ? 'Rendimiento'
+                      : 'Equilibrado'
+                  })`}
+                  icon={<Gauge className="w-3.5 h-3.5 text-emerald-400" />}
+                  widthClass="w-64"
+                >
+                  {(
+                    [
+                      {
+                        id: 'quality' as PerformanceMode,
+                        label: 'Calidad máxima',
+                        desc: 'Todas las vistas previas y miniaturas en tiempo real',
+                      },
+                      {
+                        id: 'balanced' as PerformanceMode,
+                        label: 'Equilibrado',
+                        desc: 'Caché inteligente de capas y miniaturas en segundo plano',
+                      },
+                      {
+                        id: 'performance' as PerformanceMode,
+                        label: 'Rendimiento',
+                        desc: 'Prioriza FPS y fluidez en proyectos medianos o grandes',
+                      },
+                    ]
+                  ).map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => handleItemClick(() => onChangePerformanceMode(opt.id))}
+                      className={`px-3 py-1.5 flex items-center justify-between gap-2 hover:bg-[#20273a] transition-colors text-left ${
+                        performanceMode === opt.id ? 'bg-[#1c2336] text-emerald-300 font-semibold' : 'text-slate-200'
+                      }`}
+                    >
+                      <span className="flex flex-col min-w-0">
+                        <span className="truncate">{opt.label}</span>
+                        <span className="text-[10px] text-slate-500 truncate">{opt.desc}</span>
+                      </span>
+                      <span className="text-[10px] text-emerald-400 font-mono shrink-0">
+                        {performanceMode === opt.id ? '✓' : ''}
+                      </span>
+                    </button>
+                  ))}
+                </SubMenu>
+              </>
             )}
       </TopMenuGroup>
 

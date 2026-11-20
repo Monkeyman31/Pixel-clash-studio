@@ -1,6 +1,7 @@
 import { GIFEncoder, quantize, applyPalette } from 'gifenc';
 import { Frame, LayerGroup } from '../types';
 import { compositeFrame } from './pixelMath';
+import { getCachedPixelGridCanvas } from './renderCache';
 
 export interface GifExportOptions {
   scale: number;
@@ -53,16 +54,9 @@ export function generateAnimatedGif(
     }
 
     const composited = compositeFrame(frame, width, height, fIdx, true, options.layerGroups);
-
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const col = composited[y]?.[x];
-        if (col) {
-          ctx.fillStyle = col;
-          ctx.fillRect(x * scale, y * scale, scale, scale);
-        }
-      }
-    }
+    const srcCanvas = getCachedPixelGridCanvas(composited, width, height);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(srcCanvas, 0, 0, width, height, 0, 0, targetW, targetH);
 
     const { data } = ctx.getImageData(0, 0, targetW, targetH);
     

@@ -1,55 +1,1956 @@
 import JSZip from 'jszip';
 import { readPsd } from 'ag-psd';
-import { ActionTag, Frame, Layer, ProjectState } from '../types';
+import {
+  ActionTag,
+  Frame,
+  Layer,
+  LayerBlendMode,
+  LayerGroup,
+  ProjectState,
+  RecentProjectFileFormat,
+} from '../types';
 import { createEmptyGrid } from './pixelMath';
+
+export const SUPPORTED_IMAGE_EXTENSIONS = [
+  'png',
+  'jpg',
+  'jpeg',
+  'webp',
+  'gif',
+  'bmp',
+  'tif',
+  'tiff',
+  'tga',
+  'ico',
+] as const;
+
+export const SUPPORTED_PROJECT_EXTENSIONS = [
+  'pcs',
+  'ase',
+  'aseprite',
+  'psd',
+  'json',
+] as const;
+
+export const SUPPORTED_ALL_OPEN_EXTENSIONS = [
+  ...SUPPORTED_PROJECT_EXTENSIONS,
+  ...SUPPORTED_IMAGE_EXTENSIONS,
+] as const;
+
+export const SUPPORTED_OPEN_ACCEPT =
+  '.pcs,.ase,.aseprite,.psd,.json,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff,.tga,.ico,image/png,image/jpeg,image/webp,image/gif,image/bmp,image/tiff,image/x-icon,image/vnd.microsoft.icon';
+
+export const SUPPORTED_IMAGE_ACCEPT =
+  '.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff,.tga,.ico,image/png,image/jpeg,image/webp,image/gif,image/bmp,image/tiff,image/x-icon,image/vnd.microsoft.icon';
+
+export const MAX_SINGLE_CANVAS_RASTER_DIM = 1024;
+
+export class FileLoadError extends Error {
+  public readonly fileName: string;
+  public readonly formatLabel: string;
+  public readonly technicalDetails?: string;
+
+  constructor(
+    message: string,
+    fileName: string,
+    formatLabel: string = 'Archivo',
+    technicalDetails?: string
+  ) {
+    super(message);
+    this.name = 'FileLoadError';
+    this.fileName = fileName;
+    this.formatLabel = formatLabel;
+    this.technicalDetails = technicalDetails;
+  }
+}
+
+export interface DecodedRgbaImage {
+  width: number;
+  height: number;
+  data: Uint8ClampedArray;
+  hasTransparency: boolean;
+}
+
+export interface SpritesheetCandidateInfo {
+  isCandidate: boolean;
+  suggestedCols: number;
+  suggestedRows: number;
+  suggestedFrameWidth: number;
+  suggestedFrameHeight: number;
+  reason: string;
+}
+
+export interface ImportLoadStats {
+  formatLabel: string;
+  fileFormat: RecentProjectFileFormat;
+  frameCount: number;
+  layerCount: number;
+  nonEmptyPixelCount: number;
+  hasTransparency: boolean;
+  isAnimated: boolean;
+  wasDownscaled?: boolean;
+  originalWidth?: number;
+  originalHeight?: number;
+}
 
 export interface ImportResult {
   name: string;
   width: number;
   height: number;
   frames: Frame[];
+  layerGroups?: LayerGroup[];
   actionTags?: ActionTag[];
   projectState?: Partial<ProjectState>;
+  fps?: number;
+  /** Full-resolution raw RGBA buffer for single-image imports (enables 1:1 spritesheet slicing!) */
+  rawRaster?: DecodedRgbaImage;
+  spritesheetCandidate?: SpritesheetCandidateInfo;
+  stats: ImportLoadStats;
 }
 
-// Convert canvas or ImageData to 2D pixel grid
+export function getFileExtension(fileName: string): string {
+  const parts = fileName.trim().split('.');
+  if (parts.length < 2) return '';
+  return (parts.pop() || '').toLowerCase();
+}
+
+export function isSupportedImageFile(file: File): boolean {
+  const ext = getFileExtension(file.name);
+  if ((SUPPORTED_IMAGE_EXTENSIONS as readonly string[]).includes(ext)) return true;
+  return Boolean(file.type && file.type.startsWith('image/'));
+}
+
+export function isSupportedOpenableFile(file: File): boolean {
+  const ext = getFileExtension(file.name);
+  if ((SUPPORTED_ALL_OPEN_EXTENSIONS as readonly string[]).includes(ext)) return true;
+  return Boolean(file.type && file.type.startsWith('image/'));
+}
+
+export function normalizeFileFormatTag(fileName: string): RecentProjectFileFormat {
+  const ext = getFileExtension(fileName);
+  switch (ext) {
+    case 'pcs':
+      return 'pcs';
+    case 'json':
+      return 'json';
+    case 'psd':
+      return 'psd';
+    case 'ase':
+    case 'aseprite':
+      return 'ase';
+    case 'jpg':
+    case 'jpeg':
+      return 'jpg';
+    case 'webp':
+      return 'webp';
+    case 'gif':
+      return 'gif';
+    case 'bmp':
+      return 'bmp';
+    case 'tif':
+    case 'tiff':
+      return 'tiff';
+    case 'tga':
+      return 'tga';
+    case 'ico':
+      return 'ico';
+    default:
+      return 'png';
+  }
+}
+
+export function rgbaToPixelString(r: number, g: number, b: number, a: number): string | null {
+  if (a <= 0) return null;
+  const rr = Math.max(0, Math.min(255, r | 0));
+  const gg = Math.max(0, Math.min(255, g | 0));
+  const bb = Math.max(0, Math.min(255, b | 0));
+  if (a >= 254) {
+    return `#${((1 << 24) | (rr << 16) | (gg << 8) | bb).toString(16).slice(1)}`;
+  }
+  const alpha = Math.max(0.004, Math.min(1, Math.round((a / 255) * 1000) / 1000));
+  return `rgba(${rr},${gg},${bb},${alpha})`;
+}
+
+export function rgbaBufferToPixelGrid(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number
+): { grid: (string | null)[][]; nonEmptyCount: number; hasTransparency: boolean } {
+  const grid = createEmptyGrid(width, height);
+  let nonEmptyCount = 0;
+  let hasTransparency = false;
+
+  for (let y = 0; y < height; y++) {
+    const row = grid[y];
+    const rowOffset = y * width * 4;
+    for (let x = 0; x < width; x++) {
+      const idx = rowOffset + x * 4;
+      const a = data[idx + 3];
+      if (a <= 0) {
+        hasTransparency = true;
+        row[x] = null;
+      } else {
+        if (a < 254) hasTransparency = true;
+        row[x] = rgbaToPixelString(data[idx], data[idx + 1], data[idx + 2], a);
+        nonEmptyCount++;
+      }
+    }
+  }
+  return { grid, nonEmptyCount, hasTransparency };
+}
+
 export function canvasToPixelGrid(
   canvas: HTMLCanvasElement | ImageData,
   width: number,
   height: number
 ): (string | null)[][] {
-  const grid = createEmptyGrid(width, height);
   let imgData: ImageData;
-
   if (canvas instanceof ImageData) {
     imgData = canvas;
   } else {
     const ctx = canvas.getContext('2d');
-    if (!ctx) return grid;
+    if (!ctx) return createEmptyGrid(width, height);
     imgData = ctx.getImageData(0, 0, width, height);
   }
+  return rgbaBufferToPixelGrid(imgData.data, width, height).grid;
+}
 
-  const { data } = imgData;
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const idx = (y * width + x) * 4;
-      const r = data[idx];
-      const g = data[idx + 1];
-      const b = data[idx + 2];
-      const a = data[idx + 3];
+export function rgbaToDataUrl(rgba: DecodedRgbaImage): string {
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, rgba.width);
+  canvas.height = Math.max(1, rgba.height);
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return '';
+  const imageData = new ImageData(new Uint8ClampedArray(rgba.data), rgba.width, rgba.height);
+  ctx.putImageData(imageData, 0, 0);
+  return canvas.toDataURL('image/png');
+}
 
-      if (a > 10) {
-        const hex = `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
-        grid[y][x] = hex;
+function scaleRgbaImage(
+  src: DecodedRgbaImage,
+  targetW: number,
+  targetH: number,
+  fitMode: 'fit' | 'original' | 'stretch' = 'stretch'
+): DecodedRgbaImage {
+  const srcCanvas = document.createElement('canvas');
+  srcCanvas.width = src.width;
+  srcCanvas.height = src.height;
+  const sctx = srcCanvas.getContext('2d');
+  if (!sctx) {
+    throw new Error('No se pudo inicializar el contexto 2D de origen.');
+  }
+  sctx.putImageData(new ImageData(new Uint8ClampedArray(src.data), src.width, src.height), 0, 0);
+
+  const dstCanvas = document.createElement('canvas');
+  dstCanvas.width = targetW;
+  dstCanvas.height = targetH;
+  const dctx = dstCanvas.getContext('2d');
+  if (!dctx) {
+    throw new Error('No se pudo inicializar el contexto 2D de destino.');
+  }
+  dctx.imageSmoothingEnabled = false;
+  dctx.clearRect(0, 0, targetW, targetH);
+
+  let drawW = targetW;
+  let drawH = targetH;
+  let dx = 0;
+  let dy = 0;
+
+  if (fitMode === 'fit') {
+    const scale = Math.min(targetW / src.width, targetH / src.height);
+    drawW = Math.max(1, Math.round(src.width * scale));
+    drawH = Math.max(1, Math.round(src.height * scale));
+    dx = Math.floor((targetW - drawW) / 2);
+    dy = Math.floor((targetH - drawH) / 2);
+  } else if (fitMode === 'original') {
+    drawW = src.width;
+    drawH = src.height;
+    dx = Math.floor((targetW - drawW) / 2);
+    dy = Math.floor((targetH - drawH) / 2);
+  }
+
+  dctx.drawImage(srcCanvas, dx, dy, drawW, drawH);
+  const out = dctx.getImageData(0, 0, targetW, targetH);
+  let hasTransparency = false;
+  for (let i = 3; i < out.data.length; i += 4) {
+    if (out.data[i] < 254) {
+      hasTransparency = true;
+      break;
+    }
+  }
+  return { width: targetW, height: targetH, data: out.data, hasTransparency };
+}
+
+function decodeBrowserBlobToRgba(blob: Blob): Promise<DecodedRgbaImage> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const w = img.naturalWidth || img.width;
+        const h = img.naturalHeight || img.height;
+        if (w <= 0 || h <= 0) {
+          URL.revokeObjectURL(url);
+          reject(new Error('La imagen decodificada tiene dimensiones nulas (0×0).'));
+          return;
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          URL.revokeObjectURL(url);
+          reject(new Error('Contexto 2D de canvas no disponible.'));
+          return;
+        }
+        ctx.clearRect(0, 0, w, h);
+        ctx.drawImage(img, 0, 0);
+        const imgData = ctx.getImageData(0, 0, w, h);
+        URL.revokeObjectURL(url);
+
+        let hasTransparency = false;
+        for (let i = 3; i < imgData.data.length; i += 4) {
+          if (imgData.data[i] < 254) {
+            hasTransparency = true;
+            break;
+          }
+        }
+        resolve({ width: w, height: h, data: imgData.data, hasTransparency });
+      } catch (err) {
+        URL.revokeObjectURL(url);
+        reject(err);
+      }
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('El navegador no pudo decodificar la imagen (archivo corrupto o no compatible).'));
+    };
+    img.src = url;
+  });
+}
+
+// =========================================================================
+// ZLIB / DEFLATE DECOMPRESSION HELPER (Aseprite & TIFF)
+// =========================================================================
+async function inflateBytes(
+  compressed: Uint8Array,
+  format: 'deflate' | 'deflate-raw' = 'deflate'
+): Promise<Uint8Array> {
+  if (typeof DecompressionStream === 'undefined') {
+    throw new Error('Tu entorno no soporta DecompressionStream para archivos comprimidos.');
+  }
+  const copy = new Uint8Array(compressed.byteLength);
+  copy.set(compressed);
+  const stream = new Blob([copy.buffer]).stream().pipeThrough(new DecompressionStream(format));
+  const ab = await new Response(stream).arrayBuffer();
+  return new Uint8Array(ab);
+}
+
+// =========================================================================
+// ANIMATED GIF DECODER (GIF87a & GIF89a · Full LZW + Disposal + Alpha)
+// =========================================================================
+interface DecodedGifFrame {
+  rgba: Uint8ClampedArray;
+  delayMs: number;
+}
+
+function lzwDecodeGif(minCodeSize: number, data: Uint8Array, pixelCount: number): Uint8Array {
+  const clearCode = 1 << minCodeSize;
+  const eoiCode = clearCode + 1;
+  let codeSize = minCodeSize + 1;
+  let codeMask = (1 << codeSize) - 1;
+  let nextCode = eoiCode + 1;
+
+  const prefix = new Int32Array(4096);
+  const suffix = new Uint8Array(4096);
+  const stack = new Uint8Array(4097);
+
+  for (let i = 0; i < clearCode; i++) {
+    prefix[i] = -1;
+    suffix[i] = i;
+  }
+
+  const out = new Uint8Array(pixelCount);
+  let outPos = 0;
+  let bitPos = 0;
+  const totalBits = data.length * 8;
+
+  const readCode = (): number => {
+    if (bitPos + codeSize > totalBits) return eoiCode;
+    let byteIdx = bitPos >> 3;
+    let bitOff = bitPos & 7;
+    let val = data[byteIdx] >> bitOff;
+    let bitsRead = 8 - bitOff;
+    byteIdx++;
+    while (bitsRead < codeSize && byteIdx < data.length) {
+      val |= data[byteIdx] << bitsRead;
+      bitsRead += 8;
+      byteIdx++;
+    }
+    bitPos += codeSize;
+    return val & codeMask;
+  };
+
+  let prevCode = -1;
+  let firstChar = 0;
+
+  while (outPos < pixelCount) {
+    const code = readCode();
+    if (code === eoiCode) break;
+    if (code === clearCode) {
+      codeSize = minCodeSize + 1;
+      codeMask = (1 << codeSize) - 1;
+      nextCode = eoiCode + 1;
+      prevCode = -1;
+      continue;
+    }
+
+    let inCode = code;
+    let stackTop = 0;
+
+    if (code >= nextCode) {
+      if (prevCode === -1) break;
+      stack[stackTop++] = firstChar;
+      inCode = prevCode;
+    }
+
+    let guard = 0;
+    while (inCode >= clearCode && guard < 4096) {
+      stack[stackTop++] = suffix[inCode];
+      inCode = prefix[inCode];
+      guard++;
+    }
+    if (inCode < 0 || inCode >= 4096) break;
+
+    firstChar = suffix[inCode];
+    stack[stackTop++] = firstChar;
+
+    while (stackTop > 0 && outPos < pixelCount) {
+      out[outPos++] = stack[--stackTop];
+    }
+
+    if (prevCode !== -1 && nextCode < 4096) {
+      prefix[nextCode] = prevCode;
+      suffix[nextCode] = firstChar;
+      nextCode++;
+      if (nextCode > codeMask && codeSize < 12) {
+        codeSize++;
+        codeMask = (1 << codeSize) - 1;
+      }
+    }
+    prevCode = code;
+  }
+
+  return out;
+}
+
+export function decodeAnimatedGif(buffer: ArrayBuffer): {
+  width: number;
+  height: number;
+  frames: DecodedGifFrame[];
+  hasTransparency: boolean;
+} {
+  const bytes = new Uint8Array(buffer);
+  if (bytes.length < 14) {
+    throw new Error('Archivo GIF demasiado pequeño o truncado.');
+  }
+  const sig = String.fromCharCode(...bytes.slice(0, 6));
+  if (sig !== 'GIF87a' && sig !== 'GIF89a') {
+    throw new Error('Cabecera GIF inválida (se esperaba GIF87a o GIF89a).');
+  }
+
+  const width = bytes[6] | (bytes[7] << 8);
+  const height = bytes[8] | (bytes[9] << 8);
+  if (width <= 0 || height <= 0) {
+    throw new Error('Dimensiones GIF inválidas (0×0).');
+  }
+
+  const lsdPacked = bytes[10];
+  const hasGct = (lsdPacked & 0x80) !== 0;
+  const gctCount = 1 << ((lsdPacked & 0x07) + 1);
+  let pos = 13;
+
+  let gct: Uint8Array | null = null;
+  if (hasGct) {
+    const gctBytes = gctCount * 3;
+    if (pos + gctBytes > bytes.length) {
+      throw new Error('Tabla de color global GIF truncada.');
+    }
+    gct = bytes.subarray(pos, pos + gctBytes);
+    pos += gctBytes;
+  }
+
+  const canvas = new Uint8ClampedArray(width * height * 4);
+  const frames: DecodedGifFrame[] = [];
+  let hasTransparency = false;
+
+  // Graphic Control Extension state (resets after each image block)
+  let disposalMethod = 0;
+  let hasTransparentIdx = false;
+  let transparentIdx = -1;
+  let delayMs = 100;
+
+  const skipSubBlocks = () => {
+    while (pos < bytes.length) {
+      const size = bytes[pos++];
+      if (size === 0) break;
+      pos += size;
+    }
+  };
+
+  while (pos < bytes.length) {
+    const introducer = bytes[pos++];
+    if (introducer === 0x3b) {
+      // GIF Trailer
+      break;
+    } else if (introducer === 0x21) {
+      // Extension block
+      if (pos >= bytes.length) break;
+      const label = bytes[pos++];
+      if (label === 0xf9 && pos + 5 <= bytes.length) {
+        const blockSize = bytes[pos++];
+        if (blockSize >= 4) {
+          const packed = bytes[pos];
+          disposalMethod = (packed >> 2) & 0x07;
+          hasTransparentIdx = (packed & 0x01) !== 0;
+          const delayCs = bytes[pos + 1] | (bytes[pos + 2] << 8);
+          delayMs = delayCs <= 1 ? 100 : delayCs * 10;
+          transparentIdx = bytes[pos + 3];
+        }
+        pos += blockSize;
+        skipSubBlocks();
       } else {
-        grid[y][x] = null;
+        skipSubBlocks();
+      }
+    } else if (introducer === 0x2c) {
+      // Image Descriptor
+      if (pos + 9 > bytes.length) break;
+      const imgLeft = bytes[pos] | (bytes[pos + 1] << 8);
+      const imgTop = bytes[pos + 2] | (bytes[pos + 3] << 8);
+      const imgW = bytes[pos + 4] | (bytes[pos + 5] << 8);
+      const imgH = bytes[pos + 6] | (bytes[pos + 7] << 8);
+      const imgPacked = bytes[pos + 8];
+      pos += 9;
+
+      const hasLct = (imgPacked & 0x80) !== 0;
+      const interlaced = (imgPacked & 0x40) !== 0;
+      const lctCount = 1 << ((imgPacked & 0x07) + 1);
+
+      let colorTable = gct;
+      if (hasLct) {
+        const lctBytes = lctCount * 3;
+        if (pos + lctBytes > bytes.length) break;
+        colorTable = bytes.subarray(pos, pos + lctBytes);
+        pos += lctBytes;
+      }
+
+      if (pos >= bytes.length) break;
+      const minCodeSize = bytes[pos++];
+      if (minCodeSize < 2 || minCodeSize > 11) {
+        throw new Error(`Tamaño mínimo LZW de GIF inválido (${minCodeSize}).`);
+      }
+
+      // Concatenate image data sub-blocks
+      const chunks: Uint8Array[] = [];
+      let totalDataLen = 0;
+      while (pos < bytes.length) {
+        const subLen = bytes[pos++];
+        if (subLen === 0) break;
+        const end = Math.min(bytes.length, pos + subLen);
+        chunks.push(bytes.subarray(pos, end));
+        totalDataLen += end - pos;
+        pos = end;
+      }
+
+      const lzwData = new Uint8Array(totalDataLen);
+      let writeOff = 0;
+      for (const ch of chunks) {
+        lzwData.set(ch, writeOff);
+        writeOff += ch.length;
+      }
+
+      const indices = lzwDecodeGif(minCodeSize, lzwData, imgW * imgH);
+      const prevCanvasSnapshot = disposalMethod === 3 ? new Uint8ClampedArray(canvas) : null;
+
+      // De-interlace row map
+      const passStarts = [0, 4, 2, 1];
+      const passSteps = [8, 8, 4, 2];
+      let srcRow = 0;
+      const rowMap = new Int32Array(imgH);
+      if (interlaced) {
+        for (let p = 0; p < 4; p++) {
+          for (let y = passStarts[p]; y < imgH; y += passSteps[p]) {
+            rowMap[srcRow++] = y;
+          }
+        }
+      } else {
+        for (let y = 0; y < imgH; y++) rowMap[y] = y;
+      }
+
+      if (colorTable) {
+        for (let sy = 0; sy < imgH; sy++) {
+          const dy = imgTop + rowMap[sy];
+          if (dy < 0 || dy >= height) continue;
+          for (let sx = 0; sx < imgW; sx++) {
+            const dx = imgLeft + sx;
+            if (dx < 0 || dx >= width) continue;
+            const cIdx = indices[sy * imgW + sx];
+            if (hasTransparentIdx && cIdx === transparentIdx) {
+              hasTransparency = true;
+              continue;
+            }
+            const tOff = cIdx * 3;
+            if (tOff + 2 >= colorTable.length) continue;
+            const dst = (dy * width + dx) * 4;
+            canvas[dst] = colorTable[tOff];
+            canvas[dst + 1] = colorTable[tOff + 1];
+            canvas[dst + 2] = colorTable[tOff + 2];
+            canvas[dst + 3] = 255;
+          }
+        }
+      }
+
+      // Check transparency on frame 0 if sub-rect didn't cover whole canvas
+      if (!hasTransparency) {
+        for (let i = 3; i < canvas.length; i += 4) {
+          if (canvas[i] < 254) {
+            hasTransparency = true;
+            break;
+          }
+        }
+      }
+
+      frames.push({
+        rgba: new Uint8ClampedArray(canvas),
+        delayMs,
+      });
+
+      // Apply disposal method for subsequent frame
+      if (disposalMethod === 2) {
+        for (let sy = 0; sy < imgH; sy++) {
+          const dy = imgTop + sy;
+          if (dy < 0 || dy >= height) continue;
+          for (let sx = 0; sx < imgW; sx++) {
+            const dx = imgLeft + sx;
+            if (dx < 0 || dx >= width) continue;
+            const dst = (dy * width + dx) * 4;
+            canvas[dst] = 0;
+            canvas[dst + 1] = 0;
+            canvas[dst + 2] = 0;
+            canvas[dst + 3] = 0;
+          }
+        }
+      } else if (disposalMethod === 3 && prevCanvasSnapshot) {
+        canvas.set(prevCanvasSnapshot);
+      }
+
+      // Reset GCE state for next frame
+      disposalMethod = 0;
+      hasTransparentIdx = false;
+      transparentIdx = -1;
+      delayMs = 100;
+    } else if (introducer === 0x00) {
+      continue;
+    } else {
+      break;
+    }
+  }
+
+  if (frames.length === 0) {
+    throw new Error('No se encontró ningún fotograma válido dentro del archivo GIF.');
+  }
+
+  return { width, height, frames, hasTransparency };
+}
+
+// =========================================================================
+// TGA (TARGA) BINARY DECODER (Types 1/2/3/9/10/11 · 8/15/16/24/32 bpp)
+// =========================================================================
+export function decodeTgaToRgba(buffer: ArrayBuffer): DecodedRgbaImage {
+  const bytes = new Uint8Array(buffer);
+  if (bytes.length < 18) {
+    throw new Error('Archivo TGA demasiado pequeño o cabecera incompleta.');
+  }
+  const view = new DataView(buffer);
+  const idLength = bytes[0];
+  const colorMapType = bytes[1];
+  const imageType = bytes[2];
+  const cmFirstEntry = view.getUint16(3, true);
+  const cmLength = view.getUint16(5, true);
+  const cmEntrySize = bytes[7];
+  const width = view.getUint16(12, true);
+  const height = view.getUint16(14, true);
+  const pixelDepth = bytes[16];
+  const descriptor = bytes[17];
+
+  if (width <= 0 || height <= 0) {
+    throw new Error('Dimensiones TGA inválidas.');
+  }
+
+  const supportedTypes = [1, 2, 3, 9, 10, 11];
+  if (!supportedTypes.includes(imageType)) {
+    throw new Error(`Tipo de imagen TGA no soportado (código ${imageType}).`);
+  }
+
+  const isRle = imageType >= 9;
+  const baseType = isRle ? imageType - 8 : imageType; // 1=indexed, 2=truecolor, 3=grayscale
+  const bytesPerPixel = Math.ceil(pixelDepth / 8);
+  if (bytesPerPixel < 1 || bytesPerPixel > 4) {
+    throw new Error(`Profundidad de color TGA no soportada (${pixelDepth} bits).`);
+  }
+
+  const alphaBits = descriptor & 0x0f;
+  const originRight = (descriptor & 0x10) !== 0;
+  const originTop = (descriptor & 0x20) !== 0;
+
+  let offset = 18 + idLength;
+
+  // Read color map if present
+  const colorMap: [number, number, number, number][] = [];
+  if (colorMapType === 1 && cmLength > 0) {
+    const cmBpp = Math.ceil(cmEntrySize / 8);
+    for (let i = 0; i < cmLength && offset + cmBpp <= bytes.length; i++) {
+      if (cmBpp === 4) {
+        colorMap.push([bytes[offset + 2], bytes[offset + 1], bytes[offset], bytes[offset + 3]]);
+      } else if (cmBpp === 3) {
+        colorMap.push([bytes[offset + 2], bytes[offset + 1], bytes[offset], 255]);
+      } else if (cmBpp === 2) {
+        const v = bytes[offset] | (bytes[offset + 1] << 8);
+        const r = Math.round(((v >> 10) & 31) * (255 / 31));
+        const g = Math.round(((v >> 5) & 31) * (255 / 31));
+        const b = Math.round((v & 31) * (255 / 31));
+        const a = cmEntrySize === 16 && (v & 0x8000) === 0 ? 0 : 255;
+        colorMap.push([r, g, b, a]);
+      } else {
+        const v = bytes[offset];
+        colorMap.push([v, v, v, 255]);
+      }
+      offset += cmBpp;
+    }
+  }
+
+  const totalPixels = width * height;
+  const rawPixels = new Uint8Array(totalPixels * bytesPerPixel);
+
+  if (!isRle) {
+    const needed = totalPixels * bytesPerPixel;
+    if (offset + needed > bytes.length) {
+      throw new Error('Datos de píxeles TGA truncados.');
+    }
+    rawPixels.set(bytes.subarray(offset, offset + needed));
+  } else {
+    let pixelIdx = 0;
+    while (pixelIdx < totalPixels && offset < bytes.length) {
+      const header = bytes[offset++];
+      const count = (header & 0x7f) + 1;
+      if ((header & 0x80) !== 0) {
+        // RLE packet
+        if (offset + bytesPerPixel > bytes.length) break;
+        const sample = bytes.subarray(offset, offset + bytesPerPixel);
+        offset += bytesPerPixel;
+        for (let k = 0; k < count && pixelIdx < totalPixels; k++) {
+          rawPixels.set(sample, pixelIdx * bytesPerPixel);
+          pixelIdx++;
+        }
+      } else {
+        // Raw packet
+        const rawBytesCount = count * bytesPerPixel;
+        const avail = Math.min(rawBytesCount, bytes.length - offset);
+        const pixelsToCopy = Math.min(count, totalPixels - pixelIdx, Math.floor(avail / bytesPerPixel));
+        rawPixels.set(bytes.subarray(offset, offset + pixelsToCopy * bytesPerPixel), pixelIdx * bytesPerPixel);
+        offset += rawBytesCount;
+        pixelIdx += pixelsToCopy;
       }
     }
   }
-  return grid;
+
+  const out = new Uint8ClampedArray(totalPixels * 4);
+  let anyAlphaNonZero = false;
+  let anyRgbNonZero = false;
+
+  for (let i = 0; i < totalPixels; i++) {
+    const sx = i % width;
+    const sy = Math.floor(i / width);
+    const dx = originRight ? width - 1 - sx : sx;
+    const dy = originTop ? sy : height - 1 - sy;
+    const dst = (dy * width + dx) * 4;
+    const src = i * bytesPerPixel;
+
+    let r = 0;
+    let g = 0;
+    let b = 0;
+    let a = 255;
+
+    if (baseType === 1) {
+      const idx =
+        bytesPerPixel === 1
+          ? rawPixels[src]
+          : rawPixels[src] | (rawPixels[src + 1] << 8);
+      const entry = colorMap[idx - cmFirstEntry];
+      if (entry) {
+        [r, g, b, a] = entry;
+      }
+    } else if (baseType === 3) {
+      r = g = b = rawPixels[src];
+      a = bytesPerPixel >= 2 ? rawPixels[src + 1] : 255;
+    } else {
+      // Truecolor
+      if (bytesPerPixel === 4) {
+        b = rawPixels[src];
+        g = rawPixels[src + 1];
+        r = rawPixels[src + 2];
+        a = rawPixels[src + 3];
+      } else if (bytesPerPixel === 3) {
+        b = rawPixels[src];
+        g = rawPixels[src + 1];
+        r = rawPixels[src + 2];
+        a = 255;
+      } else if (bytesPerPixel === 2) {
+        const v = rawPixels[src] | (rawPixels[src + 1] << 8);
+        r = Math.round(((v >> 10) & 31) * (255 / 31));
+        g = Math.round(((v >> 5) & 31) * (255 / 31));
+        b = Math.round((v & 31) * (255 / 31));
+        a = alphaBits > 0 ? ((v & 0x8000) !== 0 ? 255 : 0) : 255;
+      }
+    }
+
+    if (a > 0) anyAlphaNonZero = true;
+    if (r > 0 || g > 0 || b > 0) anyRgbNonZero = true;
+    out[dst] = r;
+    out[dst + 1] = g;
+    out[dst + 2] = b;
+    out[dst + 3] = a;
+  }
+
+  // Some 32-bit TGA writers leave alpha = 0 across an opaque image when alphaBits === 0
+  if ((pixelDepth === 32 || pixelDepth === 16) && !anyAlphaNonZero && anyRgbNonZero) {
+    for (let i = 3; i < out.length; i += 4) {
+      out[i] = 255;
+    }
+  }
+
+  let hasTransparency = false;
+  for (let i = 3; i < out.length; i += 4) {
+    if (out[i] < 254) {
+      hasTransparency = true;
+      break;
+    }
+  }
+
+  return { width, height, data: out, hasTransparency };
 }
 
-// Convert PSD layer canvas (respecting left/top bounds) to full-canvas pixel grid
+// =========================================================================
+// BMP BINARY DECODER (1/4/8/16/24/32 bpp · BI_RGB & BI_BITFIELDS + Alpha)
+// =========================================================================
+function decodeMaskChannel(val: number, mask: number): number {
+  if (mask === 0) return 0;
+  let shift = 0;
+  let m = mask >>> 0;
+  while ((m & 1) === 0 && shift < 32) {
+    m >>>= 1;
+    shift++;
+  }
+  const bits = m;
+  if (bits === 0) return 0;
+  const extracted = (val >>> shift) & bits;
+  return Math.round((extracted / bits) * 255);
+}
+
+export async function decodeBmpToRgba(buffer: ArrayBuffer, fallbackBlob?: Blob): Promise<DecodedRgbaImage> {
+  const bytes = new Uint8Array(buffer);
+  if (bytes.length < 26 || bytes[0] !== 0x42 || bytes[1] !== 0x4d) {
+    throw new Error('Archivo BMP inválido (falta firma mágica "BM").');
+  }
+  const view = new DataView(buffer);
+  const dataOffset = view.getUint32(10, true);
+  const dibSize = view.getUint32(14, true);
+
+  let width = 0;
+  let rawHeight = 0;
+  let bpp = 0;
+  let compression = 0;
+  let colorsUsed = 0;
+
+  if (dibSize === 12) {
+    width = view.getUint16(18, true);
+    rawHeight = view.getUint16(20, true);
+    bpp = view.getUint16(24, true);
+  } else if (dibSize >= 40 && bytes.length >= 54) {
+    width = view.getInt32(18, true);
+    rawHeight = view.getInt32(22, true);
+    bpp = view.getUint16(28, true);
+    compression = view.getUint32(30, true);
+    colorsUsed = view.getUint32(46, true);
+  } else {
+    if (fallbackBlob) return decodeBrowserBlobToRgba(fallbackBlob);
+    throw new Error(`Cabecera DIB BMP no soportada (${dibSize} bytes).`);
+  }
+
+  const height = Math.abs(rawHeight);
+  const topDown = rawHeight < 0;
+  if (width <= 0 || height <= 0) {
+    throw new Error('Dimensiones BMP inválidas.');
+  }
+
+  // RLE4/RLE8/JPEG/PNG BMP variants delegate to browser native image decoder
+  if (compression !== 0 && compression !== 3 && compression !== 6) {
+    if (fallbackBlob) return decodeBrowserBlobToRgba(fallbackBlob);
+    throw new Error(`Compresión BMP no soportada (código ${compression}).`);
+  }
+
+  let rMask = bpp === 16 ? 0x7c00 : 0x00ff0000;
+  let gMask = bpp === 16 ? 0x03e0 : 0x0000ff00;
+  let bMask = bpp === 16 ? 0x001f : 0x000000ff;
+  let aMask = bpp === 32 ? 0xff000000 : 0;
+
+  if ((compression === 3 || compression === 6) && bytes.length >= 14 + 40 + 12) {
+    const maskOff = dibSize >= 52 ? 54 : 14 + dibSize;
+    if (maskOff + 12 <= bytes.length) {
+      rMask = view.getUint32(maskOff, true);
+      gMask = view.getUint32(maskOff + 4, true);
+      bMask = view.getUint32(maskOff + 8, true);
+      if (dibSize >= 56 && maskOff + 16 <= bytes.length) {
+        aMask = view.getUint32(maskOff + 12, true);
+      }
+    }
+  }
+
+  const palette: [number, number, number][] = [];
+  if (bpp <= 8) {
+    const count = colorsUsed > 0 ? colorsUsed : 1 << bpp;
+    const palOff = 14 + dibSize;
+    const entrySize = dibSize === 12 ? 3 : 4;
+    for (let i = 0; i < count && palOff + i * entrySize + 2 < bytes.length; i++) {
+      const p = palOff + i * entrySize;
+      palette.push([bytes[p + 2], bytes[p + 1], bytes[p]]);
+    }
+  }
+
+  const rowStride = Math.floor((bpp * width + 31) / 32) * 4;
+  const out = new Uint8ClampedArray(width * height * 4);
+  let anyAlphaNonZero = false;
+  let anyRgbNonZero = false;
+
+  for (let row = 0; row < height; row++) {
+    const dy = topDown ? row : height - 1 - row;
+    const rowOff = dataOffset + row * rowStride;
+    if (rowOff >= bytes.length) break;
+
+    for (let x = 0; x < width; x++) {
+      const dst = (dy * width + x) * 4;
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      let a = 255;
+
+      if (bpp === 32) {
+        const p = rowOff + x * 4;
+        if (p + 3 >= bytes.length) continue;
+        if (compression === 3 || compression === 6) {
+          const val = view.getUint32(p, true);
+          r = decodeMaskChannel(val, rMask);
+          g = decodeMaskChannel(val, gMask);
+          b = decodeMaskChannel(val, bMask);
+          a = aMask !== 0 ? decodeMaskChannel(val, aMask) : 255;
+        } else {
+          b = bytes[p];
+          g = bytes[p + 1];
+          r = bytes[p + 2];
+          a = bytes[p + 3];
+        }
+      } else if (bpp === 24) {
+        const p = rowOff + x * 3;
+        if (p + 2 >= bytes.length) continue;
+        b = bytes[p];
+        g = bytes[p + 1];
+        r = bytes[p + 2];
+      } else if (bpp === 16) {
+        const p = rowOff + x * 2;
+        if (p + 1 >= bytes.length) continue;
+        const val = view.getUint16(p, true);
+        r = decodeMaskChannel(val, rMask);
+        g = decodeMaskChannel(val, gMask);
+        b = decodeMaskChannel(val, bMask);
+        a = aMask !== 0 ? decodeMaskChannel(val, aMask) : 255;
+      } else if (bpp === 8) {
+        const idx = bytes[rowOff + x] ?? 0;
+        const c = palette[idx];
+        if (c) [r, g, b] = c;
+      } else if (bpp === 4) {
+        const byte = bytes[rowOff + (x >> 1)] ?? 0;
+        const idx = (x & 1) === 0 ? (byte >> 4) & 0x0f : byte & 0x0f;
+        const c = palette[idx];
+        if (c) [r, g, b] = c;
+      } else if (bpp === 1) {
+        const byte = bytes[rowOff + (x >> 3)] ?? 0;
+        const idx = (byte >> (7 - (x & 7))) & 1;
+        const c = palette[idx];
+        if (c) [r, g, b] = c;
+      }
+
+      if (a > 0) anyAlphaNonZero = true;
+      if (r > 0 || g > 0 || b > 0) anyRgbNonZero = true;
+      out[dst] = r;
+      out[dst + 1] = g;
+      out[dst + 2] = b;
+      out[dst + 3] = a;
+    }
+  }
+
+  // Many 32-bit BI_RGB BMPs leave the padding byte as 0 instead of 255
+  if (bpp === 32 && !anyAlphaNonZero && anyRgbNonZero) {
+    for (let i = 3; i < out.length; i += 4) out[i] = 255;
+  }
+
+  let hasTransparency = false;
+  for (let i = 3; i < out.length; i += 4) {
+    if (out[i] < 254) {
+      hasTransparency = true;
+      break;
+    }
+  }
+
+  return { width, height, data: out, hasTransparency };
+}
+
+// =========================================================================
+// ICO / CUR BINARY DECODER (PNG-embedded OR XOR DIB + 1-bit AND Mask)
+// =========================================================================
+export async function decodeIcoToRgba(buffer: ArrayBuffer): Promise<DecodedRgbaImage> {
+  const bytes = new Uint8Array(buffer);
+  if (bytes.length < 22) {
+    throw new Error('Archivo ICO demasiado pequeño o inválido.');
+  }
+  const view = new DataView(buffer);
+  const reserved = view.getUint16(0, true);
+  const iconType = view.getUint16(2, true);
+  const count = view.getUint16(4, true);
+
+  if (reserved !== 0 || (iconType !== 1 && iconType !== 2) || count < 1) {
+    throw new Error('Cabecera ICO inválida.');
+  }
+
+  interface IcoEntry {
+    w: number;
+    h: number;
+    bpp: number;
+    size: number;
+    offset: number;
+  }
+
+  const entries: IcoEntry[] = [];
+  for (let i = 0; i < count; i++) {
+    const base = 6 + i * 16;
+    if (base + 16 > bytes.length) break;
+    const w = bytes[base] === 0 ? 256 : bytes[base];
+    const h = bytes[base + 1] === 0 ? 256 : bytes[base + 1];
+    const bpp = view.getUint16(base + 6, true) || 32;
+    const size = view.getUint32(base + 8, true);
+    const offset = view.getUint32(base + 12, true);
+    if (offset + size <= bytes.length && size >= 16) {
+      entries.push({ w, h, bpp, size, offset });
+    }
+  }
+
+  if (entries.length === 0) {
+    throw new Error('El archivo ICO no contiene entradas de imagen válidas.');
+  }
+
+  // Pick the highest resolution & highest bit depth icon
+  entries.sort((a, b) => {
+    const areaDiff = b.w * b.h - a.w * a.h;
+    if (areaDiff !== 0) return areaDiff;
+    return b.bpp - a.bpp;
+  });
+
+  const best = entries[0];
+  const slice = bytes.subarray(best.offset, best.offset + best.size);
+
+  // Check for embedded PNG signature
+  if (
+    slice.length >= 8 &&
+    slice[0] === 0x89 &&
+    slice[1] === 0x50 &&
+    slice[2] === 0x4e &&
+    slice[3] === 0x47
+  ) {
+    const pngCopy = new Uint8Array(slice.byteLength);
+    pngCopy.set(slice);
+    return decodeBrowserBlobToRgba(new Blob([pngCopy.buffer], { type: 'image/png' }));
+  }
+
+  // Decode embedded DIB (XOR bitmap + 1-bit AND transparency mask)
+  const dibView = new DataView(buffer, best.offset, best.size);
+  const headerSize = dibView.getUint32(0, true);
+  if (headerSize < 40 || best.size < headerSize) {
+    throw new Error('Entrada DIB dentro de archivo ICO corrupta.');
+  }
+  const width = Math.abs(dibView.getInt32(4, true)) || best.w;
+  const rawH = dibView.getInt32(8, true);
+  const height = Math.abs(rawH) === best.h * 2 ? best.h : Math.max(1, Math.floor(Math.abs(rawH) / 2) || best.h);
+  const bpp = dibView.getUint16(14, true);
+  const colorsUsed = dibView.getUint32(32, true);
+
+  let pos = headerSize;
+  const palette: [number, number, number][] = [];
+  if (bpp <= 8) {
+    const palCount = colorsUsed > 0 ? colorsUsed : 1 << bpp;
+    for (let i = 0; i < palCount && pos + 4 <= slice.length; i++) {
+      palette.push([slice[pos + 2], slice[pos + 1], slice[pos]]);
+      pos += 4;
+    }
+  }
+
+  const xorStride = Math.floor((bpp * width + 31) / 32) * 4;
+  const xorSize = xorStride * height;
+  const andOffset = pos + xorSize;
+  const andStride = Math.floor((width + 31) / 32) * 4;
+  const hasAndMask = andOffset + andStride * height <= slice.length;
+
+  const out = new Uint8ClampedArray(width * height * 4);
+  let anyAlphaNonZero = false;
+
+  for (let row = 0; row < height; row++) {
+    const dy = height - 1 - row;
+    const xorRow = pos + row * xorStride;
+    const andRow = andOffset + row * andStride;
+
+    for (let x = 0; x < width; x++) {
+      const dst = (dy * width + x) * 4;
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      let a = 255;
+
+      if (bpp === 32) {
+        const p = xorRow + x * 4;
+        if (p + 3 < slice.length) {
+          b = slice[p];
+          g = slice[p + 1];
+          r = slice[p + 2];
+          a = slice[p + 3];
+        }
+      } else if (bpp === 24) {
+        const p = xorRow + x * 3;
+        if (p + 2 < slice.length) {
+          b = slice[p];
+          g = slice[p + 1];
+          r = slice[p + 2];
+        }
+      } else if (bpp === 8) {
+        const idx = slice[xorRow + x] ?? 0;
+        const c = palette[idx];
+        if (c) [r, g, b] = c;
+      } else if (bpp === 4) {
+        const byte = slice[xorRow + (x >> 1)] ?? 0;
+        const idx = (x & 1) === 0 ? (byte >> 4) & 0x0f : byte & 0x0f;
+        const c = palette[idx];
+        if (c) [r, g, b] = c;
+      } else if (bpp === 1) {
+        const byte = slice[xorRow + (x >> 3)] ?? 0;
+        const idx = (byte >> (7 - (x & 7))) & 1;
+        const c = palette[idx];
+        if (c) [r, g, b] = c;
+      }
+
+      if (bpp < 32 && hasAndMask) {
+        const maskByte = slice[andRow + (x >> 3)] ?? 0;
+        const isTransparent = ((maskByte >> (7 - (x & 7))) & 1) === 1;
+        if (isTransparent) a = 0;
+      }
+
+      if (a > 0) anyAlphaNonZero = true;
+      out[dst] = r;
+      out[dst + 1] = g;
+      out[dst + 2] = b;
+      out[dst + 3] = a;
+    }
+  }
+
+  // Fallback to AND mask if a 32-bit ICO wrote all-zero alpha channel
+  if (bpp === 32 && !anyAlphaNonZero && hasAndMask) {
+    for (let row = 0; row < height; row++) {
+      const dy = height - 1 - row;
+      const andRow = andOffset + row * andStride;
+      for (let x = 0; x < width; x++) {
+        const maskByte = slice[andRow + (x >> 3)] ?? 0;
+        const isTransparent = ((maskByte >> (7 - (x & 7))) & 1) === 1;
+        out[(dy * width + x) * 4 + 3] = isTransparent ? 0 : 255;
+      }
+    }
+  }
+
+  let hasTransparency = false;
+  for (let i = 3; i < out.length; i += 4) {
+    if (out[i] < 254) {
+      hasTransparency = true;
+      break;
+    }
+  }
+  return { width, height, data: out, hasTransparency };
+}
+
+// =========================================================================
+// TIFF BINARY DECODER (II/MM · Multi-Page · Uncompressed / PackBits / LZW / Deflate)
+// =========================================================================
+function decodeTiffPackBits(src: Uint8Array, expectedBytes: number): Uint8Array {
+  const out = new Uint8Array(expectedBytes);
+  let srcPos = 0;
+  let dstPos = 0;
+  while (srcPos < src.length && dstPos < expectedBytes) {
+    let n = src[srcPos++];
+    if (n > 127) n -= 256;
+    if (n >= 0) {
+      const count = n + 1;
+      for (let i = 0; i < count && srcPos < src.length && dstPos < expectedBytes; i++) {
+        out[dstPos++] = src[srcPos++];
+      }
+    } else if (n !== -128) {
+      const count = -n + 1;
+      if (srcPos >= src.length) break;
+      const val = src[srcPos++];
+      for (let i = 0; i < count && dstPos < expectedBytes; i++) {
+        out[dstPos++] = val;
+      }
+    }
+  }
+  return out;
+}
+
+function decodeTiffLzw(src: Uint8Array, expectedBytes: number): Uint8Array {
+  const out = new Uint8Array(expectedBytes);
+  let outPos = 0;
+  let bitPos = 0;
+  const totalBits = src.length * 8;
+
+  const CLEAR = 256;
+  const EOI = 257;
+  let codeLen = 9;
+  let nextCode = 258;
+
+  const prefix = new Int32Array(4096);
+  const suffix = new Uint8Array(4096);
+  const stack = new Uint8Array(4097);
+
+  for (let i = 0; i < 256; i++) {
+    prefix[i] = -1;
+    suffix[i] = i;
+  }
+
+  const readBitsMsb = (n: number): number => {
+    if (bitPos + n > totalBits) return EOI;
+    let val = 0;
+    for (let i = 0; i < n; i++) {
+      const byteIdx = bitPos >> 3;
+      const bitIdx = 7 - (bitPos & 7);
+      val = (val << 1) | ((src[byteIdx] >> bitIdx) & 1);
+      bitPos++;
+    }
+    return val;
+  };
+
+  let prevCode = -1;
+  let firstChar = 0;
+
+  while (outPos < expectedBytes) {
+    const code = readBitsMsb(codeLen);
+    if (code === EOI) break;
+    if (code === CLEAR) {
+      codeLen = 9;
+      nextCode = 258;
+      prevCode = -1;
+      continue;
+    }
+
+    let inCode = code;
+    let stackTop = 0;
+    if (code >= nextCode) {
+      if (prevCode === -1) break;
+      stack[stackTop++] = firstChar;
+      inCode = prevCode;
+    }
+
+    let guard = 0;
+    while (inCode >= 256 && guard < 4096) {
+      stack[stackTop++] = suffix[inCode];
+      inCode = prefix[inCode];
+      guard++;
+    }
+    if (inCode < 0 || inCode >= 4096) break;
+    firstChar = suffix[inCode];
+    stack[stackTop++] = firstChar;
+
+    while (stackTop > 0 && outPos < expectedBytes) {
+      out[outPos++] = stack[--stackTop];
+    }
+
+    if (prevCode !== -1 && nextCode < 4096) {
+      prefix[nextCode] = prevCode;
+      suffix[nextCode] = firstChar;
+      nextCode++;
+      // TIFF LZW uses early-change bit width transitions at 511, 1023, 2047
+      if (nextCode === 511) codeLen = 10;
+      else if (nextCode === 1023) codeLen = 11;
+      else if (nextCode === 2047) codeLen = 12;
+    }
+    prevCode = code;
+  }
+
+  return out;
+}
+
+export async function decodeTiffFrames(buffer: ArrayBuffer): Promise<DecodedRgbaImage[]> {
+  const bytes = new Uint8Array(buffer);
+  if (bytes.length < 8) {
+    throw new Error('Archivo TIFF demasiado pequeño.');
+  }
+
+  let littleEndian = true;
+  if (bytes[0] === 0x49 && bytes[1] === 0x49) {
+    littleEndian = true;
+  } else if (bytes[0] === 0x4d && bytes[1] === 0x4d) {
+    littleEndian = false;
+  } else {
+    throw new Error('Cabecera TIFF inválida (no es "II" ni "MM").');
+  }
+
+  const view = new DataView(buffer);
+  const magic = view.getUint16(2, littleEndian);
+  if (magic !== 42) {
+    throw new Error(`Número mágico TIFF inválido (${magic}, se esperaba 42).`);
+  }
+
+  const TYPE_SIZES: Record<number, number> = {
+    1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8,
+  };
+
+  const readTagValues = (entryOff: number): number[] => {
+    const type = view.getUint16(entryOff + 2, littleEndian);
+    const count = view.getUint32(entryOff + 4, littleEndian);
+    const typeSize = TYPE_SIZES[type] || 1;
+    const totalBytes = count * typeSize;
+    const dataOff = totalBytes <= 4 ? entryOff + 8 : view.getUint32(entryOff + 8, littleEndian);
+    const vals: number[] = [];
+    for (let i = 0; i < count; i++) {
+      const p = dataOff + i * typeSize;
+      if (p + typeSize > bytes.length) break;
+      if (type === 1 || type === 7) vals.push(bytes[p]);
+      else if (type === 3) vals.push(view.getUint16(p, littleEndian));
+      else if (type === 4) vals.push(view.getUint32(p, littleEndian));
+      else if (type === 8) vals.push(view.getInt16(p, littleEndian));
+      else if (type === 9) vals.push(view.getInt32(p, littleEndian));
+      else vals.push(bytes[p]);
+    }
+    return vals;
+  };
+
+  const pages: DecodedRgbaImage[] = [];
+  let ifdOffset = view.getUint32(4, littleEndian);
+  const visitedIfds = new Set<number>();
+
+  while (ifdOffset > 0 && ifdOffset + 2 <= bytes.length && !visitedIfds.has(ifdOffset) && pages.length < 128) {
+    visitedIfds.add(ifdOffset);
+    const numEntries = view.getUint16(ifdOffset, littleEndian);
+    const tags = new Map<number, number[]>();
+
+    for (let i = 0; i < numEntries; i++) {
+      const entryOff = ifdOffset + 2 + i * 12;
+      if (entryOff + 12 > bytes.length) break;
+      const tagId = view.getUint16(entryOff, littleEndian);
+      tags.set(tagId, readTagValues(entryOff));
+    }
+
+    const nextIfdPos = ifdOffset + 2 + numEntries * 12;
+    ifdOffset = nextIfdPos + 4 <= bytes.length ? view.getUint32(nextIfdPos, littleEndian) : 0;
+
+    const width = tags.get(256)?.[0] || 0;
+    const height = tags.get(257)?.[0] || 0;
+    if (width <= 0 || height <= 0) continue;
+
+    const bitsPerSampleArr = tags.get(258) || [8];
+    const bps = bitsPerSampleArr[0] || 8;
+    const compression = tags.get(259)?.[0] || 1;
+    const photometric = tags.get(262)?.[0] ?? 2;
+    const samplesPerPixel = tags.get(277)?.[0] || bitsPerSampleArr.length || 1;
+    const planarConfig = tags.get(284)?.[0] || 1;
+    const predictor = tags.get(317)?.[0] || 1;
+    const colorMap = tags.get(320) || [];
+
+    const stripOffsets = tags.get(273) || [];
+    const stripByteCounts = tags.get(279) || [];
+    const rowsPerStrip = tags.get(278)?.[0] || height;
+
+    const tileWidth = tags.get(322)?.[0] || 0;
+    const tileLength = tags.get(323)?.[0] || 0;
+    const tileOffsets = tags.get(324) || [];
+    const tileByteCounts = tags.get(325) || [];
+
+    const decompressChunk = async (raw: Uint8Array, expected: number): Promise<Uint8Array> => {
+      if (compression === 1) return raw;
+      if (compression === 32773) return decodeTiffPackBits(raw, expected);
+      if (compression === 5) return decodeTiffLzw(raw, expected);
+      if (compression === 8 || compression === 32946) {
+        try {
+          return await inflateBytes(raw, 'deflate');
+        } catch {
+          return await inflateBytes(raw, 'deflate-raw');
+        }
+      }
+      throw new Error(`Compresión TIFF no soportada (código ${compression}).`);
+    };
+
+    const applyHorizontalPredictor = (
+      buf: Uint8Array,
+      rowW: number,
+      rowH: number,
+      spp: number
+    ) => {
+      if (predictor !== 2) return;
+      if (bps === 8) {
+        const rowStride = rowW * spp;
+        for (let y = 0; y < rowH; y++) {
+          const base = y * rowStride;
+          for (let i = spp; i < rowStride && base + i < buf.length; i++) {
+            buf[base + i] = (buf[base + i] + buf[base + i - spp]) & 0xff;
+          }
+        }
+      } else if (bps === 16) {
+        const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+        const rowSamples = rowW * spp;
+        for (let y = 0; y < rowH; y++) {
+          const base = y * rowSamples;
+          for (let i = spp; i < rowSamples && (base + i) * 2 + 1 < buf.length; i++) {
+            const cur = dv.getUint16((base + i) * 2, littleEndian);
+            const prev = dv.getUint16((base + i - spp) * 2, littleEndian);
+            dv.setUint16((base + i) * 2, (cur + prev) & 0xffff, littleEndian);
+          }
+        }
+      }
+    };
+
+    const bytesPerSample = bps === 16 ? 2 : 1;
+    const out = new Uint8ClampedArray(width * height * 4);
+
+    const writePixelBlock = (
+      decoded: Uint8Array,
+      blockX: number,
+      blockY: number,
+      blockW: number,
+      blockH: number,
+      planeIndex: number | null
+    ) => {
+      const spp = planeIndex !== null ? 1 : samplesPerPixel;
+      applyHorizontalPredictor(decoded, blockW, blockH, spp);
+
+      const dv = bps === 16 ? new DataView(decoded.buffer, decoded.byteOffset, decoded.byteLength) : null;
+      const readSample = (sampleIdx: number): number => {
+        if (bps === 16 && dv) {
+          const off = sampleIdx * 2;
+          if (off + 1 >= decoded.length) return 0;
+          return dv.getUint16(off, littleEndian) >> 8;
+        }
+        return decoded[sampleIdx] ?? 0;
+      };
+
+      for (let ly = 0; ly < blockH; ly++) {
+        const dy = blockY + ly;
+        if (dy < 0 || dy >= height) continue;
+
+        if (bps === 1) {
+          const rowBytes = Math.ceil((blockW * spp) / 8);
+          for (let lx = 0; lx < blockW; lx++) {
+            const dx = blockX + lx;
+            if (dx < 0 || dx >= width) continue;
+            const byte = decoded[ly * rowBytes + (lx >> 3)] ?? 0;
+            const bit = (byte >> (7 - (lx & 7))) & 1;
+            const v = photometric === 0 ? (bit ? 0 : 255) : bit ? 255 : 0;
+            const dst = (dy * width + dx) * 4;
+            out[dst] = v;
+            out[dst + 1] = v;
+            out[dst + 2] = v;
+            out[dst + 3] = 255;
+          }
+          continue;
+        }
+
+        if (bps === 4) {
+          const rowBytes = Math.ceil((blockW * spp) / 2);
+          for (let lx = 0; lx < blockW; lx++) {
+            const dx = blockX + lx;
+            if (dx < 0 || dx >= width) continue;
+            const byte = decoded[ly * rowBytes + (lx >> 1)] ?? 0;
+            const nib = (lx & 1) === 0 ? (byte >> 4) & 0x0f : byte & 0x0f;
+            const dst = (dy * width + dx) * 4;
+            if (photometric === 3 && colorMap.length >= 48) {
+              const mapLen = colorMap.length / 3;
+              out[dst] = (colorMap[nib] ?? 0) >> 8;
+              out[dst + 1] = (colorMap[mapLen + nib] ?? 0) >> 8;
+              out[dst + 2] = (colorMap[mapLen * 2 + nib] ?? 0) >> 8;
+              out[dst + 3] = 255;
+            } else {
+              const v = photometric === 0 ? 255 - nib * 17 : nib * 17;
+              out[dst] = v;
+              out[dst + 1] = v;
+              out[dst + 2] = v;
+              out[dst + 3] = 255;
+            }
+          }
+          continue;
+        }
+
+        for (let lx = 0; lx < blockW; lx++) {
+          const dx = blockX + lx;
+          if (dx < 0 || dx >= width) continue;
+          const dst = (dy * width + dx) * 4;
+          const baseSample = (ly * blockW + lx) * spp;
+
+          if (planeIndex !== null) {
+            const v = readSample(baseSample);
+            if (planeIndex < 4) out[dst + planeIndex] = v;
+            if (samplesPerPixel < 4) out[dst + 3] = 255;
+            continue;
+          }
+
+          if (photometric === 2) {
+            // RGB / RGBA
+            out[dst] = readSample(baseSample);
+            out[dst + 1] = samplesPerPixel >= 2 ? readSample(baseSample + 1) : out[dst];
+            out[dst + 2] = samplesPerPixel >= 3 ? readSample(baseSample + 2) : out[dst];
+            out[dst + 3] = samplesPerPixel >= 4 ? readSample(baseSample + 3) : 255;
+          } else if (photometric === 3 && colorMap.length >= 3) {
+            // Palette / Indexed
+            const idx = readSample(baseSample);
+            const mapLen = Math.floor(colorMap.length / 3);
+            out[dst] = (colorMap[idx] ?? 0) >> 8;
+            out[dst + 1] = (colorMap[mapLen + idx] ?? 0) >> 8;
+            out[dst + 2] = (colorMap[mapLen * 2 + idx] ?? 0) >> 8;
+            out[dst + 3] = samplesPerPixel >= 2 ? readSample(baseSample + 1) : 255;
+          } else if (photometric === 5 && samplesPerPixel >= 4) {
+            // CMYK -> RGB
+            const c = readSample(baseSample) / 255;
+            const m = readSample(baseSample + 1) / 255;
+            const yk = readSample(baseSample + 2) / 255;
+            const k = readSample(baseSample + 3) / 255;
+            out[dst] = Math.round(255 * (1 - c) * (1 - k));
+            out[dst + 1] = Math.round(255 * (1 - m) * (1 - k));
+            out[dst + 2] = Math.round(255 * (1 - yk) * (1 - k));
+            out[dst + 3] = samplesPerPixel >= 5 ? readSample(baseSample + 4) : 255;
+          } else {
+            // Grayscale (0=WhiteIsZero, 1=BlackIsZero)
+            const rawV = readSample(baseSample);
+            const v = photometric === 0 ? 255 - rawV : rawV;
+            out[dst] = v;
+            out[dst + 1] = v;
+            out[dst + 2] = v;
+            out[dst + 3] = samplesPerPixel >= 2 ? readSample(baseSample + 1) : 255;
+          }
+        }
+      }
+    };
+
+    if (tileOffsets.length > 0 && tileWidth > 0 && tileLength > 0) {
+      const tilesAcross = Math.ceil(width / tileWidth);
+      const tilesDown = Math.ceil(height / tileLength);
+      const tilesPerPlane = tilesAcross * tilesDown;
+      for (let t = 0; t < tileOffsets.length; t++) {
+        const off = tileOffsets[t];
+        const len = tileByteCounts[t] || bytes.length - off;
+        if (off >= bytes.length) continue;
+        const planeIdx = planarConfig === 2 ? Math.floor(t / tilesPerPlane) : null;
+        const localIdx = planarConfig === 2 ? t % tilesPerPlane : t;
+        const tx = (localIdx % tilesAcross) * tileWidth;
+        const ty = Math.floor(localIdx / tilesAcross) * tileLength;
+        const spp = planeIdx !== null ? 1 : samplesPerPixel;
+        const expected =
+          bps === 1
+            ? Math.ceil((tileWidth * spp) / 8) * tileLength
+            : bps === 4
+            ? Math.ceil((tileWidth * spp) / 2) * tileLength
+            : tileWidth * tileLength * spp * bytesPerSample;
+        const raw = bytes.subarray(off, Math.min(bytes.length, off + len));
+        const decoded = await decompressChunk(raw, expected);
+        writePixelBlock(decoded, tx, ty, tileWidth, tileLength, planeIdx);
+      }
+    } else if (stripOffsets.length > 0) {
+      const stripsPerPlane = Math.ceil(height / rowsPerStrip);
+      for (let s = 0; s < stripOffsets.length; s++) {
+        const off = stripOffsets[s];
+        const len = stripByteCounts[s] || bytes.length - off;
+        if (off >= bytes.length) continue;
+        const planeIdx = planarConfig === 2 ? Math.floor(s / stripsPerPlane) : null;
+        const localStrip = planarConfig === 2 ? s % stripsPerPlane : s;
+        const sy = localStrip * rowsPerStrip;
+        const stripH = Math.min(rowsPerStrip, height - sy);
+        if (stripH <= 0) continue;
+        const spp = planeIdx !== null ? 1 : samplesPerPixel;
+        const expected =
+          bps === 1
+            ? Math.ceil((width * spp) / 8) * stripH
+            : bps === 4
+            ? Math.ceil((width * spp) / 2) * stripH
+            : width * stripH * spp * bytesPerSample;
+        const raw = bytes.subarray(off, Math.min(bytes.length, off + len));
+        const decoded = await decompressChunk(raw, expected);
+        writePixelBlock(decoded, 0, sy, width, stripH, planeIdx);
+      }
+    } else {
+      throw new Error('El archivo TIFF no contiene franjas ni mosaicos de píxeles.');
+    }
+
+    let hasTransparency = false;
+    for (let i = 3; i < out.length; i += 4) {
+      if (out[i] < 254) {
+        hasTransparency = true;
+        break;
+      }
+    }
+    pages.push({ width, height, data: out, hasTransparency });
+  }
+
+  if (pages.length === 0) {
+    throw new Error('No se pudo decodificar ninguna página válida del archivo TIFF.');
+  }
+  return pages;
+}
+
+// =========================================================================
+// UNIFIED RASTER DECODER (Works on PNG, JPG, WEBP, GIF, BMP, TIFF, TGA, ICO)
+// =========================================================================
+export async function decodeAnyRasterFileToRgba(file: File): Promise<DecodedRgbaImage> {
+  const ext = getFileExtension(file.name);
+  if (ext === 'tga') {
+    return decodeTgaToRgba(await file.arrayBuffer());
+  }
+  if (ext === 'bmp') {
+    return decodeBmpToRgba(await file.arrayBuffer(), file);
+  }
+  if (ext === 'ico') {
+    return decodeIcoToRgba(await file.arrayBuffer());
+  }
+  if (ext === 'tif' || ext === 'tiff') {
+    const pages = await decodeTiffFrames(await file.arrayBuffer());
+    return pages[0];
+  }
+  if (ext === 'gif') {
+    const gif = decodeAnimatedGif(await file.arrayBuffer());
+    return {
+      width: gif.width,
+      height: gif.height,
+      data: gif.frames[0].rgba,
+      hasTransparency: gif.hasTransparency,
+    };
+  }
+  return decodeBrowserBlobToRgba(file);
+}
+
+/**
+ * Unified rasterizer used by Importar al Proyecto, SmartImportModal, Palettes, References & Assets.
+ * Guarantees PNG, JPG, JPEG, WEBP, GIF, BMP, TIFF, TGA, and ICO all decode identically.
+ */
+export async function rasterizeImageFileToTargetGrid(
+  file: File,
+  targetW: number,
+  targetH: number,
+  fitMode: 'fit' | 'original' | 'stretch' = 'fit'
+): Promise<{
+  grid: (string | null)[][];
+  naturalWidth: number;
+  naturalHeight: number;
+  dataUrl: string;
+}> {
+  const decoded = await decodeAnyRasterFileToRgba(file);
+  const scaled = scaleRgbaImage(decoded, targetW, targetH, fitMode);
+  const { grid } = rgbaBufferToPixelGrid(scaled.data, targetW, targetH);
+  const dataUrl = rgbaToDataUrl(decoded);
+  return {
+    grid,
+    naturalWidth: decoded.width,
+    naturalHeight: decoded.height,
+    dataUrl,
+  };
+}
+
+export async function decodeFilePreviewDataUrl(file: File): Promise<{
+  dataUrl: string;
+  width: number;
+  height: number;
+  frameCount?: number;
+}> {
+  const ext = getFileExtension(file.name);
+  if (ext === 'gif') {
+    const gif = decodeAnimatedGif(await file.arrayBuffer());
+    return {
+      dataUrl: rgbaToDataUrl({
+        width: gif.width,
+        height: gif.height,
+        data: gif.frames[0].rgba,
+        hasTransparency: gif.hasTransparency,
+      }),
+      width: gif.width,
+      height: gif.height,
+      frameCount: gif.frames.length,
+    };
+  }
+  const rgba = await decodeAnyRasterFileToRgba(file);
+  return {
+    dataUrl: rgbaToDataUrl(rgba),
+    width: rgba.width,
+    height: rgba.height,
+    frameCount: 1,
+  };
+}
+
+// =========================================================================
+// SPRITESHEET AUTO-DETECTION & GRID SLICING ENGINE
+// =========================================================================
+export function detectSpritesheetCandidate(
+  fileName: string,
+  width: number,
+  height: number
+): SpritesheetCandidateInfo {
+  const lower = fileName.toLowerCase();
+
+  // Explicit grid hint in filename, e.g. hero_4x2.png or attack_6frames.png
+  const gridHint = lower.match(/(?:^|[_\-\s])(\d{1,2})x(\d{1,2})(?:[_\-\s.]|$)/);
+  if (gridHint) {
+    const c = parseInt(gridHint[1], 10);
+    const r = parseInt(gridHint[2], 10);
+    if (c >= 2 && c <= 32 && r >= 1 && r <= 32 && width % c === 0 && height % r === 0) {
+      return {
+        isCandidate: true,
+        suggestedCols: c,
+        suggestedRows: r,
+        suggestedFrameWidth: Math.floor(width / c),
+        suggestedFrameHeight: Math.floor(height / r),
+        reason: `Detectada cuadrícula ${c}×${r} en el nombre del archivo`,
+      };
+    }
+  }
+
+  const stripNameKeyword = /(sheet|strip|sprite|atlas|frames|anim|walk|run|idle|attack|jump|combo|cycle)/i.test(
+    lower
+  );
+
+  // Horizontal square-frame strip (e.g. 256x64 -> 4 frames of 64x64)
+  if (width >= height * 2 && width % height === 0) {
+    const cols = width / height;
+    if (cols >= 2 && cols <= 32) {
+      return {
+        isCandidate: true,
+        suggestedCols: cols,
+        suggestedRows: 1,
+        suggestedFrameWidth: height,
+        suggestedFrameHeight: height,
+        reason: `Tira horizontal divisible exactamente en ${cols} fotogramas de ${height}×${height} px`,
+      };
+    }
+  }
+
+  // Vertical square-frame strip (e.g. 64x256 -> 4 frames of 64x64)
+  if (height >= width * 2 && height % width === 0) {
+    const rows = height / width;
+    if (rows >= 2 && rows <= 32) {
+      return {
+        isCandidate: true,
+        suggestedCols: 1,
+        suggestedRows: rows,
+        suggestedFrameWidth: width,
+        suggestedFrameHeight: width,
+        reason: `Tira vertical divisible exactamente en ${rows} fotogramas de ${width}×${width} px`,
+      };
+    }
+  }
+
+  if (stripNameKeyword && (width >= 64 || height >= 64)) {
+    const commonSizes = [16, 24, 32, 48, 64, 96, 128];
+    for (const sz of commonSizes) {
+      if (width >= sz * 2 && width % sz === 0 && height % sz === 0) {
+        const cols = width / sz;
+        const rows = height / sz;
+        if (cols * rows >= 2 && cols * rows <= 64) {
+          return {
+            isCandidate: true,
+            suggestedCols: cols,
+            suggestedRows: rows,
+            suggestedFrameWidth: sz,
+            suggestedFrameHeight: sz,
+            reason: `Posible spritesheet (${cols}×${rows} celdas de ${sz}×${sz} px)`,
+          };
+        }
+      }
+    }
+    const cols = width >= height ? Math.max(2, Math.min(16, Math.round(width / Math.max(1, height)))) : 1;
+    const rows = height > width ? Math.max(2, Math.min(16, Math.round(height / Math.max(1, width)))) : 1;
+    return {
+      isCandidate: true,
+      suggestedCols: cols,
+      suggestedRows: rows,
+      suggestedFrameWidth: Math.max(1, Math.floor(width / cols)),
+      suggestedFrameHeight: Math.max(1, Math.floor(height / rows)),
+      reason: 'Nombre de archivo compatible con Spritesheet',
+    };
+  }
+
+  // Non-candidate default suggestion if user manually slices
+  const defaultCols = width >= height * 2 ? Math.max(2, Math.min(16, Math.round(width / Math.max(1, height)))) : 4;
+  return {
+    isCandidate: false,
+    suggestedCols: defaultCols,
+    suggestedRows: 1,
+    suggestedFrameWidth: Math.max(1, Math.floor(width / defaultCols)),
+    suggestedFrameHeight: height,
+    reason: '',
+  };
+}
+
+export interface SpritesheetSliceOptions {
+  cols: number;
+  rows: number;
+  marginX?: number;
+  marginY?: number;
+  spacingX?: number;
+  spacingY?: number;
+  skipEmptyFrames?: boolean;
+  fps?: number;
+  baseName: string;
+}
+
+export function sliceRgbaToSpritesheetResult(
+  raw: DecodedRgbaImage,
+  opts: SpritesheetSliceOptions
+): ImportResult {
+  const cols = Math.max(1, Math.min(64, Math.floor(opts.cols)));
+  const rows = Math.max(1, Math.min(64, Math.floor(opts.rows)));
+  const marginX = Math.max(0, Math.floor(opts.marginX || 0));
+  const marginY = Math.max(0, Math.floor(opts.marginY || 0));
+  const spacingX = Math.max(0, Math.floor(opts.spacingX || 0));
+  const spacingY = Math.max(0, Math.floor(opts.spacingY || 0));
+  const fps = Math.max(1, Math.min(60, Math.floor(opts.fps || 12)));
+
+  const usableW = Math.max(1, raw.width - marginX * 2 - spacingX * (cols - 1));
+  const usableH = Math.max(1, raw.height - marginY * 2 - spacingY * (rows - 1));
+  const cellW = Math.max(1, Math.floor(usableW / cols));
+  const cellH = Math.max(1, Math.floor(usableH / rows));
+
+  const frameDurationMs = Math.round(1000 / fps);
+  const frameTicks = Math.max(1, Math.round((frameDurationMs / 1000) * 60));
+  const stamp = Date.now();
+  const frames: Frame[] = [];
+
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const startX = marginX + c * (cellW + spacingX);
+      const startY = marginY + r * (cellH + spacingY);
+      const grid = createEmptyGrid(cellW, cellH);
+      let cellPixels = 0;
+
+      for (let y = 0; y < cellH; y++) {
+        const sy = startY + y;
+        if (sy < 0 || sy >= raw.height) continue;
+        for (let x = 0; x < cellW; x++) {
+          const sx = startX + x;
+          if (sx < 0 || sx >= raw.width) continue;
+          const idx = (sy * raw.width + sx) * 4;
+          const a = raw.data[idx + 3];
+          if (a > 0) {
+            grid[y][x] = rgbaToPixelString(raw.data[idx], raw.data[idx + 1], raw.data[idx + 2], a);
+            cellPixels++;
+          }
+        }
+      }
+
+      if (opts.skipEmptyFrames && cellPixels === 0) continue;
+
+      const idx = frames.length;
+      frames.push({
+        id: `frame-sheet-${stamp}-${idx}`,
+        name: `Fotograma #${idx + 1}`,
+        durationTicks: frameTicks,
+        durationMs: frameDurationMs,
+        phase: 'neutral',
+        layers: [
+          {
+            id: `layer-sheet-${stamp}-${idx}`,
+            name: 'Spritesheet',
+            visible: true,
+            locked: false,
+            opacity: 1,
+            fillOpacity: 1,
+            blendMode: 'normal',
+            layerType: 'raster',
+            pixels: grid,
+          },
+        ],
+        hitboxes: [],
+      });
+    }
+  }
+
+  if (frames.length === 0) {
+    throw new FileLoadError(
+      'Todas las celdas del Spritesheet están vacías con los parámetros actuales.',
+      opts.baseName,
+      'Spritesheet'
+    );
+  }
+
+  return validateImportResult(
+    {
+      name: opts.baseName,
+      width: cellW,
+      height: cellH,
+      frames,
+      fps,
+      stats: {
+        formatLabel: 'Spritesheet',
+        fileFormat: 'spritesheet',
+        frameCount: frames.length,
+        layerCount: 1,
+        nonEmptyPixelCount: 0,
+        hasTransparency: raw.hasTransparency,
+        isAnimated: frames.length > 1,
+      },
+    },
+    opts.baseName,
+    'Spritesheet'
+  );
+}
+
+// =========================================================================
+// PSD (PHOTOSHOP) IMPORTER (With Layer Groups, Blend Modes & Full Alpha)
+// =========================================================================
+function mapPsdBlendMode(mode?: string): LayerBlendMode {
+  switch (mode) {
+    case 'multiply':
+      return 'multiply';
+    case 'screen':
+      return 'screen';
+    case 'overlay':
+      return 'overlay';
+    case 'soft light':
+      return 'soft-light';
+    case 'hard light':
+      return 'hard-light';
+    case 'darken':
+      return 'darken';
+    case 'lighten':
+      return 'lighten';
+    case 'color dodge':
+    case 'linear dodge':
+      return 'color-dodge';
+    case 'color burn':
+    case 'linear burn':
+      return 'color-burn';
+    case 'difference':
+      return 'difference';
+    case 'exclusion':
+      return 'exclusion';
+    default:
+      return 'normal';
+  }
+}
+
 function psdLayerCanvasToGrid(
   canvas: HTMLCanvasElement,
   canvasWidth: number,
@@ -72,41 +1973,25 @@ function psdLayerCanvasToGrid(
       const destX = offsetX + x;
       if (destX < 0 || destX >= canvasWidth) continue;
       const idx = (y * w + x) * 4;
-      const r = data[idx];
-      const g = data[idx + 1];
-      const b = data[idx + 2];
       const a = data[idx + 3];
-      if (a > 10) {
-        grid[destY][destX] = `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
+      if (a > 0) {
+        grid[destY][destX] = rgbaToPixelString(data[idx], data[idx + 1], data[idx + 2], a);
       }
     }
   }
   return grid;
 }
 
-// -------------------------------------------------------------
-// PSD (Photoshop) Importer (Single frame or multi-frame folders)
-// -------------------------------------------------------------
 export async function importPsd(file: File): Promise<ImportResult> {
   const buffer = await file.arrayBuffer();
   const psd = readPsd(buffer);
-
   const width = psd.width;
   const height = psd.height;
 
-  const defaultHitboxes = [
-    {
-      id: 'hb-def',
-      type: 'hurtbox' as const,
-      x: Math.floor(width * 0.2),
-      y: Math.floor(height * 0.2),
-      w: Math.floor(width * 0.6),
-      h: Math.floor(height * 0.7),
-      name: 'Hurtbox PSD',
-    },
-  ];
+  if (!width || !height || width <= 0 || height <= 0) {
+    throw new FileLoadError('El archivo PSD no contiene dimensiones válidas.', file.name, 'PSD');
+  }
 
-  // Check if exported as multi-frame "[Frame #N]" folder groups
   const hasFrameFolders =
     psd.children &&
     psd.children.length > 0 &&
@@ -127,6 +2012,9 @@ export async function importPsd(file: File): Promise<ImportResult> {
             visible: !child.hidden,
             locked: !!child.transparencyProtected,
             opacity: child.opacity !== undefined ? child.opacity : 1,
+            fillOpacity: 1,
+            blendMode: mapPsdBlendMode(child.blendMode),
+            layerType: 'raster',
             pixels: psdLayerCanvasToGrid(
               child.canvas,
               width,
@@ -143,30 +2031,58 @@ export async function importPsd(file: File): Promise<ImportResult> {
           id: `frame-psd-${Date.now()}-${fIdx}`,
           name: cleanName || `Fotograma ${fIdx + 1}`,
           durationTicks: 4,
-          phase: fIdx === 1 ? 'startup' : fIdx === 2 ? 'active' : 'neutral',
+          phase: 'neutral',
           layers: frameLayers,
-          hitboxes: fIdx === 0 ? defaultHitboxes : [],
+          hitboxes: [],
         });
       }
     });
 
     if (importedFrames.length > 0) {
-      return {
-        name: file.name.replace(/\.[^/.]+$/, ''),
-        width,
-        height,
-        frames: importedFrames,
-      };
+      return validateImportResult(
+        {
+          name: file.name.replace(/\.[^/.]+$/, ''),
+          width,
+          height,
+          frames: importedFrames,
+          stats: {
+            formatLabel: 'Photoshop (.PSD)',
+            fileFormat: 'psd',
+            frameCount: importedFrames.length,
+            layerCount: importedFrames[0].layers.length,
+            nonEmptyPixelCount: 0,
+            hasTransparency: true,
+            isAnimated: importedFrames.length > 1,
+          },
+        },
+        file.name,
+        'PSD'
+      );
     }
   }
 
-  // Standard flat/nested PSD import into Frame 1 layers
   const layers: Layer[] = [];
-  const collectPsdLayers = (children: typeof psd.children) => {
+  const layerGroups: LayerGroup[] = [];
+  const groupColors = ['#3b82f6', '#a855f7', '#10b981', '#f59e0b', '#ec4899'];
+
+  const collectPsdLayers = (children: typeof psd.children, parentGroupId: string | null = null) => {
     if (!children) return;
     for (const child of children) {
       if (child.children && child.children.length > 0) {
-        collectPsdLayers(child.children);
+        const grpId = `group-psd-${layerGroups.length}-${Date.now()}`;
+        layerGroups.push({
+          id: grpId,
+          name: child.name || `Grupo PSD ${layerGroups.length + 1}`,
+          color: groupColors[layerGroups.length % groupColors.length],
+          frameIndices: [0],
+          collapsed: !child.opened,
+          visible: !child.hidden,
+          locked: false,
+          opacity: child.opacity !== undefined ? child.opacity : 1,
+          blendMode: mapPsdBlendMode(child.blendMode),
+          parentGroupId,
+        });
+        collectPsdLayers(child.children, grpId);
       } else if (child.canvas) {
         layers.push({
           id: `layer-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -174,6 +2090,10 @@ export async function importPsd(file: File): Promise<ImportResult> {
           visible: !child.hidden,
           locked: !!child.transparencyProtected,
           opacity: child.opacity !== undefined ? child.opacity : 1,
+          fillOpacity: 1,
+          blendMode: mapPsdBlendMode(child.blendMode),
+          layerType: 'raster',
+          groupId: parentGroupId,
           pixels: psdLayerCanvasToGrid(
             child.canvas,
             width,
@@ -196,84 +2116,131 @@ export async function importPsd(file: File): Promise<ImportResult> {
       visible: true,
       locked: false,
       opacity: 1,
+      fillOpacity: 1,
+      blendMode: 'normal',
+      layerType: 'raster',
       pixels: grid,
     });
   }
 
-  const defaultFrame: Frame = {
-    id: `frame-${Date.now()}`,
-    name: 'PSD Import',
-    durationTicks: 4,
-    phase: 'neutral',
-    layers:
-      layers.length > 0
-        ? layers
-        : [
-            {
-              id: 'layer-1',
-              name: 'Capa 1',
-              visible: true,
-              locked: false,
-              opacity: 1,
-              pixels: createEmptyGrid(width, height),
-            },
-          ],
-    hitboxes: defaultHitboxes,
-  };
-
-  return {
-    name: file.name.replace(/\.[^/.]+$/, ''),
-    width,
-    height,
-    frames: [defaultFrame],
-  };
-}
-
-// Decompress zlib-wrapped deflate data (Aseprite compressed cels celType=2)
-async function inflateZlibBytes(compressed: Uint8Array): Promise<Uint8Array> {
-  if (typeof DecompressionStream === 'undefined') {
-    throw new Error('Tu navegador no soporta DecompressionStream para cels .ase comprimidos.');
+  if (layers.length === 0) {
+    throw new FileLoadError(
+      'El archivo PSD no contiene capas de imagen ni vista compuesta decodificable.',
+      file.name,
+      'PSD'
+    );
   }
-  const copy = new Uint8Array(compressed.byteLength);
-  copy.set(compressed);
-  const stream = new Blob([copy.buffer]).stream().pipeThrough(new DecompressionStream('deflate'));
-  const ab = await new Response(stream).arrayBuffer();
-  return new Uint8Array(ab);
+
+  return validateImportResult(
+    {
+      name: file.name.replace(/\.[^/.]+$/, ''),
+      width,
+      height,
+      layerGroups,
+      frames: [
+        {
+          id: `frame-${Date.now()}`,
+          name: 'Fotograma #1',
+          durationTicks: 4,
+          phase: 'neutral',
+          layers,
+          hitboxes: [],
+        },
+      ],
+      stats: {
+        formatLabel: 'Photoshop (.PSD)',
+        fileFormat: 'psd',
+        frameCount: 1,
+        layerCount: layers.length,
+        nonEmptyPixelCount: 0,
+        hasTransparency: true,
+        isAnimated: false,
+      },
+    },
+    file.name,
+    'PSD'
+  );
 }
 
+// =========================================================================
+// ASEPRITE (.ase / .aseprite) BINARY IMPORTER (Full Linked Cels + Groups + Alpha)
+// =========================================================================
 interface ParsedAseLayerMeta {
   name: string;
   visible: boolean;
   locked: boolean;
   opacity: number;
-  type: number;
+  type: number; // 0=image, 1=group, 2=tilemap
+  childLevel: number;
+  blendMode: LayerBlendMode;
+  groupId: string | null;
+  ownGroupId?: string;
 }
 
-// -------------------------------------------------------------
-// ASEPRITE (.ase / .aseprite) Binary Importer
-// -------------------------------------------------------------
+function mapAseBlendMode(mode: number): LayerBlendMode {
+  switch (mode) {
+    case 1:
+      return 'multiply';
+    case 2:
+      return 'screen';
+    case 3:
+      return 'overlay';
+    case 4:
+      return 'darken';
+    case 5:
+      return 'lighten';
+    case 6:
+      return 'color-dodge';
+    case 7:
+      return 'color-burn';
+    case 8:
+      return 'hard-light';
+    case 9:
+      return 'soft-light';
+    case 10:
+      return 'difference';
+    case 11:
+      return 'exclusion';
+    default:
+      return 'normal';
+  }
+}
+
 export async function importAseprite(file: File): Promise<ImportResult> {
   const buffer = await file.arrayBuffer();
   const view = new DataView(buffer);
 
   if (buffer.byteLength < 128) {
-    throw new Error('Archivo .ase inválido o demasiado pequeño.');
+    throw new FileLoadError('Archivo Aseprite inválido o demasiado pequeño.', file.name, 'Aseprite');
   }
 
   const magic = view.getUint16(4, true);
   if (magic !== 0xa5e0) {
-    throw new Error('Formato .ase no reconocido (cabecera mágica inválida).');
+    throw new FileLoadError(
+      'Cabecera Aseprite no reconocida (el archivo puede estar dañado o tener otra extensión).',
+      file.name,
+      'Aseprite'
+    );
   }
 
   const numFrames = view.getUint16(6, true) || 1;
-  const width = view.getUint16(8, true) || 48;
-  const height = view.getUint16(10, true) || 48;
-  const colorDepth = view.getUint16(12, true); // 32 = RGBA, 16 = Grayscale, 8 = Indexed
+  const width = view.getUint16(8, true);
+  const height = view.getUint16(10, true);
+  if (width <= 0 || height <= 0) {
+    throw new FileLoadError('Dimensiones inválidas en archivo Aseprite.', file.name, 'Aseprite');
+  }
+
+  const colorDepth = view.getUint16(12, true); // 32=RGBA, 16=Grayscale, 8=Indexed
   const headerSpeedMs = view.getUint16(18, true) || 100;
   const transparentIndex = view.getUint8(28);
 
   const aseLayers: ParsedAseLayerMeta[] = [];
+  const extractedGroups: LayerGroup[] = [];
+  const groupStack: { level: number; id: string }[] = [];
+  const groupPaletteColors = ['#3b82f6', '#a855f7', '#10b981', '#f59e0b', '#ec4899'];
+
   const palette: string[] = new Array(256).fill('#000000');
+  let hasModernPalette = false;
   const actionTags: ActionTag[] = [];
   const rawFrameEntries: {
     durationMs: number;
@@ -309,23 +2276,80 @@ export async function importAseprite(file: File): Promise<ImportResult> {
       if (chunkType === 0x2004 && chunkOffset + 24 <= chunkEnd) {
         const flags = view.getUint16(chunkOffset + 6, true);
         const layerType = view.getUint16(chunkOffset + 8, true);
+        const childLevel = view.getUint16(chunkOffset + 10, true);
+        const blendModeId = view.getUint16(chunkOffset + 16, true);
         const opacityByte = view.getUint8(chunkOffset + 18);
         const nameLen = view.getUint16(chunkOffset + 22, true);
         let layerName = `Capa ${aseLayers.length + 1}`;
         if (chunkOffset + 24 + nameLen <= chunkEnd && nameLen > 0) {
           layerName = decoder.decode(new Uint8Array(buffer, chunkOffset + 24, nameLen));
         }
+
+        while (groupStack.length > 0 && groupStack[groupStack.length - 1].level >= childLevel) {
+          groupStack.pop();
+        }
+        const parentGroupId = groupStack.length > 0 ? groupStack[groupStack.length - 1].id : null;
+
+        let ownGroupId: string | undefined;
+        if (layerType === 1) {
+          ownGroupId = `group-ase-${extractedGroups.length}-${Date.now()}`;
+          extractedGroups.push({
+            id: ownGroupId,
+            name: layerName,
+            color: groupPaletteColors[extractedGroups.length % groupPaletteColors.length],
+            frameIndices: Array.from({ length: numFrames }, (_, idx) => idx),
+            collapsed: (flags & 32) !== 0,
+            visible: (flags & 1) !== 0,
+            locked: (flags & 2) === 0,
+            opacity: opacityByte > 0 ? opacityByte / 255 : 1,
+            blendMode: mapAseBlendMode(blendModeId),
+            parentGroupId,
+          });
+          groupStack.push({ level: childLevel, id: ownGroupId });
+        }
+
         aseLayers.push({
           name: layerName,
           visible: (flags & 1) !== 0,
           locked: (flags & 2) === 0,
           opacity: opacityByte > 0 ? opacityByte / 255 : 1,
           type: layerType,
+          childLevel,
+          blendMode: mapAseBlendMode(blendModeId),
+          groupId: parentGroupId,
+          ownGroupId,
         });
       }
 
-      // Palette Chunk (0x2019)
+      // Old Palette Chunks (0x0004 & 0x0011) as fallback when 0x2019 is absent
+      if ((chunkType === 0x0004 || chunkType === 0x0011) && !hasModernPalette && chunkOffset + 8 <= chunkEnd) {
+        const packetCount = view.getUint16(chunkOffset + 6, true);
+        let pOffset = chunkOffset + 8;
+        let palIndex = 0;
+        for (let pk = 0; pk < packetCount && pOffset + 2 <= chunkEnd; pk++) {
+          const skip = view.getUint8(pOffset);
+          const rawCount = view.getUint8(pOffset + 1);
+          const count = rawCount === 0 ? 256 : rawCount;
+          pOffset += 2;
+          palIndex += skip;
+          for (let i = 0; i < count && pOffset + 3 <= chunkEnd && palIndex < 256; i++) {
+            let r = view.getUint8(pOffset);
+            let g = view.getUint8(pOffset + 1);
+            let b = view.getUint8(pOffset + 2);
+            if (chunkType === 0x0011) {
+              r = Math.min(255, Math.round((r * 255) / 63));
+              g = Math.min(255, Math.round((g * 255) / 63));
+              b = Math.min(255, Math.round((b * 255) / 63));
+            }
+            palette[palIndex++] = `#${((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1)}`;
+            pOffset += 3;
+          }
+        }
+      }
+
+      // Modern Palette Chunk (0x2019)
       if (chunkType === 0x2019 && chunkOffset + 26 <= chunkEnd) {
+        hasModernPalette = true;
         const firstIdx = view.getUint32(chunkOffset + 10, true);
         const lastIdx = view.getUint32(chunkOffset + 14, true);
         let pOffset = chunkOffset + 26;
@@ -334,7 +2358,8 @@ export async function importAseprite(file: File): Promise<ImportResult> {
           const r = view.getUint8(pOffset + 2);
           const g = view.getUint8(pOffset + 3);
           const b = view.getUint8(pOffset + 4);
-          palette[idx] = `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
+          const a = view.getUint8(pOffset + 5);
+          palette[idx] = rgbaToPixelString(r, g, b, a) || '#000000';
           pOffset += 6;
           if ((entryFlags & 1) !== 0 && pOffset + 2 <= chunkEnd) {
             const nameLen = view.getUint16(pOffset, true);
@@ -343,14 +2368,25 @@ export async function importAseprite(file: File): Promise<ImportResult> {
         }
       }
 
-      // Cel Chunk (0x2005)
+      // Cel Chunk (0x2005) — Supports Raw (0), Linked Cel (1), and Compressed (2)
       if (chunkType === 0x2005 && chunkOffset + 22 <= chunkEnd) {
         const layerIndex = view.getUint16(chunkOffset + 6, true);
         const celX = view.getInt16(chunkOffset + 8, true);
         const celY = view.getInt16(chunkOffset + 10, true);
-        const celType = view.getUint16(chunkOffset + 13, true); // 0=Raw, 1=Linked, 2=Compressed
+        const celOpacity = view.getUint8(chunkOffset + 12) / 255;
+        const celType = view.getUint16(chunkOffset + 13, true);
 
-        if ((celType === 0 || celType === 2) && chunkOffset + 26 <= chunkEnd) {
+        if (celType === 1 && chunkOffset + 24 <= chunkEnd) {
+          // Linked Cel: clone pixels from referenced earlier frame!
+          const linkedFrameIdx = view.getUint16(chunkOffset + 22, true);
+          const sourceGrid = rawFrameEntries[linkedFrameIdx]?.cels.get(layerIndex);
+          if (sourceGrid) {
+            cels.set(
+              layerIndex,
+              sourceGrid.map((row) => [...row])
+            );
+          }
+        } else if ((celType === 0 || celType === 2) && chunkOffset + 26 <= chunkEnd) {
           const celW = view.getUint16(chunkOffset + 22, true);
           const celH = view.getUint16(chunkOffset + 24, true);
           let pixelBytes: Uint8Array | null = null;
@@ -358,12 +2394,8 @@ export async function importAseprite(file: File): Promise<ImportResult> {
           if (celType === 0) {
             pixelBytes = new Uint8Array(buffer, chunkOffset + 26, chunkEnd - (chunkOffset + 26));
           } else {
-            try {
-              const compressed = new Uint8Array(buffer, chunkOffset + 26, chunkEnd - (chunkOffset + 26));
-              pixelBytes = await inflateZlibBytes(compressed);
-            } catch {
-              pixelBytes = null;
-            }
+            const compressed = new Uint8Array(buffer, chunkOffset + 26, chunkEnd - (chunkOffset + 26));
+            pixelBytes = await inflateBytes(compressed, 'deflate');
           }
 
           if (pixelBytes && celW > 0 && celH > 0) {
@@ -374,34 +2406,30 @@ export async function importAseprite(file: File): Promise<ImportResult> {
             for (let cy = 0; cy < celH; cy++) {
               for (let cx = 0; cx < celW; cx++) {
                 if (pIdx + bpp > pixelBytes.byteLength) break;
-                let hex: string | null = null;
+                let pixelVal: string | null = null;
 
                 if (bpp === 4) {
                   const r = pixelBytes[pIdx];
                   const g = pixelBytes[pIdx + 1];
                   const b = pixelBytes[pIdx + 2];
-                  const a = pixelBytes[pIdx + 3];
-                  if (a > 10) {
-                    hex = `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
-                  }
+                  const a = Math.round(pixelBytes[pIdx + 3] * celOpacity);
+                  pixelVal = rgbaToPixelString(r, g, b, a);
                 } else if (bpp === 2) {
                   const v = pixelBytes[pIdx];
-                  const a = pixelBytes[pIdx + 1];
-                  if (a > 10) {
-                    hex = `#${((1 << 24) + (v << 16) + (v << 8) + v).toString(16).slice(1)}`;
-                  }
+                  const a = Math.round(pixelBytes[pIdx + 1] * celOpacity);
+                  pixelVal = rgbaToPixelString(v, v, v, a);
                 } else {
                   const idx = pixelBytes[pIdx];
                   if (idx !== transparentIndex && palette[idx]) {
-                    hex = palette[idx];
+                    pixelVal = palette[idx];
                   }
                 }
 
                 pIdx += bpp;
                 const destX = celX + cx;
                 const destY = celY + cy;
-                if (hex && destX >= 0 && destX < width && destY >= 0 && destY < height) {
-                  layerGrid[destY][destX] = hex;
+                if (pixelVal && destX >= 0 && destX < width && destY >= 0 && destY < height) {
+                  layerGrid[destY][destX] = pixelVal;
                 }
               }
             }
@@ -426,7 +2454,7 @@ export async function importAseprite(file: File): Promise<ImportResult> {
           if (tagOffset + 19 + nameLen <= chunkEnd && nameLen > 0) {
             tagName = decoder.decode(new Uint8Array(buffer, tagOffset + 19, nameLen));
           }
-          const tagHex = `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
+          const tagHex = `#${((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1)}`;
           actionTags.push({
             id: `tag-${t}-${Date.now()}`,
             name: tagName,
@@ -454,10 +2482,17 @@ export async function importAseprite(file: File): Promise<ImportResult> {
     offset += frameBytes;
   }
 
-  // Ensure at least one layer template exists
+  if (rawFrameEntries.length === 0) {
+    throw new FileLoadError('El archivo Aseprite no contiene fotogramas válidos.', file.name, 'Aseprite');
+  }
+
   const imageLayerIndices = aseLayers
     .map((meta, idx) => ({ meta, idx }))
     .filter((item) => item.meta.type === 0);
+
+  const avgMs =
+    rawFrameEntries.reduce((acc, f) => acc + (f.durationMs || 100), 0) / rawFrameEntries.length;
+  const computedFps = Math.max(1, Math.min(60, Math.round(1000 / Math.max(16, avgMs))));
 
   const frames: Frame[] = rawFrameEntries.map((entry, fIdx) => {
     const layers: Layer[] =
@@ -468,6 +2503,10 @@ export async function importAseprite(file: File): Promise<ImportResult> {
             visible: meta.visible,
             locked: meta.locked,
             opacity: meta.opacity,
+            fillOpacity: 1,
+            blendMode: meta.blendMode,
+            layerType: 'raster',
+            groupId: meta.groupId,
             pixels: entry.cels.get(idx) || createEmptyGrid(width, height),
           }))
         : [
@@ -477,6 +2516,9 @@ export async function importAseprite(file: File): Promise<ImportResult> {
               visible: true,
               locked: false,
               opacity: 1,
+              fillOpacity: 1,
+              blendMode: 'normal',
+              layerType: 'raster',
               pixels: entry.cels.get(0) || createEmptyGrid(width, height),
             },
           ];
@@ -486,133 +2528,592 @@ export async function importAseprite(file: File): Promise<ImportResult> {
       name: `Fotograma #${fIdx + 1}`,
       durationTicks: entry.durationTicks,
       durationMs: entry.durationMs,
-      phase: fIdx === 1 ? 'startup' : fIdx === 2 ? 'active' : 'neutral',
+      phase: 'neutral',
       layers,
       hitboxes: [],
     };
   });
 
-  return {
-    name: file.name.replace(/\.[^/.]+$/, ''),
-    width,
-    height,
-    frames:
-      frames.length > 0
-        ? frames
-        : [
-            {
-              id: 'frame-1',
-              name: 'Frame 1',
-              durationTicks: 4,
-              phase: 'neutral',
-              layers: [
-                {
-                  id: 'layer-1',
-                  name: 'Capa 1',
-                  visible: true,
-                  locked: false,
-                  opacity: 1,
-                  pixels: createEmptyGrid(width, height),
-                },
-              ],
-              hitboxes: [],
-            },
-          ],
-    actionTags,
-  };
+  return validateImportResult(
+    {
+      name: file.name.replace(/\.[^/.]+$/, ''),
+      width,
+      height,
+      frames,
+      layerGroups: extractedGroups,
+      actionTags,
+      fps: computedFps,
+      stats: {
+        formatLabel: 'Aseprite (.ASE)',
+        fileFormat: 'ase',
+        frameCount: frames.length,
+        layerCount: frames[0].layers.length,
+        nonEmptyPixelCount: 0,
+        hasTransparency: true,
+        isAnimated: frames.length > 1,
+      },
+    },
+    file.name,
+    'Aseprite'
+  );
 }
 
-// -------------------------------------------------------------
-// PIXELCLASH STUDIO (.pcs) Native Project Container Importer
-// -------------------------------------------------------------
+// =========================================================================
+// PIXELCLASH STUDIO (.pcs) & PROJECT (.json) NATIVE IMPORTERS
+// =========================================================================
 export async function importPcs(file: File): Promise<ImportResult> {
   const buffer = await file.arrayBuffer();
   const bytes = new Uint8Array(buffer);
   let projectJsonText = '';
 
-  // Detect ZIP magic header ("PK") used by compressed .pcs packages
   if (bytes.length >= 2 && bytes[0] === 0x50 && bytes[1] === 0x4b) {
     const zip = await JSZip.loadAsync(buffer);
     const projectEntry = zip.file('project.json');
     if (!projectEntry) {
-      throw new Error('Archivo .pcs corrupto: falta project.json interno.');
+      throw new FileLoadError(
+        'Archivo .pcs corrupto: falta el descriptor interno project.json.',
+        file.name,
+        'PixelClash (.PCS)'
+      );
     }
     projectJsonText = await projectEntry.async('string');
   } else {
     projectJsonText = new TextDecoder().decode(bytes);
   }
 
-  const parsed = JSON.parse(projectJsonText) as Partial<ProjectState>;
-  if (!parsed || !parsed.width || !parsed.height || !Array.isArray(parsed.frames)) {
-    throw new Error('Estructura de proyecto .pcs inválida.');
+  let parsed: Partial<ProjectState>;
+  try {
+    parsed = JSON.parse(projectJsonText) as Partial<ProjectState>;
+  } catch (err: any) {
+    throw new FileLoadError(
+      'No se pudo analizar el contenido interno del archivo .pcs (JSON dañado).',
+      file.name,
+      'PixelClash (.PCS)',
+      err?.message
+    );
   }
 
+  if (!parsed || !parsed.width || !parsed.height || !Array.isArray(parsed.frames) || parsed.frames.length === 0) {
+    throw new FileLoadError(
+      'Estructura de proyecto .pcs inválida o sin fotogramas.',
+      file.name,
+      'PixelClash (.PCS)'
+    );
+  }
+
+  return validateImportResult(
+    {
+      name: parsed.name || file.name.replace(/\.[^/.]+$/, ''),
+      width: parsed.width,
+      height: parsed.height,
+      frames: parsed.frames,
+      layerGroups: Array.isArray(parsed.layerGroups) ? parsed.layerGroups : [],
+      actionTags: Array.isArray(parsed.actionTags) ? parsed.actionTags : [],
+      projectState: parsed,
+      fps: typeof parsed.fps === 'number' ? parsed.fps : 12,
+      stats: {
+        formatLabel: 'PixelClash (.PCS)',
+        fileFormat: 'pcs',
+        frameCount: parsed.frames.length,
+        layerCount: parsed.frames[0]?.layers?.length || 1,
+        nonEmptyPixelCount: 0,
+        hasTransparency: true,
+        isAnimated: parsed.frames.length > 1,
+      },
+    },
+    file.name,
+    'PixelClash (.PCS)'
+  );
+}
+
+export async function importProjectJson(file: File): Promise<ImportResult> {
+  let parsed: Partial<ProjectState>;
+  try {
+    const text = await file.text();
+    parsed = JSON.parse(text) as Partial<ProjectState>;
+  } catch (err: any) {
+    throw new FileLoadError(
+      'El archivo JSON está dañado o no tiene sintaxis JSON válida.',
+      file.name,
+      'Proyecto JSON',
+      err?.message
+    );
+  }
+
+  if (!parsed || !parsed.width || !parsed.height || !Array.isArray(parsed.frames) || parsed.frames.length === 0) {
+    throw new FileLoadError(
+      'El archivo JSON no corresponde a un proyecto válido de PixelClash Studio (faltan dimensiones o fotogramas).',
+      file.name,
+      'Proyecto JSON'
+    );
+  }
+
+  return validateImportResult(
+    {
+      name: parsed.name || file.name.replace(/(\.pixelclash)?\.json$/i, ''),
+      width: parsed.width,
+      height: parsed.height,
+      frames: parsed.frames,
+      layerGroups: Array.isArray(parsed.layerGroups) ? parsed.layerGroups : [],
+      actionTags: Array.isArray(parsed.actionTags) ? parsed.actionTags : [],
+      projectState: parsed,
+      fps: typeof parsed.fps === 'number' ? parsed.fps : 12,
+      stats: {
+        formatLabel: 'Proyecto JSON',
+        fileFormat: 'json',
+        frameCount: parsed.frames.length,
+        layerCount: parsed.frames[0]?.layers?.length || 1,
+        nonEmptyPixelCount: 0,
+        hasTransparency: true,
+        isAnimated: parsed.frames.length > 1,
+      },
+    },
+    file.name,
+    'Proyecto JSON'
+  );
+}
+
+// =========================================================================
+// ANIMATED GIF & MULTI-PAGE TIFF PROJECT IMPORTERS
+// =========================================================================
+async function importGif(file: File): Promise<ImportResult> {
+  const gif = decodeAnimatedGif(await file.arrayBuffer());
+  let targetW = gif.width;
+  let targetH = gif.height;
+  let wasDownscaled = false;
+
+  if (targetW > MAX_SINGLE_CANVAS_RASTER_DIM || targetH > MAX_SINGLE_CANVAS_RASTER_DIM) {
+    const scale = Math.min(MAX_SINGLE_CANVAS_RASTER_DIM / targetW, MAX_SINGLE_CANVAS_RASTER_DIM / targetH);
+    targetW = Math.max(1, Math.round(targetW * scale));
+    targetH = Math.max(1, Math.round(targetH * scale));
+    wasDownscaled = true;
+  }
+
+  const stamp = Date.now();
+  const frames: Frame[] = gif.frames.map((gf, idx) => {
+    const frameRgba: DecodedRgbaImage = wasDownscaled
+      ? scaleRgbaImage({ width: gif.width, height: gif.height, data: gf.rgba, hasTransparency: gif.hasTransparency }, targetW, targetH, 'stretch')
+      : { width: gif.width, height: gif.height, data: gf.rgba, hasTransparency: gif.hasTransparency };
+
+    const { grid } = rgbaBufferToPixelGrid(frameRgba.data, targetW, targetH);
+    const durationTicks = Math.max(1, Math.round((gf.delayMs / 1000) * 60));
+
+    return {
+      id: `frame-gif-${stamp}-${idx}`,
+      name: gif.frames.length > 1 ? `GIF #${idx + 1}` : 'Imagen GIF',
+      durationTicks,
+      durationMs: gf.delayMs,
+      phase: 'neutral',
+      layers: [
+        {
+          id: `layer-gif-${stamp}-${idx}`,
+          name: gif.frames.length > 1 ? 'Animación GIF' : 'Imagen Base',
+          visible: true,
+          locked: false,
+          opacity: 1,
+          fillOpacity: 1,
+          blendMode: 'normal',
+          layerType: 'raster',
+          pixels: grid,
+        },
+      ],
+      hitboxes: [],
+    };
+  });
+
+  const avgMs = gif.frames.reduce((s, f) => s + f.delayMs, 0) / gif.frames.length;
+  const computedFps = Math.max(1, Math.min(60, Math.round(1000 / Math.max(16, avgMs))));
+  const rawFirst: DecodedRgbaImage = {
+    width: gif.width,
+    height: gif.height,
+    data: gif.frames[0].rgba,
+    hasTransparency: gif.hasTransparency,
+  };
+
+  return validateImportResult(
+    {
+      name: file.name.replace(/\.[^/.]+$/, ''),
+      width: targetW,
+      height: targetH,
+      frames,
+      fps: computedFps,
+      rawRaster: gif.frames.length === 1 ? rawFirst : undefined,
+      spritesheetCandidate:
+        gif.frames.length === 1 ? detectSpritesheetCandidate(file.name, gif.width, gif.height) : undefined,
+      stats: {
+        formatLabel: gif.frames.length > 1 ? 'GIF Animado' : 'GIF',
+        fileFormat: 'gif',
+        frameCount: frames.length,
+        layerCount: 1,
+        nonEmptyPixelCount: 0,
+        hasTransparency: gif.hasTransparency,
+        isAnimated: frames.length > 1,
+        wasDownscaled,
+        originalWidth: gif.width,
+        originalHeight: gif.height,
+      },
+    },
+    file.name,
+    gif.frames.length > 1 ? 'GIF Animado' : 'GIF'
+  );
+}
+
+async function importTiff(file: File): Promise<ImportResult> {
+  const pages = await decodeTiffFrames(await file.arrayBuffer());
+  const first = pages[0];
+  let targetW = first.width;
+  let targetH = first.height;
+  let wasDownscaled = false;
+
+  if (targetW > MAX_SINGLE_CANVAS_RASTER_DIM || targetH > MAX_SINGLE_CANVAS_RASTER_DIM) {
+    const scale = Math.min(MAX_SINGLE_CANVAS_RASTER_DIM / targetW, MAX_SINGLE_CANVAS_RASTER_DIM / targetH);
+    targetW = Math.max(1, Math.round(targetW * scale));
+    targetH = Math.max(1, Math.round(targetH * scale));
+    wasDownscaled = true;
+  }
+
+  const stamp = Date.now();
+  const frames: Frame[] = pages.map((page, idx) => {
+    const normalized =
+      page.width !== targetW || page.height !== targetH
+        ? scaleRgbaImage(page, targetW, targetH, 'fit')
+        : page;
+    const { grid } = rgbaBufferToPixelGrid(normalized.data, targetW, targetH);
+    return {
+      id: `frame-tiff-${stamp}-${idx}`,
+      name: pages.length > 1 ? `Página TIFF #${idx + 1}` : 'Imagen TIFF',
+      durationTicks: 5,
+      durationMs: 100,
+      phase: 'neutral',
+      layers: [
+        {
+          id: `layer-tiff-${stamp}-${idx}`,
+          name: 'Imagen Base',
+          visible: true,
+          locked: false,
+          opacity: 1,
+          fillOpacity: 1,
+          blendMode: 'normal',
+          layerType: 'raster',
+          pixels: grid,
+        },
+      ],
+      hitboxes: [],
+    };
+  });
+
+  return validateImportResult(
+    {
+      name: file.name.replace(/\.[^/.]+$/, ''),
+      width: targetW,
+      height: targetH,
+      frames,
+      fps: 10,
+      rawRaster: pages.length === 1 ? first : undefined,
+      spritesheetCandidate:
+        pages.length === 1 ? detectSpritesheetCandidate(file.name, first.width, first.height) : undefined,
+      stats: {
+        formatLabel: pages.length > 1 ? 'TIFF Multipágina' : 'TIFF',
+        fileFormat: 'tiff',
+        frameCount: frames.length,
+        layerCount: 1,
+        nonEmptyPixelCount: 0,
+        hasTransparency: pages.some((p) => p.hasTransparency),
+        isAnimated: pages.length > 1,
+        wasDownscaled,
+        originalWidth: first.width,
+        originalHeight: first.height,
+      },
+    },
+    file.name,
+    'TIFF'
+  );
+}
+
+async function importSingleRasterImage(
+  file: File,
+  formatLabel: string,
+  fileFormat: RecentProjectFileFormat
+): Promise<ImportResult> {
+  const raw = await decodeAnyRasterFileToRgba(file);
+  let targetW = raw.width;
+  let targetH = raw.height;
+  let wasDownscaled = false;
+
+  if (targetW > MAX_SINGLE_CANVAS_RASTER_DIM || targetH > MAX_SINGLE_CANVAS_RASTER_DIM) {
+    const scale = Math.min(MAX_SINGLE_CANVAS_RASTER_DIM / targetW, MAX_SINGLE_CANVAS_RASTER_DIM / targetH);
+    targetW = Math.max(1, Math.round(targetW * scale));
+    targetH = Math.max(1, Math.round(targetH * scale));
+    wasDownscaled = true;
+  }
+
+  const effective = wasDownscaled ? scaleRgbaImage(raw, targetW, targetH, 'stretch') : raw;
+  const { grid, nonEmptyCount, hasTransparency } = rgbaBufferToPixelGrid(
+    effective.data,
+    targetW,
+    targetH
+  );
+
+  const stamp = Date.now();
+  const baseName = file.name.replace(/\.[^/.]+$/, '');
+
+  return validateImportResult(
+    {
+      name: baseName,
+      width: targetW,
+      height: targetH,
+      frames: [
+        {
+          id: `frame-${fileFormat}-${stamp}`,
+          name: `Imagen ${formatLabel}`,
+          durationTicks: 5,
+          durationMs: 83,
+          phase: 'neutral',
+          layers: [
+            {
+              id: `layer-${fileFormat}-${stamp}`,
+              name: baseName || 'Imagen Base',
+              visible: true,
+              locked: false,
+              opacity: 1,
+              fillOpacity: 1,
+              blendMode: 'normal',
+              layerType: 'raster',
+              pixels: grid,
+            },
+          ],
+          hitboxes: [],
+        },
+      ],
+      rawRaster: raw,
+      spritesheetCandidate: detectSpritesheetCandidate(file.name, raw.width, raw.height),
+      stats: {
+        formatLabel,
+        fileFormat,
+        frameCount: 1,
+        layerCount: 1,
+        nonEmptyPixelCount: nonEmptyCount,
+        hasTransparency,
+        isAnimated: false,
+        wasDownscaled,
+        originalWidth: raw.width,
+        originalHeight: raw.height,
+      },
+    },
+    file.name,
+    formatLabel
+  );
+}
+
+// =========================================================================
+// MANDATORY POST-LOAD VALIDATION ENGINE
+// =========================================================================
+export function validateDocumentFramesIntegrity(
+  width: number,
+  height: number,
+  frames: Frame[],
+  fileName: string,
+  formatLabel: string
+): {
+  normalizedFrames: Frame[];
+  nonEmptyPixelCount: number;
+  maxLayerCount: number;
+  hasTransparency: boolean;
+} {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width < 1 || height < 1) {
+    throw new FileLoadError(
+      `El documento tiene dimensiones inválidas (${width}×${height} px).`,
+      fileName,
+      formatLabel
+    );
+  }
+  if (!Array.isArray(frames) || frames.length === 0) {
+    throw new FileLoadError(
+      'El archivo no contiene ningún fotograma válido.',
+      fileName,
+      formatLabel
+    );
+  }
+
+  let nonEmptyPixelCount = 0;
+  let maxLayerCount = 0;
+  let hasTransparency = false;
+
+  const normalizedFrames: Frame[] = frames.map((frame, fIdx) => {
+    if (!frame || !Array.isArray(frame.layers) || frame.layers.length === 0) {
+      throw new FileLoadError(
+        `El fotograma #${fIdx + 1} está dañado o no contiene capas válidas.`,
+        fileName,
+        formatLabel
+      );
+    }
+    maxLayerCount = Math.max(maxLayerCount, frame.layers.length);
+
+    const normalizedLayers: Layer[] = frame.layers.map((layer, lIdx) => {
+      if (!layer || !Array.isArray(layer.pixels)) {
+        throw new FileLoadError(
+          `La capa "${layer?.name || lIdx + 1}" del fotograma #${fIdx + 1} no tiene matriz de píxeles válida.`,
+          fileName,
+          formatLabel
+        );
+      }
+
+      // Normalize ragged rows cleanly without losing data
+      let needsRebuild = layer.pixels.length !== height;
+      if (!needsRebuild) {
+        for (let y = 0; y < height; y++) {
+          if (!Array.isArray(layer.pixels[y]) || layer.pixels[y].length !== width) {
+            needsRebuild = true;
+            break;
+          }
+        }
+      }
+
+      const finalPixels: (string | null)[][] = needsRebuild
+        ? Array.from({ length: height }, (_, y) =>
+            Array.from({ length: width }, (_, x) => {
+              const cell = layer.pixels[y]?.[x];
+              return typeof cell === 'string' && cell.length > 0 ? cell : null;
+            })
+          )
+        : layer.pixels;
+
+      for (let y = 0; y < height; y++) {
+        const row = finalPixels[y];
+        for (let x = 0; x < width; x++) {
+          const val = row[x];
+          if (val) {
+            nonEmptyPixelCount++;
+            if (val.startsWith('rgba(')) hasTransparency = true;
+          } else {
+            hasTransparency = true;
+          }
+        }
+      }
+
+      return {
+        ...layer,
+        id: layer.id || `layer-val-${fIdx}-${lIdx}`,
+        name: layer.name || `Capa ${lIdx + 1}`,
+        visible: layer.visible !== false,
+        locked: Boolean(layer.locked),
+        opacity: typeof layer.opacity === 'number' ? layer.opacity : 1,
+        fillOpacity: typeof layer.fillOpacity === 'number' ? layer.fillOpacity : 1,
+        blendMode: layer.blendMode || 'normal',
+        pixels: finalPixels,
+      };
+    });
+
+    return {
+      ...frame,
+      id: frame.id || `frame-val-${fIdx}`,
+      name: frame.name || `Fotograma #${fIdx + 1}`,
+      durationTicks: typeof frame.durationTicks === 'number' && frame.durationTicks > 0 ? frame.durationTicks : 4,
+      phase: frame.phase || 'neutral',
+      layers: normalizedLayers,
+      hitboxes: Array.isArray(frame.hitboxes) ? frame.hitboxes : [],
+    };
+  });
+
+  return { normalizedFrames, nonEmptyPixelCount, maxLayerCount, hasTransparency };
+}
+
+export function validateImportResult(
+  result: ImportResult,
+  fileName: string,
+  formatLabel: string
+): ImportResult {
+  const { normalizedFrames, nonEmptyPixelCount, maxLayerCount, hasTransparency } =
+    validateDocumentFramesIntegrity(
+      result.width,
+      result.height,
+      result.frames,
+      fileName,
+      formatLabel
+    );
+
   return {
-    name: parsed.name || file.name.replace(/\.[^/.]+$/, ''),
-    width: parsed.width,
-    height: parsed.height,
-    frames: parsed.frames,
-    actionTags: parsed.actionTags || parsed.layerGroups,
-    projectState: parsed,
+    ...result,
+    frames: normalizedFrames,
+    stats: {
+      ...result.stats,
+      formatLabel,
+      frameCount: normalizedFrames.length,
+      layerCount: maxLayerCount,
+      nonEmptyPixelCount,
+      hasTransparency: result.stats.hasTransparency || hasTransparency,
+      isAnimated: normalizedFrames.length > 1,
+    },
   };
 }
 
-// -------------------------------------------------------------
-// Universal File Importer
-// -------------------------------------------------------------
+// =========================================================================
+// UNIVERSAL UNIFIED FILE IMPORTER
+// Used across: Archivo -> Abrir, Abrir Recientes, Importar & Drag & Drop
+// =========================================================================
 export async function importGraphicFile(file: File): Promise<ImportResult> {
-  const ext = file.name.split('.').pop()?.toLowerCase();
-
-  if (ext === 'pcs') {
-    return importPcs(file);
-  } else if (ext === 'psd') {
-    return importPsd(file);
-  } else if (ext === 'ase' || ext === 'aseprite') {
-    return importAseprite(file);
-  } else if (ext === 'png' || ext === 'jpg' || ext === 'jpeg' || ext === 'webp') {
-    // Single Image Import
-    return new Promise((resolve, reject) => {
-      const img = new Image();
-      img.onload = () => {
-        const w = img.width;
-        const h = img.height;
-        const canvas = document.createElement('canvas');
-        canvas.width = w;
-        canvas.height = h;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return reject(new Error('Canvas context failure'));
-        ctx.drawImage(img, 0, 0);
-        const grid = canvasToPixelGrid(canvas, w, h);
-
-        resolve({
-          name: file.name.replace(/\.[^/.]+$/, ''),
-          width: w,
-          height: h,
-          frames: [
-            {
-              id: `frame-${Date.now()}`,
-              name: 'Imported PNG',
-              durationTicks: 4,
-              phase: 'neutral',
-              layers: [
-                {
-                  id: 'layer-imported',
-                  name: 'Base Image',
-                  visible: true,
-                  locked: false,
-                  opacity: 1,
-                  pixels: grid
-                }
-              ],
-              hitboxes: []
-            }
-          ]
-        });
-      };
-      img.onerror = () => reject(new Error('No se pudo cargar la imagen'));
-      img.src = URL.createObjectURL(file);
-    });
+  if (!file || file.size === 0) {
+    throw new FileLoadError(
+      'El archivo está vacío (0 bytes) o no pudo leerse.',
+      file?.name || 'archivo',
+      'Desconocido'
+    );
   }
 
-  throw new Error(`Formato .${ext} no soportado. Usa .pcs, .ase, .aseprite, .psd, .png o .json`);
+  const ext = getFileExtension(file.name);
+
+  try {
+    if (ext === 'pcs') {
+      return await importPcs(file);
+    }
+    if (ext === 'json') {
+      return await importProjectJson(file);
+    }
+    if (ext === 'psd') {
+      return await importPsd(file);
+    }
+    if (ext === 'ase' || ext === 'aseprite') {
+      return await importAseprite(file);
+    }
+    if (ext === 'gif') {
+      return await importGif(file);
+    }
+    if (ext === 'tif' || ext === 'tiff') {
+      return await importTiff(file);
+    }
+    if (ext === 'tga') {
+      return await importSingleRasterImage(file, 'TGA', 'tga');
+    }
+    if (ext === 'bmp') {
+      return await importSingleRasterImage(file, 'BMP', 'bmp');
+    }
+    if (ext === 'ico') {
+      return await importSingleRasterImage(file, 'ICO', 'ico');
+    }
+    if (ext === 'png' || file.type === 'image/png') {
+      return await importSingleRasterImage(file, 'PNG', 'png');
+    }
+    if (ext === 'jpg' || ext === 'jpeg' || file.type === 'image/jpeg') {
+      return await importSingleRasterImage(file, 'JPEG', 'jpg');
+    }
+    if (ext === 'webp' || file.type === 'image/webp') {
+      return await importSingleRasterImage(file, 'WEBP', 'webp');
+    }
+
+    throw new FileLoadError(
+      `Formato ".${ext || 'desconocido'}" no soportado. Formatos válidos: PNG, JPG, JPEG, WEBP, GIF, BMP, TIFF, TGA, ICO, ASE, ASEPRITE, PSD, PCS y JSON.`,
+      file.name,
+      ext ? `.${ext.toUpperCase()}` : 'Desconocido'
+    );
+  } catch (err: any) {
+    if (err instanceof FileLoadError) {
+      throw err;
+    }
+    throw new FileLoadError(
+      err?.message || 'Error al decodificar el archivo seleccionado.',
+      file.name,
+      ext ? `.${ext.toUpperCase()}` : 'Archivo',
+      err?.stack || String(err)
+    );
+  }
 }

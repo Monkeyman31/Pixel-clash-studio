@@ -58,6 +58,7 @@ import {
   MoveSubTool,
   MoveToolOptions,
   ParametricShapeObject,
+  PerformanceMode,
   ProjectWorkMode,
   PureRefConfig,
   ReferenceGroup,
@@ -196,6 +197,12 @@ import {
 } from '../utils/guidesEngine';
 import { ViewportRulersAndGuides } from './ViewportRulersAndGuides';
 import { analyzeTilesetSeams } from '../utils/workModesEngine';
+import {
+  blitPixelGridToCanvas,
+  getCachedLayerEffectivePixels,
+  getCachedOnionSkinCanvas,
+  getCachedPixelGridCanvas,
+} from '../utils/renderCache';
 
 interface CanvasViewportProps {
   width: number;
@@ -360,6 +367,7 @@ interface CanvasViewportProps {
   workMode?: ProjectWorkMode;
   stageParallaxConfig?: StageParallaxConfig;
   tilesetConfig?: TilesetWorkspaceConfig;
+  performanceMode?: PerformanceMode;
 }
 
 const HITBOX_RENDER_STYLES: Record<HitboxType, { stroke: string; fill: string; label: string }> = {
@@ -513,6 +521,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   workMode = 'fighter',
   stageParallaxConfig,
   tilesetConfig,
+  performanceMode = 'balanced',
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -940,8 +949,11 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   const [screenShakeOffset, setScreenShakeOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const animPhaseTimeRef = useRef<number>(0);
 
-  // Reference image cache + live move/scale/rotate state (Canvas + Camera PureRef)
+  // Reference image cache + static canvas-anchored references composite cache + live compose canvas
   const refImageCacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
+  const refImageVersionRef = useRef<number>(0);
+  const refLayerCacheRef = useRef<{ sig: string; canvas: HTMLCanvasElement } | null>(null);
+  const liveComposeCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [draggingReferenceId, setDraggingReferenceId] = useState<string | null>(null);
   const refDragStartRef = useRef<{
     kind: 'move' | 'scale' | 'rotate';
@@ -1654,7 +1666,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     const activeFrame =
       allFrames[curRenderFrameIdx] || currentFrame;
 
-    // 1.5. Render Canvas-Anchored References behind Sprite Layers (with Blend Modes & Transform Bounding Box)
+    // 1.5. Render Canvas-Anchored References behind Sprite Layers (CACHED: only rebuilds when moved/scaled/modified)
     const visibleGroupIds = new Set(
       referenceGroups.filter((g) => g.visible !== false).map((g) => g.id)
     );
@@ -1666,90 +1678,124 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       })
       .sort((a, b) => (a.zOrder ?? 0) - (b.zOrder ?? 0));
 
-    for (const refItem of sortedCanvasRefs) {
-      let img = refImageCacheRef.current.get(refItem.dataUrl);
-      if (!img) {
-        img = new Image();
-        img.onload = () => renderCanvas();
-        img.src = refItem.dataUrl;
-        refImageCacheRef.current.set(refItem.dataUrl, img);
+    if (sortedCanvasRefs.length > 0) {
+      let refSig = `${canvas.width}x${canvas.height}|${zoom}|${pureRefConfig.enabled ? pureRefConfig.globalOpacity : 1}|${refImageVersionRef.current}|`;
+      for (let i = 0; i < sortedCanvasRefs.length; i++) {
+        const r = sortedCanvasRefs[i];
+        refSig += `${r.id}:${r.dataUrl.length}:${r.x}:${r.y}:${r.scale}:${r.rotation}:${r.opacity}:${r.flipX ? 1 : 0}:${r.flipY ? 1 : 0}:${r.blendMode}:${r.zOrder ?? 0};`;
+        if (!refImageCacheRef.current.has(r.dataUrl)) {
+          const img = new Image();
+          img.onload = () => {
+            refImageVersionRef.current += 1;
+            refLayerCacheRef.current = null;
+            renderCanvas();
+          };
+          img.src = r.dataUrl;
+          refImageCacheRef.current.set(r.dataUrl, img);
+        }
       }
-      if (img.complete && img.naturalWidth > 0) {
-        ctx.save();
-        ctx.globalAlpha = Math.max(
-          0.02,
-          Math.min(1, refItem.opacity * (pureRefConfig.enabled ? pureRefConfig.globalOpacity : 1))
-        );
-        ctx.globalCompositeOperation = refItem.blendMode as GlobalCompositeOperation;
-        const cx = (width / 2 + refItem.x) * zoom;
-        const cy = (height / 2 + refItem.y) * zoom;
-        ctx.translate(cx, cy);
-        ctx.rotate((refItem.rotation * Math.PI) / 180);
-        ctx.scale(
-          (refItem.flipX ? -1 : 1) * refItem.scale,
-          (refItem.flipY ? -1 : 1) * refItem.scale
-        );
-        const drawW = img.naturalWidth * (zoom / Math.max(1, img.naturalWidth / width));
-        const drawH = img.naturalHeight * (zoom / Math.max(1, img.naturalWidth / width));
-        ctx.drawImage(img, -drawW / 2, -drawH / 2, drawW, drawH);
-        ctx.restore();
 
-        const showRefHandles =
-          activeReferenceId === refItem.id &&
-          (!refItem.locked ||
-            pureRefConfig.enabled ||
-            (activeTool === 'move' && moveSubTool === 'move_reference'));
-        if (showRefHandles) {
-          ctx.save();
-          ctx.translate(cx, cy);
-          ctx.rotate((refItem.rotation * Math.PI) / 180);
-          const bw = drawW * refItem.scale;
-          const bh = drawH * refItem.scale;
-          ctx.strokeStyle = '#38bdf8';
-          ctx.lineWidth = 1.5;
-          ctx.setLineDash([5, 3]);
-          ctx.strokeRect(-bw / 2, -bh / 2, bw, bh);
-          ctx.setLineDash([]);
-
-          // Corner scale handles
-          const corners = [
-            [-bw / 2, -bh / 2],
-            [bw / 2, -bh / 2],
-            [bw / 2, bh / 2],
-            [-bw / 2, bh / 2],
-          ];
-          for (const [hx, hy] of corners) {
-            ctx.fillStyle = '#ffffff';
-            ctx.strokeStyle = '#0ea5e9';
-            ctx.lineWidth = 1.5;
-            ctx.fillRect(hx - 4, hy - 4, 8, 8);
-            ctx.strokeRect(hx - 4, hy - 4, 8, 8);
+      if (!refLayerCacheRef.current || refLayerCacheRef.current.sig !== refSig) {
+        const off = refLayerCacheRef.current?.canvas || document.createElement('canvas');
+        if (off.width !== canvas.width) off.width = canvas.width;
+        if (off.height !== canvas.height) off.height = canvas.height;
+        const rCtx = off.getContext('2d');
+        if (rCtx) {
+          rCtx.clearRect(0, 0, off.width, off.height);
+          for (const refItem of sortedCanvasRefs) {
+            const img = refImageCacheRef.current.get(refItem.dataUrl);
+            if (img && img.complete && img.naturalWidth > 0) {
+              rCtx.save();
+              rCtx.globalAlpha = Math.max(
+                0.02,
+                Math.min(1, refItem.opacity * (pureRefConfig.enabled ? pureRefConfig.globalOpacity : 1))
+              );
+              rCtx.globalCompositeOperation = refItem.blendMode as GlobalCompositeOperation;
+              const cx = (width / 2 + refItem.x) * zoom;
+              const cy = (height / 2 + refItem.y) * zoom;
+              rCtx.translate(cx, cy);
+              rCtx.rotate((refItem.rotation * Math.PI) / 180);
+              rCtx.scale(
+                (refItem.flipX ? -1 : 1) * refItem.scale,
+                (refItem.flipY ? -1 : 1) * refItem.scale
+              );
+              const drawW = img.naturalWidth * (zoom / Math.max(1, img.naturalWidth / width));
+              const drawH = img.naturalHeight * (zoom / Math.max(1, img.naturalWidth / width));
+              rCtx.drawImage(img, -drawW / 2, -drawH / 2, drawW, drawH);
+              rCtx.restore();
+            }
           }
+        }
+        refLayerCacheRef.current = { sig: refSig, canvas: off };
+      }
 
-          // Top rotation stem + handle
-          ctx.strokeStyle = '#fbbf24';
-          ctx.lineWidth = 1.5;
-          ctx.beginPath();
-          ctx.moveTo(0, -bh / 2);
-          ctx.lineTo(0, -bh / 2 - 16);
-          ctx.stroke();
-          ctx.fillStyle = '#fbbf24';
-          ctx.beginPath();
-          ctx.arc(0, -bh / 2 - 19, 4.5, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.strokeStyle = '#0f172a';
-          ctx.stroke();
+      // Single fast blit for all canvas-anchored references
+      if (refLayerCacheRef.current) {
+        ctx.drawImage(refLayerCacheRef.current.canvas, 0, 0);
+      }
 
-          // Center pivot crosshair
-          ctx.strokeStyle = '#f43f5e';
-          ctx.lineWidth = 1.4;
-          ctx.beginPath();
-          ctx.moveTo(-6, 0);
-          ctx.lineTo(6, 0);
-          ctx.moveTo(0, -6);
-          ctx.lineTo(0, 6);
-          ctx.stroke();
-          ctx.restore();
+      // Draw interactive transform handles only for the currently selected reference
+      if (activeReferenceId) {
+        const activeRef = sortedCanvasRefs.find((r) => r.id === activeReferenceId);
+        const img = activeRef ? refImageCacheRef.current.get(activeRef.dataUrl) : null;
+        if (activeRef && img && img.complete && img.naturalWidth > 0) {
+          const showRefHandles =
+            !activeRef.locked ||
+            pureRefConfig.enabled ||
+            (activeTool === 'move' && moveSubTool === 'move_reference');
+          if (showRefHandles) {
+            const cx = (width / 2 + activeRef.x) * zoom;
+            const cy = (height / 2 + activeRef.y) * zoom;
+            const drawW = img.naturalWidth * (zoom / Math.max(1, img.naturalWidth / width));
+            const drawH = img.naturalHeight * (zoom / Math.max(1, img.naturalWidth / width));
+            ctx.save();
+            ctx.translate(cx, cy);
+            ctx.rotate((activeRef.rotation * Math.PI) / 180);
+            const bw = drawW * activeRef.scale;
+            const bh = drawH * activeRef.scale;
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 1.5;
+            ctx.setLineDash([5, 3]);
+            ctx.strokeRect(-bw / 2, -bh / 2, bw, bh);
+            ctx.setLineDash([]);
+
+            const corners = [
+              [-bw / 2, -bh / 2],
+              [bw / 2, -bh / 2],
+              [bw / 2, bh / 2],
+              [-bw / 2, bh / 2],
+            ];
+            for (const [hx, hy] of corners) {
+              ctx.fillStyle = '#ffffff';
+              ctx.strokeStyle = '#0ea5e9';
+              ctx.lineWidth = 1.5;
+              ctx.fillRect(hx - 4, hy - 4, 8, 8);
+              ctx.strokeRect(hx - 4, hy - 4, 8, 8);
+            }
+
+            ctx.strokeStyle = '#fbbf24';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(0, -bh / 2);
+            ctx.lineTo(0, -bh / 2 - 16);
+            ctx.stroke();
+            ctx.fillStyle = '#fbbf24';
+            ctx.beginPath();
+            ctx.arc(0, -bh / 2 - 19, 4.5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#0f172a';
+            ctx.stroke();
+
+            ctx.strokeStyle = '#f43f5e';
+            ctx.lineWidth = 1.4;
+            ctx.beginPath();
+            ctx.moveTo(-6, 0);
+            ctx.lineTo(6, 0);
+            ctx.moveTo(0, -6);
+            ctx.lineTo(0, 6);
+            ctx.stroke();
+            ctx.restore();
+          }
         }
       }
     }
@@ -1774,268 +1820,369 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       animPhaseTimeRef.current
     );
 
-    // 3. Onion Skin: Previous Frames (Cyan)
+    // 3. Onion Skin: Previous Frames (Cyan) — Cached single-drawImage silhouette blitting
     const curIdx = currentFrameIndex >= 0 ? currentFrameIndex : allFrames.findIndex((f) => f.id === currentFrame.id);
-    if (onionSkinEnabled && !isPlaying && !combatTestActive && (onionSkinPrev ?? 1) > 0 && allFrames.length > 1 && curIdx >= 0) {
-      const prevCount = onionSkinPrev ?? 1;
+    const skipHeavyOnionDuringDraw = performanceMode === 'performance' && isDrawing;
+    if (
+      onionSkinEnabled &&
+      !isPlaying &&
+      !combatTestActive &&
+      !skipHeavyOnionDuringDraw &&
+      (onionSkinPrev ?? 1) > 0 &&
+      allFrames.length > 1 &&
+      curIdx >= 0
+    ) {
+      const prevCount = performanceMode === 'performance' ? Math.min(1, onionSkinPrev ?? 1) : (onionSkinPrev ?? 1);
       for (let step = 1; step <= prevCount; step++) {
         const pIdx = curIdx - step;
         if (pIdx >= 0 && allFrames[pIdx]) {
           const prevComposited = compositeFrame(allFrames[pIdx], width, height, pIdx, false, layerGroups);
+          const onionCanvas = getCachedOnionSkinCanvas(prevComposited, width, height, '#00d2ff');
           ctx.globalAlpha = Math.max(0.08, onionSkinOpacity * (1 - (step - 1) * 0.25));
-          for (let y = 0; y < height; y++) {
-            for (let x = 0; x < width; x++) {
-              if (prevComposited[y]?.[x]) {
-                ctx.fillStyle = '#00d2ff';
-                ctx.fillRect(x * zoom, y * zoom, zoom, zoom);
-              }
-            }
-          }
+          ctx.imageSmoothingEnabled = false;
+          ctx.drawImage(onionCanvas, 0, 0, width * zoom, height * zoom);
         }
       }
       ctx.globalAlpha = 1.0;
     }
 
-    // 4. Onion Skin: Next Frames (Amber)
-    if (onionSkinEnabled && !isPlaying && !combatTestActive && (onionSkinNext ?? 0) > 0 && allFrames.length > 1 && curIdx >= 0) {
-      const nextCount = onionSkinNext ?? 0;
+    // 4. Onion Skin: Next Frames (Amber) — Cached single-drawImage silhouette blitting
+    if (
+      onionSkinEnabled &&
+      !isPlaying &&
+      !combatTestActive &&
+      !skipHeavyOnionDuringDraw &&
+      (onionSkinNext ?? 0) > 0 &&
+      allFrames.length > 1 &&
+      curIdx >= 0
+    ) {
+      const nextCount = performanceMode === 'performance' ? Math.min(1, onionSkinNext ?? 0) : (onionSkinNext ?? 0);
       for (let step = 1; step <= nextCount; step++) {
         const nIdx = curIdx + step;
         if (nIdx < allFrames.length && allFrames[nIdx]) {
           const nextComposited = compositeFrame(allFrames[nIdx], width, height, nIdx, false, layerGroups);
+          const onionCanvas = getCachedOnionSkinCanvas(nextComposited, width, height, '#ff9900');
           ctx.globalAlpha = Math.max(0.08, onionSkinOpacity * 0.85 * (1 - (step - 1) * 0.25));
+          ctx.imageSmoothingEnabled = false;
+          ctx.drawImage(onionCanvas, 0, 0, width * zoom, height * zoom);
+        }
+      }
+      ctx.globalAlpha = 1.0;
+    }
+
+    // 5. Render Layers of Active Frame
+    // FAST PATH: When no live transient draft/transform/preview/parallax is active,
+    // reuse WeakMap-cached composited frame canvas -> ONE ctx.drawImage call!
+    const hasLiveTransientEdit =
+      !isPlaying &&
+      !combatTestActive &&
+      (Boolean(transformSession) ||
+        ((isDrawing || isDraggingContent || textAnchor !== null) &&
+          !isPaintingMaskRef.current &&
+          draftPixelsRef.current.length > 0) ||
+        (isDrawing && isPaintingMaskRef.current && draftMaskRef.current.length > 0) ||
+        Boolean(liveCanvasPreview?.grid) ||
+        Boolean(creatingShapeDraftRef.current) ||
+        Boolean(shapeLiveOverrideRef.current));
+
+    const parallaxActive =
+      workMode === 'stage' &&
+      Boolean(stageParallaxConfig?.enabled) &&
+      Math.abs(stageParallaxConfig?.scrollOffset || 0) > 0.01;
+
+    let composedGrid: (string | null)[][];
+    if (!hasLiveTransientEdit && !parallaxActive) {
+      composedGrid = compositeFrame(
+        activeFrame,
+        width,
+        height,
+        curRenderFrameIdx,
+        false,
+        layerGroups
+      );
+      const cachedFrameCanvas = getCachedPixelGridCanvas(composedGrid, width, height);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(cachedFrameCanvas, p1ShiftX * zoom, p1ShiftY * zoom, width * zoom, height * zoom);
+      ctx.globalAlpha = 1.0;
+    } else {
+      composedGrid = createEmptyGrid(width, height);
+      let lastClippingBasePixels: (string | null)[][] | null = null;
+
+      for (const layer of activeFrame.layers) {
+        const isEditingLayer = layer.id === currentLayer.id;
+        const isLiveTransformLayer = !isPlaying && !combatTestActive && isEditingLayer && Boolean(transformSession);
+        const isLivePixelDraft =
+          !isPlaying &&
+          !combatTestActive &&
+          !isLiveTransformLayer &&
+          (isDrawing || isDraggingContent || textAnchor !== null) &&
+          !isPaintingMaskRef.current &&
+          isEditingLayer &&
+          draftPixelsRef.current.length > 0;
+        const isLiveMaskDraft =
+          !isPlaying &&
+          !combatTestActive &&
+          isDrawing &&
+          isPaintingMaskRef.current &&
+          isEditingLayer &&
+          draftMaskRef.current.length > 0;
+
+        const isLiveLayerPreview =
+          !isPlaying &&
+          !combatTestActive &&
+          Boolean(liveCanvasPreview?.grid) &&
+          (!liveCanvasPreview?.layerId || liveCanvasPreview.layerId === layer.id);
+
+        const layerShapes = layer.parametricShapes || [];
+        const isActLyr = !isPlaying && !combatTestActive && layer.id === currentLayer.id;
+        const liveDraft = isActLyr ? creatingShapeDraftRef.current : null;
+        const hasLiveShapeOverride = Boolean(isActLyr && (liveDraft || shapeLiveOverrideRef.current));
+
+        let pixelSource: (string | null)[][];
+        if (
+          !isLivePixelDraft &&
+          !isLiveLayerPreview &&
+          !isLiveTransformLayer &&
+          !hasLiveShapeOverride
+        ) {
+          // Unchanged layer: reuse WeakMap-cached rasterization of vectors & parametric shapes
+          pixelSource = getCachedLayerEffectivePixels(layer, width, height, () => {
+            let pix =
+              layer.vectorPaths && layer.vectorPaths.length > 0
+                ? rasterizeVectorPathsToGrid(
+                    layer.vectorPaths,
+                    width,
+                    height,
+                    layer.layerType === 'vector' ? null : layer.pixels
+                  )
+                : layer.pixels;
+            if (layerShapes.length > 0) {
+              pix = rasterizeParametricShapesList(
+                layerShapes,
+                width,
+                height,
+                pix,
+                effDitherConfig,
+                gradientConfig,
+                activePaletteColors
+              );
+            }
+            return pix;
+          });
+        } else {
+          pixelSource = isLivePixelDraft ? draftPixelsRef.current : layer.pixels;
+          if (isLiveLayerPreview && liveCanvasPreview?.grid && liveCanvasPreview.layerId === layer.id) {
+            const splitFrac = liveCanvasPreview.beforeAfterSplit;
+            if (typeof splitFrac === 'number') {
+              const splitCol = Math.round(width * splitFrac);
+              pixelSource = pixelSource.map((row, ry) =>
+                row.map((cell, rx) =>
+                  rx >= splitCol ? (liveCanvasPreview.grid[ry]?.[rx] ?? null) : cell
+                )
+              );
+            } else {
+              pixelSource = liveCanvasPreview.grid;
+            }
+          } else if (isLiveTransformLayer && transformSession) {
+            const transformedGrid = applyTransformToGrid(
+              transformSession.sourceGrid,
+              transformSession.params,
+              width,
+              height,
+              transformSession.params.targetScope === 'selection' ? selection : null
+            );
+            if (transformSession.sourceVectorPaths && transformSession.sourceVectorPaths.length > 0) {
+              const transformedVecs = transformSession.sourceVectorPaths.map((vp) =>
+                transformVectorPath(vp, transformSession.params)
+              );
+              pixelSource = rasterizeVectorPathsToGrid(
+                transformedVecs,
+                width,
+                height,
+                layer.layerType === 'vector' ? null : transformedGrid
+              );
+            } else {
+              pixelSource = transformedGrid;
+            }
+          } else if (layer.vectorPaths && layer.vectorPaths.length > 0) {
+            pixelSource = rasterizeVectorPathsToGrid(
+              layer.vectorPaths,
+              width,
+              height,
+              layer.layerType === 'vector' ? null : pixelSource
+            );
+          }
+
+          if (layerShapes.length > 0 || liveDraft) {
+            const effShapes: ParametricShapeObject[] = layerShapes.map((s) =>
+              isActLyr && shapeLiveOverrideRef.current && shapeLiveOverrideRef.current.id === s.id
+                ? shapeLiveOverrideRef.current
+                : s
+            );
+            if (liveDraft) effShapes.push(liveDraft);
+            pixelSource = rasterizeParametricShapesList(
+              effShapes,
+              width,
+              height,
+              pixelSource,
+              effDitherConfig,
+              gradientConfig,
+              activePaletteColors
+            );
+          }
+        }
+
+        const isClipping = Boolean(layer.clippingMask);
+        if (!isClipping && layer.layerType !== 'adjustment') {
+          lastClippingBasePixels = layer.visible ? pixelSource : null;
+        }
+
+        if (!layer.visible) continue;
+        const groupState = resolveGroupVisibilityAndOpacity(layer.groupId, layerGroups);
+        if (!groupState.visible) continue;
+
+        const kf = evaluateLayerKeyframeTransform(layer, curRenderFrameIdx);
+        const fillOp = layer.fillOpacity ?? 1;
+        const effectiveOpacity = Math.max(
+          0,
+          Math.min(1, (layer.opacity ?? 1) * fillOp * kf.opacityMultiplier * groupState.opacity)
+        );
+        if (effectiveOpacity <= 0.001) continue;
+
+        const blendMode: LayerBlendMode = layer.blendMode || 'normal';
+        const activeLayerMask =
+          isLiveMaskDraft && layer.mask
+            ? { ...layer.mask, pixels: draftMaskRef.current }
+            : layer.mask;
+
+        if (layer.layerType === 'adjustment' && layer.adjustment) {
           for (let y = 0; y < height; y++) {
             for (let x = 0; x < width; x++) {
-              if (nextComposited[y]?.[x]) {
-                ctx.fillStyle = '#ff9900';
-                ctx.fillRect(x * zoom, y * zoom, zoom, zoom);
+              if (isClipping && (!lastClippingBasePixels || !lastClippingBasePixels[y]?.[x])) continue;
+              const existing = composedGrid[y][x];
+              if (existing) {
+                const maskAlpha = resolveMaskAlpha(activeLayerMask, x, y);
+                const pxOp = effectiveOpacity * maskAlpha;
+                if (pxOp > 0.001) {
+                  composedGrid[y][x] = applyAdjustmentToHex(existing, layer.adjustment, pxOp);
+                }
               }
             }
           }
+          continue;
         }
-      }
-      ctx.globalAlpha = 1.0;
-    }
 
-    // 5. Render Layers of Active Frame (Strict Photoshop Z-order + Blend Modes + Fill + Masks + Clipping Masks + Live Drafts)
-    const composedGrid = createEmptyGrid(width, height);
-    let lastClippingBasePixels: (string | null)[][] | null = null;
+        const hasScale = Math.abs(kf.scale - 1) > 0.01;
+        const hasOffset = kf.offsetX !== 0 || kf.offsetY !== 0;
+        const hasMask = Boolean(activeLayerMask && !activeLayerMask.disabled);
+        const fastNormalOpaque =
+          !isClipping &&
+          !hasScale &&
+          !hasOffset &&
+          !hasMask &&
+          !parallaxActive &&
+          effectiveOpacity >= 0.999 &&
+          blendMode === 'normal';
 
-    for (const layer of activeFrame.layers) {
-      const isEditingLayer = layer.id === currentLayer.id;
-      const isLiveTransformLayer = !isPlaying && !combatTestActive && isEditingLayer && Boolean(transformSession);
-      const isLivePixelDraft =
-        !isPlaying &&
-        !combatTestActive &&
-        !isLiveTransformLayer &&
-        (isDrawing || isDraggingContent || textAnchor !== null) &&
-        !isPaintingMaskRef.current &&
-        isEditingLayer &&
-        draftPixelsRef.current.length > 0;
-      const isLiveMaskDraft =
-        !isPlaying &&
-        !combatTestActive &&
-        isDrawing &&
-        isPaintingMaskRef.current &&
-        isEditingLayer &&
-        draftMaskRef.current.length > 0;
-
-      const isLiveLayerPreview =
-        !isPlaying &&
-        !combatTestActive &&
-        Boolean(liveCanvasPreview?.grid) &&
-        (!liveCanvasPreview?.layerId || liveCanvasPreview.layerId === layer.id);
-
-      let pixelSource = isLivePixelDraft ? draftPixelsRef.current : layer.pixels;
-      if (isLiveLayerPreview && liveCanvasPreview?.grid && liveCanvasPreview.layerId === layer.id) {
-        const splitFrac = liveCanvasPreview.beforeAfterSplit;
-        if (typeof splitFrac === 'number') {
-          const splitCol = Math.round(width * splitFrac);
-          pixelSource = pixelSource.map((row, ry) =>
-            row.map((cell, rx) =>
-              rx >= splitCol ? (liveCanvasPreview.grid[ry]?.[rx] ?? null) : cell
-            )
-          );
-        } else {
-          pixelSource = liveCanvasPreview.grid;
-        }
-      } else if (isLiveTransformLayer && transformSession) {
-        const transformedGrid = applyTransformToGrid(
-          transformSession.sourceGrid,
-          transformSession.params,
-          width,
-          height,
-          transformSession.params.targetScope === 'selection' ? selection : null
-        );
-        if (transformSession.sourceVectorPaths && transformSession.sourceVectorPaths.length > 0) {
-          const transformedVecs = transformSession.sourceVectorPaths.map((vp) =>
-            transformVectorPath(vp, transformSession.params)
-          );
-          pixelSource = rasterizeVectorPathsToGrid(
-            transformedVecs,
-            width,
-            height,
-            layer.layerType === 'vector' ? null : transformedGrid
-          );
-        } else {
-          pixelSource = transformedGrid;
-        }
-      } else if (layer.vectorPaths && layer.vectorPaths.length > 0) {
-        pixelSource = rasterizeVectorPathsToGrid(
-          layer.vectorPaths,
-          width,
-          height,
-          layer.layerType === 'vector' ? null : pixelSource
-        );
-      }
-
-      // Composite live interactive parametric shapes (plus active drag override / creation draft)
-      const layerShapes = layer.parametricShapes || [];
-      const isActLyr = !isPlaying && !combatTestActive && layer.id === currentLayer.id;
-      const liveDraft = isActLyr ? creatingShapeDraftRef.current : null;
-      if (layerShapes.length > 0 || liveDraft) {
-        const effShapes: ParametricShapeObject[] = layerShapes.map((s) =>
-          isActLyr && shapeLiveOverrideRef.current && shapeLiveOverrideRef.current.id === s.id
-            ? shapeLiveOverrideRef.current
-            : s
-        );
-        if (liveDraft) effShapes.push(liveDraft);
-        pixelSource = rasterizeParametricShapesList(
-          effShapes,
-          width,
-          height,
-          pixelSource,
-          effDitherConfig,
-          gradientConfig,
-          activePaletteColors
-        );
-      }
-      const isClipping = Boolean(layer.clippingMask);
-      if (!isClipping && layer.layerType !== 'adjustment') {
-        lastClippingBasePixels = layer.visible ? pixelSource : null;
-      }
-
-      if (!layer.visible) continue;
-      const groupState = resolveGroupVisibilityAndOpacity(layer.groupId, layerGroups);
-      if (!groupState.visible) continue;
-
-      const kf = evaluateLayerKeyframeTransform(layer, curRenderFrameIdx);
-      const fillOp = layer.fillOpacity ?? 1;
-      const effectiveOpacity = Math.max(
-        0,
-        Math.min(1, (layer.opacity ?? 1) * fillOp * kf.opacityMultiplier * groupState.opacity)
-      );
-      if (effectiveOpacity <= 0.001) continue;
-
-      const blendMode: LayerBlendMode = layer.blendMode || 'normal';
-      const activeLayerMask =
-        isLiveMaskDraft && layer.mask
-          ? { ...layer.mask, pixels: draftMaskRef.current }
-          : layer.mask;
-
-      if (layer.layerType === 'adjustment' && layer.adjustment) {
-        for (let y = 0; y < height; y++) {
-          for (let x = 0; x < width; x++) {
-            if (isClipping && (!lastClippingBasePixels || !lastClippingBasePixels[y]?.[x])) continue;
-            const existing = composedGrid[y][x];
-            if (existing) {
-              const maskAlpha = resolveMaskAlpha(activeLayerMask, x, y);
-              const pxOp = effectiveOpacity * maskAlpha;
-              if (pxOp > 0.001) {
-                composedGrid[y][x] = applyAdjustmentToHex(existing, layer.adjustment, pxOp);
-              }
+        if (fastNormalOpaque) {
+          const rowLim = Math.min(height, pixelSource.length);
+          for (let y = 0; y < rowLim; y++) {
+            const srcRow = pixelSource[y];
+            if (!srcRow) continue;
+            const dstRow = composedGrid[y];
+            const colLim = Math.min(width, srcRow.length);
+            for (let x = 0; x < colLim; x++) {
+              const col = srcRow[x];
+              if (col) dstRow[x] = col;
             }
           }
+          continue;
         }
-        continue;
-      }
 
-      const cxMid = width / 2;
-      const cyMid = height / 2;
-      const invScale = kf.scale > 0.05 ? 1 / kf.scale : 1;
-      const parallaxActive =
-        workMode === 'stage' &&
-        Boolean(stageParallaxConfig?.enabled) &&
-        Math.abs(stageParallaxConfig?.scrollOffset || 0) > 0.01;
-      const layerParallaxShift = parallaxActive
-        ? Math.round((stageParallaxConfig?.scrollOffset || 0) * (layer.parallaxSpeed ?? 1))
-        : 0;
-
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          if (isClipping && (!lastClippingBasePixels || !lastClippingBasePixels[y]?.[x])) continue;
-          let srcX = x - kf.offsetX;
-          let srcY = y - kf.offsetY;
-          if (Math.abs(kf.scale - 1) > 0.01) {
-            srcX = Math.round(cxMid + (srcX - cxMid) * invScale);
-            srcY = Math.round(cyMid + (srcY - cyMid) * invScale);
-          }
-          if (parallaxActive) {
-            srcX = (((srcX - layerParallaxShift) % width) + width) % width;
-            if (srcY < 0 || srcY >= height) continue;
-          } else {
-            if (srcX < 0 || srcX >= width || srcY < 0 || srcY >= height) continue;
-          }
-          const col = pixelSource[srcY]?.[srcX];
-          if (col) {
-            const maskX = activeLayerMask?.linked !== false ? srcX : x;
-            const maskY = activeLayerMask?.linked !== false ? srcY : y;
-            const maskAlpha = resolveMaskAlpha(activeLayerMask, maskX, maskY);
-            const pixelOpacity = effectiveOpacity * maskAlpha;
-            if (pixelOpacity <= 0.001) continue;
-            composedGrid[y][x] =
-              pixelOpacity < 0.999 || blendMode !== 'normal'
-                ? blendHexColors(composedGrid[y][x], col, pixelOpacity, blendMode)
-                : col;
-          }
-        }
-      }
-    }
-
-    // Global Live Canvas Preview (when preview has no target layerId, e.g., Img->Pixel live overlay)
-    if (!isPlaying && !combatTestActive && liveCanvasPreview?.grid && !liveCanvasPreview.layerId) {
-      const splitCol =
-        typeof liveCanvasPreview.beforeAfterSplit === 'number'
-          ? Math.round(width * liveCanvasPreview.beforeAfterSplit)
+        const cxMid = width / 2;
+        const cyMid = height / 2;
+        const invScale = kf.scale > 0.05 ? 1 / kf.scale : 1;
+        const layerParallaxShift = parallaxActive
+          ? Math.round((stageParallaxConfig?.scrollOffset || 0) * (layer.parallaxSpeed ?? 1))
           : 0;
-      for (let y = 0; y < height; y++) {
-        for (let x = splitCol; x < width; x++) {
-          const pCol = liveCanvasPreview.grid[y]?.[x];
-          if (pCol) composedGrid[y][x] = pCol;
-        }
-      }
-    }
 
-    // Subtle origin ghost while moving layer content so user sees original vs live destination
-    if (!isPlaying && isDraggingContent && contentOriginalPixelsRef.current) {
-      const orig = contentOriginalPixelsRef.current;
-      ctx.globalAlpha = Math.max(0.12, currentLayer.opacity * 0.24);
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          const col = orig[y]?.[x];
-          if (col) {
-            ctx.fillStyle = col;
-            ctx.fillRect(x * zoom, y * zoom, zoom, zoom);
+        for (let y = 0; y < height; y++) {
+          const dstRow = composedGrid[y];
+          const clipRow = isClipping ? lastClippingBasePixels?.[y] : null;
+          let srcYBase = y - kf.offsetY;
+          if (hasScale) {
+            srcYBase = Math.round(cyMid + (srcYBase - cyMid) * invScale);
+          }
+          if (srcYBase < 0 || srcYBase >= height) continue;
+          const srcRow = pixelSource[srcYBase];
+          if (!srcRow) continue;
+
+          for (let x = 0; x < width; x++) {
+            if (isClipping && (!clipRow || !clipRow[x])) continue;
+            let srcX = x - kf.offsetX;
+            if (hasScale) {
+              srcX = Math.round(cxMid + (srcX - cxMid) * invScale);
+            }
+            if (parallaxActive) {
+              srcX = (((srcX - layerParallaxShift) % width) + width) % width;
+            } else {
+              if (srcX < 0 || srcX >= width) continue;
+            }
+            const col = srcRow[srcX];
+            if (col) {
+              const maskAlpha = hasMask
+                ? resolveMaskAlpha(
+                    activeLayerMask,
+                    activeLayerMask?.linked !== false ? srcX : x,
+                    activeLayerMask?.linked !== false ? srcYBase : y
+                  )
+                : 1;
+              const pixelOpacity = effectiveOpacity * maskAlpha;
+              if (pixelOpacity <= 0.001) continue;
+              dstRow[x] =
+                pixelOpacity < 0.999 || blendMode !== 'normal'
+                  ? blendHexColors(dstRow[x], col, pixelOpacity, blendMode)
+                  : col;
+            }
           }
         }
       }
+
+      // Global Live Canvas Preview (when preview has no target layerId, e.g., Img->Pixel live overlay)
+      if (!isPlaying && !combatTestActive && liveCanvasPreview?.grid && !liveCanvasPreview.layerId) {
+        const splitCol =
+          typeof liveCanvasPreview.beforeAfterSplit === 'number'
+            ? Math.round(width * liveCanvasPreview.beforeAfterSplit)
+            : 0;
+        for (let y = 0; y < height; y++) {
+          for (let x = splitCol; x < width; x++) {
+            const pCol = liveCanvasPreview.grid[y]?.[x];
+            if (pCol) composedGrid[y][x] = pCol;
+          }
+        }
+      }
+
+      // Subtle origin ghost while moving layer content (single cached drawImage blit)
+      if (!isPlaying && isDraggingContent && contentOriginalPixelsRef.current) {
+        const ghostCanvas = getCachedPixelGridCanvas(contentOriginalPixelsRef.current, width, height);
+        ctx.globalAlpha = Math.max(0.12, currentLayer.opacity * 0.24);
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(ghostCanvas, 0, 0, width * zoom, height * zoom);
+        ctx.globalAlpha = 1.0;
+      }
+
+      // Single fast ImageData blit of composedGrid onto main canvas!
+      const liveCanvas = blitPixelGridToCanvas(
+        composedGrid,
+        width,
+        height,
+        liveComposeCanvasRef.current
+      );
+      liveComposeCanvasRef.current = liveCanvas;
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(liveCanvas, p1ShiftX * zoom, p1ShiftY * zoom, width * zoom, height * zoom);
       ctx.globalAlpha = 1.0;
     }
-
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const col = composedGrid[y][x];
-        if (col) {
-          const dx = x + p1ShiftX;
-          const dy = y + p1ShiftY;
-          if (dx >= 0 && dx < width && dy >= 0 && dy < height) {
-            ctx.fillStyle = col;
-            ctx.fillRect(dx * zoom, dy * zoom, zoom, zoom);
-          }
-        }
-      }
-    }
-    ctx.globalAlpha = 1.0;
 
     // Antes / Después live comparison divider line on canvas
     if (
@@ -3486,29 +3633,37 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     workMode,
     stageParallaxConfig,
     tilesetConfig,
+    performanceMode,
   ]);
 
-  // Animated Marching Ants loop honoring Preferencias -> Interfaz -> Selecciones speed & display mode
+  // Animated Marching Ants loop honoring Preferencias -> Interfaz -> Selecciones & Performance Mode
   useEffect(() => {
     const mode = selectionDisplayConfig?.mode || 'both';
     const speed = selectionDisplayConfig?.animationSpeed ?? 55;
-    if (!selection?.active || isPlaying || mode === 'fill_only' || mode === 'outline_only' || speed <= 0) {
+    if (
+      !selection?.active ||
+      isPlaying ||
+      (performanceMode === 'performance' && isDrawing) ||
+      mode === 'fill_only' ||
+      mode === 'outline_only' ||
+      speed <= 0
+    ) {
       return;
     }
-    const intervalMs = Math.max(20, Math.round(220 - speed * 1.9));
-    let rafId = 0;
-    let lastStep = performance.now();
-    const tick = (now: number) => {
-      if (now - lastStep >= intervalMs) {
-        lastStep = now;
-        marchingAntsOffsetRef.current = (marchingAntsOffsetRef.current + 1) % 8;
-        renderCanvas();
-      }
-      rafId = requestAnimationFrame(tick);
-    };
-    rafId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafId);
-  }, [selection?.active, isPlaying, renderCanvas, selectionDisplayConfig]);
+    const baseMs = Math.max(20, Math.round(220 - speed * 1.9));
+    const intervalMs =
+      performanceMode === 'performance'
+        ? Math.max(220, baseMs * 2.5)
+        : performanceMode === 'balanced'
+        ? Math.max(80, baseMs)
+        : baseMs;
+    const timer = window.setInterval(() => {
+      if (document.hidden) return;
+      marchingAntsOffsetRef.current = (marchingAntsOffsetRef.current + 1) % 8;
+      renderCanvas();
+    }, intervalMs);
+    return () => window.clearInterval(timer);
+  }, [selection?.active, isPlaying, isDrawing, performanceMode, renderCanvas, selectionDisplayConfig]);
 
   // Live preview of Pixel Text Tool onto draftPixelsRef while user types or tweaks min/max options
   useEffect(() => {
@@ -3624,9 +3779,53 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     draftPixelsRef.current = [];
   };
 
-  // Canvas Viewport & Live Playback + Combat Test + Dummy Loop
+  // Reactive Mini-Preview renderer (NEVER runs on an idle 60fps loop; uses single cached ImageData blit)
   useEffect(() => {
-    let animId: number;
+    if (performanceMode === 'performance' && isDrawing) return;
+    const pCanvas = previewCanvasRef.current;
+    if (!pCanvas || allFrames.length === 0) return;
+    const pCtx = pCanvas.getContext('2d');
+    if (!pCtx) return;
+
+    pCtx.imageSmoothingEnabled = false;
+    pCtx.clearRect(0, 0, pCanvas.width, pCanvas.height);
+
+    const frameIdx = isPlaying
+      ? playbackFrameIndex % allFrames.length
+      : currentFrameIndex >= 0
+      ? currentFrameIndex
+      : 0;
+    const frameToDraw = allFrames[frameIdx] || currentFrame;
+    if (!frameToDraw) return;
+
+    const composited = compositeFrame(frameToDraw, width, height, frameIdx, false, layerGroups);
+    const cachedFrameCanvas = getCachedPixelGridCanvas(composited, width, height);
+    pCtx.drawImage(cachedFrameCanvas, 0, 0, width * previewScale, height * previewScale);
+  }, [
+    allFrames,
+    currentFrame,
+    currentFrameIndex,
+    isPlaying,
+    isDrawing,
+    playbackFrameIndex,
+    width,
+    height,
+    previewScale,
+    layerGroups,
+    performanceMode,
+    showMiniPlayer,
+  ]);
+
+  // Live Playback + Combat Test + Dummy Loop (ONLY runs RAF when an animation is actually active!)
+  const hasWalkingDummy =
+    dummyOpponent.enabled && ['walk', 'jump'].includes(dummyOpponent.state || 'idle');
+
+  useEffect(() => {
+    const needsAnimLoop =
+      isPlaying || combatTestActive || hasWalkingDummy || Boolean(shakeEventRef.current);
+    if (!needsAnimLoop) return;
+
+    let animId = 0;
     let lastTick = performance.now();
     let tickAccumulator = 0;
 
@@ -3758,7 +3957,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           setPlaybackFrameIndex(next);
           onSelectFrame?.(next);
         }
-      } else if (!combatTestActive && dummyOpponent.enabled && ['walk', 'jump'].includes(dummyOpponent.state || 'idle')) {
+      } else if (!combatTestActive && hasWalkingDummy) {
         renderCanvas();
       }
 
@@ -3785,42 +3984,30 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         setScreenShakeOffset({ x: 0, y: 0 });
       }
 
-      // Draw Mini Preview
-      const pCanvas = previewCanvasRef.current;
-      if (pCanvas && allFrames.length > 0) {
-        const pCtx = pCanvas.getContext('2d');
-        if (pCtx) {
-          pCtx.imageSmoothingEnabled = false;
-          pCtx.clearRect(0, 0, pCanvas.width, pCanvas.height);
-
-          const frameIdx = isPlaying
-            ? playbackFrameIndex % allFrames.length
-            : currentFrameIndex >= 0
-            ? currentFrameIndex
-            : 0;
-          const frameToDraw = allFrames[frameIdx] || currentFrame;
-
-          if (frameToDraw) {
-            const composited = compositeFrame(frameToDraw, width, height, frameIdx, false, layerGroups);
-            for (let y = 0; y < height; y++) {
-              for (let x = 0; x < width; x++) {
-                const col = composited[y][x];
-                if (col) {
-                  pCtx.fillStyle = col;
-                  pCtx.fillRect(x * previewScale, y * previewScale, previewScale, previewScale);
-                }
-              }
-            }
-          }
-        }
-      }
-
       animId = requestAnimationFrame(loop);
     };
 
     animId = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(animId);
-  }, [isPlaying, combatTestActive, dummyOpponent, groundConfig.groundY, allFrames, playbackFrameIndex, currentFrame, currentFrameIndex, width, height, previewScale, playbackMode, combatFx, cameraShake, cameraKeyframes, triggerCameraShakeEvent, onSelectFrame, onTogglePlay, renderCanvas, layerGroups]);
+  }, [
+    isPlaying,
+    combatTestActive,
+    hasWalkingDummy,
+    cameraShakeTestNonce,
+    dummyOpponent,
+    groundConfig.groundY,
+    allFrames,
+    playbackFrameIndex,
+    width,
+    playbackMode,
+    combatFx,
+    cameraShake,
+    cameraKeyframes,
+    triggerCameraShakeEvent,
+    onSelectFrame,
+    onTogglePlay,
+    renderCanvas,
+  ]);
 
   useEffect(() => {
     renderCanvas();

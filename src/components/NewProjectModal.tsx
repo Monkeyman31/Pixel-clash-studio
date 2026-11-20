@@ -482,51 +482,63 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
                     </button>
                   )}
                 </div>
-                <div className="space-y-1 max-h-36 overflow-y-auto">
+                <div className="space-y-1 max-h-40 overflow-y-auto">
                   {[...recentProjects]
                     .sort((a, b) => (Boolean(a.pinned) === Boolean(b.pinned) ? 0 : a.pinned ? -1 : 1))
-                    .map((rp) => (
-                      <button
-                        key={rp.id}
-                        type="button"
-                        onClick={() => {
-                          if (onOpenRecentProject) {
-                            onOpenRecentProject(rp);
-                            onClose();
-                          } else {
-                            setName(rp.name);
-                            setWidth(rp.width);
-                            setHeight(rp.height);
-                            setPixelScale(1);
-                            if (rp.backgroundMode) setBackgroundMode(rp.backgroundMode);
-                            if (rp.backgroundColor) setBackgroundColor(rp.backgroundColor);
-                          }
-                        }}
-                        className="w-full px-2.5 py-1.5 rounded-lg bg-[#10131e] hover:bg-[#1a2033] border border-[#242c42] flex items-center justify-between gap-2 text-left cursor-pointer"
-                      >
-                        <div className="flex items-center gap-2 min-w-0">
-                          {rp.thumbnailDataUrl && (
-                            <img
-                              src={rp.thumbnailDataUrl}
-                              alt={rp.name}
-                              className="w-7 h-7 rounded border border-[#2a334d] bg-[#0b0e17] object-contain pixel-canvas shrink-0"
-                            />
-                          )}
-                          <div className="min-w-0">
-                            <div className="text-[11px] font-semibold text-slate-200 truncate">
-                              {rp.pinned ? '★ ' : ''}
-                              {rp.name}
+                    .map((rp) => {
+                      const displayPath = rp.diskPath || rp.path || rp.category;
+                      const displayDate = rp.modifiedAt || rp.openedAt;
+                      return (
+                        <button
+                          key={rp.id}
+                          type="button"
+                          onClick={() => {
+                            if (onOpenRecentProject) {
+                              onOpenRecentProject(rp);
+                            } else {
+                              setName(rp.name);
+                              setWidth(rp.width);
+                              setHeight(rp.height);
+                              setPixelScale(1);
+                              if (rp.backgroundMode) setBackgroundMode(rp.backgroundMode);
+                              if (rp.backgroundColor) setBackgroundColor(rp.backgroundColor);
+                            }
+                          }}
+                          title={`${rp.name}\nRuta: ${displayPath}\nModificado: ${displayDate}`}
+                          className="w-full px-2.5 py-1.5 rounded-lg bg-[#10131e] hover:bg-[#1a2033] border border-[#242c42] flex items-center justify-between gap-2 text-left cursor-pointer"
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <div className="w-8 h-8 rounded border border-[#2a334d] canvas-checkerboard flex items-center justify-center overflow-hidden shrink-0">
+                              {rp.thumbnailDataUrl ? (
+                                <img
+                                  src={rp.thumbnailDataUrl}
+                                  alt={rp.name}
+                                  className="w-full h-full object-contain pixel-canvas"
+                                />
+                              ) : (
+                                <Clock className="w-3.5 h-3.5 text-slate-500" />
+                              )}
                             </div>
-                            <div className="text-[9px] text-slate-500 truncate font-mono">
-                              {rp.path || rp.category} · {rp.openedAt}
+                            <div className="min-w-0">
+                              <div className="text-[11px] font-semibold text-slate-200 truncate">
+                                {rp.pinned ? '★ ' : ''}
+                                {rp.name}
+                              </div>
+                              <div className="text-[9px] text-slate-400 truncate font-mono">
+                                {displayPath}
+                              </div>
+                              <div className="text-[9px] text-slate-500 truncate font-mono tabular-nums">
+                                Mod: {displayDate}
+                                {rp.frameCount && rp.frameCount > 1 ? ` · ${rp.frameCount} fr` : ''}
+                              </div>
                             </div>
                           </div>
-                        </div>
-                        <span className="text-[10px] font-mono text-amber-300 tabular-nums shrink-0 ml-1">
-                          {rp.width}×{rp.height}
-                        </span>
-                      </button>
-                    ))}
+                          <span className="text-[10px] font-mono text-amber-300 tabular-nums shrink-0 ml-1">
+                            {rp.width}×{rp.height}
+                          </span>
+                        </button>
+                      );
+                    })}
                 </div>
               </div>
             )}

@@ -113,6 +113,7 @@ export interface PhotoshopLayersPanelProps {
   onChangeListHeightPx?: (h: number) => void;
   thumbSizeMode?: 'sm' | 'md' | 'lg';
   onChangeThumbSizeMode?: (s: 'sm' | 'md' | 'lg') => void;
+  performanceMode?: 'quality' | 'balanced' | 'performance';
 }
 
 const BLEND_MODE_OPTIONS: { value: LayerBlendMode; label: string; group?: string }[] = [
@@ -182,17 +183,25 @@ const maskThumbCache = new Map<string, { pixelsRef: unknown; inverted: boolean; 
 const pendingRenderQueue: Array<() => void> = [];
 let queueRafId: number | null = null;
 
+let currentThumbPerfMode: 'quality' | 'balanced' | 'performance' = 'balanced';
+
 function scheduleThumbWork(fn: () => void) {
   pendingRenderQueue.push(fn);
   if (queueRafId !== null) return;
   const flush = () => {
-    const budget = 14;
+    const budget = currentThumbPerfMode === 'performance' ? 3 : currentThumbPerfMode === 'balanced' ? 8 : 14;
     for (let i = 0; i < budget && pendingRenderQueue.length > 0; i++) {
       const task = pendingRenderQueue.shift();
       task?.();
     }
     if (pendingRenderQueue.length > 0) {
-      queueRafId = requestAnimationFrame(flush);
+      if (currentThumbPerfMode === 'performance') {
+        queueRafId = window.setTimeout(() => {
+          queueRafId = requestAnimationFrame(flush);
+        }, 64) as unknown as number;
+      } else {
+        queueRafId = requestAnimationFrame(flush);
+      }
     } else {
       queueRafId = null;
     }
@@ -229,16 +238,20 @@ function renderMaskDataUrl(maskPixels: number[][], inverted: boolean, w: number,
 
   const safeW = Math.max(1, w || maskPixels[0]?.length || 1);
   const safeH = Math.max(1, h || maskPixels.length || 1);
+  const imgData = ctx.createImageData(thumbW, thumbH);
+  const buf32 = new Uint32Array(imgData.data.buffer);
   for (let ty = 0; ty < thumbH; ty++) {
     const sy = Math.min(safeH - 1, Math.floor((ty / thumbH) * safeH));
+    const row = maskPixels[sy];
+    const rowOffset = ty * thumbW;
     for (let tx = 0; tx < thumbW; tx++) {
       const sx = Math.min(safeW - 1, Math.floor((tx / thumbW) * safeW));
-      const raw = maskPixels[sy]?.[sx] ?? 255;
+      const raw = row?.[sx] ?? 255;
       const v = inverted ? 255 - raw : raw;
-      ctx.fillStyle = `rgb(${v},${v},${v})`;
-      ctx.fillRect(tx, ty, 1, 1);
+      buf32[rowOffset + tx] = ((255 << 24) | (v << 16) | (v << 8) | v) >>> 0;
     }
   }
+  ctx.putImageData(imgData, 0, 0);
   return canvas.toDataURL();
 }
 
@@ -480,7 +493,9 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
   onDuplicateLayerToAllFrames,
   onDuplicateLayerToSelectedFrames,
   onDuplicateGroupToAllFrames,
+  performanceMode = 'balanced',
 }) => {
+  currentThumbPerfMode = performanceMode;
   const [searchQuery, setSearchQuery] = useState('');
   const [filterMode, setFilterMode] = useState<FilterMode>('all');
   const [thumbnailBoundsMode, setThumbnailBoundsMode] = useState<ThumbnailBoundsMode>(() => {

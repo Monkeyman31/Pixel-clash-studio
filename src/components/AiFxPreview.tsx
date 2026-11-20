@@ -303,20 +303,24 @@ interface AiFxPreviewProps {
   onSelectPreset: (preset: FxPreset) => void;
   styleMode?: AiStyleMode;
   characterPalette?: string[];
+  performanceMode?: 'quality' | 'balanced' | 'performance';
   onInjectSequence?: (frames: { x: number; y: number; color: string }[][], preset: FxPreset) => void;
   onInjectSingleFrame?: (pixels: { x: number; y: number; color: string }[], preset: FxPreset) => void;
 }
 
-export const AiFxPreview: React.FC<AiFxPreviewProps> = ({
+export const AiFxPreview: React.FC<AiFxPreviewProps> = React.memo(({
   selectedPresetId,
   onSelectPreset,
   styleMode = 'inherit',
   characterPalette = [],
+  performanceMode = 'balanced',
   onInjectSequence,
   onInjectSingleFrame,
 }) => {
   const [currentFrameIndex, setCurrentFrameIndex] = useState<number>(0);
   const [isPlaying, setIsPlaying] = useState<boolean>(true);
+  const [isOnScreen, setIsOnScreen] = useState<boolean>(true);
+  const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const scale = 5;
 
@@ -331,17 +335,36 @@ export const AiFxPreview: React.FC<AiFxPreviewProps> = ({
     });
   }, [activePreset, styleMode, characterPalette]);
 
-  // Frame animation ticker (~12 FPS)
+  // Pause animation automatically when scrolled out of viewport
   useEffect(() => {
-    if (!isPlaying) return;
+    const el = containerRef.current;
+    if (!el || typeof IntersectionObserver === 'undefined') return;
+    const obs = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          setIsOnScreen(entry.isIntersecting);
+        }
+      },
+      { threshold: 0.05 }
+    );
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, []);
+
+  // Frame animation ticker (throttled in Performance mode; pauses when off-screen/hidden)
+  useEffect(() => {
+    if (!isPlaying || !isOnScreen) return;
+    const tickMs = performanceMode === 'performance' ? 240 : performanceMode === 'balanced' ? 110 : 90;
     const interval = setInterval(() => {
+      if (document.hidden) return;
       setCurrentFrameIndex((prev) => (prev + 1) % 4);
-    }, 90);
+    }, tickMs);
     return () => clearInterval(interval);
-  }, [isPlaying]);
+  }, [isPlaying, isOnScreen, performanceMode]);
 
   // Draw current frame to preview canvas
   useEffect(() => {
+    if (!isOnScreen) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
@@ -366,10 +389,10 @@ export const AiFxPreview: React.FC<AiFxPreviewProps> = ({
       ctx.fillStyle = p.color;
       ctx.fillRect(p.x * scale, p.y * scale, scale, scale);
     });
-  }, [styledFrames, currentFrameIndex, scale]);
+  }, [styledFrames, currentFrameIndex, scale, isOnScreen]);
 
   return (
-    <div className="flex flex-col gap-2.5 bg-[#121624] p-3 rounded-xl border border-[#232c42]">
+    <div ref={containerRef} className="flex flex-col gap-2.5 bg-[#121624] p-3 rounded-xl border border-[#232c42]">
       {/* Header */}
       <div className="flex items-center justify-between">
         <span className="text-[11px] font-bold text-amber-300 flex items-center gap-1.5">
@@ -486,4 +509,5 @@ export const AiFxPreview: React.FC<AiFxPreviewProps> = ({
       </div>
     </div>
   );
-};
+});
+

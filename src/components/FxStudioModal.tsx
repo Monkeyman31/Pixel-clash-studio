@@ -73,6 +73,7 @@ import {
   FxVisualizerBackdrop,
   FxVisualStyle,
   LayerBlendMode,
+  PerformanceMode,
 } from '../types';
 import {
   DEFAULT_FX_GENERATOR_CONFIG,
@@ -151,6 +152,7 @@ import {
   GuidedAiFormState,
 } from './FxWorkshopControlsPanels';
 import { StudioSlider } from './StudioSlider';
+import { getCachedPixelGridCanvas } from '../utils/renderCache';
 
 export interface FxInjectionComponentLayer {
   name: string;
@@ -186,6 +188,7 @@ interface FxStudioModalProps {
   activeCanvasLayerName?: string;
   onInjectResult: (payload: FxInjectionPayload) => void;
   onShowToast?: (msg: string) => void;
+  performanceMode?: PerformanceMode;
 }
 
 const BLEND_OPTIONS: { value: LayerBlendMode; label: string }[] = [
@@ -266,6 +269,7 @@ export const FxStudioModal: React.FC<FxStudioModalProps> = ({
   activeCanvasLayerName = 'Capa Actual',
   onInjectResult,
   onShowToast,
+  performanceMode = 'balanced',
 }) => {
   const [activeTab, setActiveTab] = useState<FxStudioWorkspaceTab>(mapInitialTab(initialTab));
   const [lastProceduralSource, setLastProceduralSource] = useState<ProceduralSourceTab>('builder');
@@ -511,8 +515,10 @@ export const FxStudioModal: React.FC<FxStudioModalProps> = ({
 
   useEffect(() => {
     if (!isOpen || effectiveSource !== 'fluids' || !fluidLiveRunning || editableFrames) return;
-    const intervalMs = Math.max(45, Math.round(1000 / Math.max(4, previewFps)));
+    const baseMs = Math.max(45, Math.round(1000 / Math.max(4, previewFps)));
+    const intervalMs = performanceMode === 'performance' ? Math.max(140, baseMs * 2) : baseMs;
     const timer = window.setInterval(() => {
+      if (document.hidden) return;
       if (!fluidSimRef.current) {
         fluidSimRef.current = createFluidSimState(fluidConfig, canvasWidth, canvasHeight);
       }
@@ -520,55 +526,73 @@ export const FxStudioModal: React.FC<FxStudioModalProps> = ({
       setFluidLiveGrid(renderFluidStateToGrid(fluidSimRef.current, fluidConfig));
     }, intervalMs);
     return () => window.clearInterval(timer);
-  }, [isOpen, effectiveSource, fluidLiveRunning, fluidConfig, previewFps, canvasWidth, canvasHeight, editableFrames]);
+  }, [isOpen, effectiveSource, fluidLiveRunning, fluidConfig, previewFps, canvasWidth, canvasHeight, editableFrames, performanceMode]);
 
   // =========================================================
-  // PROCEDURAL PREVIEW SYNTHESIS BY ACTIVE MODE + MORPHOLOGY / DEFORMERS / BASE
+  // PROCEDURAL PREVIEW SYNTHESIS (LAZY: ONLY RUNS ACTIVE TAB WHEN MODAL IS OPEN!)
   // =========================================================
   const builderSynth = useMemo(
-    () => synthesizeEnhancedLabFrames(labModules, sequenceFrameCount, canvasWidth, canvasHeight),
-    [labModules, sequenceFrameCount, canvasWidth, canvasHeight]
+    () =>
+      isOpen && effectiveSource === 'builder'
+        ? synthesizeEnhancedLabFrames(labModules, sequenceFrameCount, canvasWidth, canvasHeight)
+        : [],
+    [isOpen, effectiveSource, labModules, sequenceFrameCount, canvasWidth, canvasHeight]
   );
 
   const auraSynth = useMemo(
-    () => synthesizeAuraFrames(auraConfig, sequenceFrameCount, canvasWidth, canvasHeight),
-    [auraConfig, sequenceFrameCount, canvasWidth, canvasHeight]
+    () =>
+      isOpen && effectiveSource === 'aura'
+        ? synthesizeAuraFrames(auraConfig, sequenceFrameCount, canvasWidth, canvasHeight)
+        : [],
+    [isOpen, effectiveSource, auraConfig, sequenceFrameCount, canvasWidth, canvasHeight]
   );
 
   const editorSynth = useMemo(
     () =>
-      synthesizeFxFrames(
-        { ...genConfig, frameCount: sequenceFrameCount, animated: sequenceFrameCount > 1 },
-        canvasWidth,
-        canvasHeight
-      ),
-    [genConfig, sequenceFrameCount, canvasWidth, canvasHeight]
+      isOpen && effectiveSource === 'editor'
+        ? synthesizeFxFrames(
+            { ...genConfig, frameCount: sequenceFrameCount, animated: sequenceFrameCount > 1 },
+            canvasWidth,
+            canvasHeight
+          )
+        : { frames: [], summary: '' },
+    [isOpen, effectiveSource, genConfig, sequenceFrameCount, canvasWidth, canvasHeight]
   );
 
   const particleFrames = useMemo(
-    () => synthesizeParticleFrames(particleConfig, sequenceFrameCount, canvasWidth, canvasHeight),
-    [particleConfig, sequenceFrameCount, canvasWidth, canvasHeight]
+    () =>
+      isOpen && effectiveSource === 'particles'
+        ? synthesizeParticleFrames(particleConfig, sequenceFrameCount, canvasWidth, canvasHeight)
+        : [],
+    [isOpen, effectiveSource, particleConfig, sequenceFrameCount, canvasWidth, canvasHeight]
   );
 
   const rocksFrames = useMemo(
-    () => synthesizeRocksFrames(rockPieces, rockClusters, sequenceFrameCount, canvasWidth, canvasHeight),
-    [rockPieces, rockClusters, sequenceFrameCount, canvasWidth, canvasHeight]
+    () =>
+      isOpen && effectiveSource === 'rocks'
+        ? synthesizeRocksFrames(rockPieces, rockClusters, sequenceFrameCount, canvasWidth, canvasHeight)
+        : [],
+    [isOpen, effectiveSource, rockPieces, rockClusters, sequenceFrameCount, canvasWidth, canvasHeight]
   );
 
   const smearFrames = useMemo(
-    () => synthesizeSmearFrames(smearConfig, sequenceFrameCount, canvasWidth, canvasHeight),
-    [smearConfig, sequenceFrameCount, canvasWidth, canvasHeight]
+    () =>
+      isOpen && effectiveSource === 'smears'
+        ? synthesizeSmearFrames(smearConfig, sequenceFrameCount, canvasWidth, canvasHeight)
+        : [],
+    [isOpen, effectiveSource, smearConfig, sequenceFrameCount, canvasWidth, canvasHeight]
   );
 
   const baseGuideGrid = useMemo(
-    () => (baseGuide.enabled ? synthesizeFxBaseGuide(baseGuide, canvasWidth, canvasHeight) : null),
-    [baseGuide, canvasWidth, canvasHeight]
+    () => (isOpen && baseGuide.enabled ? synthesizeFxBaseGuide(baseGuide, canvasWidth, canvasHeight) : null),
+    [isOpen, baseGuide, canvasWidth, canvasHeight]
   );
 
   const morphActive = isMorphologyActive(morphology);
   const deformActive = isDeformersActive(deformers);
 
   const rawSequenceFrames: (string | null)[][][] = useMemo(() => {
+    if (!isOpen) return [];
     if (editableFrames && editableFrames.length > 0) return editableFrames;
     if (effectiveSource === 'aura') return auraSynth.map((f) => f.merged);
     if (effectiveSource === 'builder') return builderSynth.map((f) => f.merged);
@@ -578,6 +602,7 @@ export const FxStudioModal: React.FC<FxStudioModalProps> = ({
     if (effectiveSource === 'fluids') return [fluidLiveGrid];
     return editorSynth.frames.map((f) => f.merged);
   }, [
+    isOpen,
     editableFrames,
     effectiveSource,
     auraSynth,
@@ -590,31 +615,35 @@ export const FxStudioModal: React.FC<FxStudioModalProps> = ({
   ]);
 
   const activeSequenceFrames: (string | null)[][][] = useMemo(() => {
+    if (!isOpen) return [];
     if (!morphActive && !deformActive) return rawSequenceFrames;
     const total = Math.max(1, rawSequenceFrames.length);
     return rawSequenceFrames.map((grid, idx) =>
       applyMorphologyAndDeformersToGrid(grid, morphology, deformers, idx / total)
     );
-  }, [rawSequenceFrames, morphActive, deformActive, morphology, deformers]);
+  }, [isOpen, rawSequenceFrames, morphActive, deformActive, morphology, deformers]);
 
   const totalPreviewFrames = Math.max(1, activeSequenceFrames.length);
   const safeFrameIdx = Math.min(previewFrameIdx, totalPreviewFrames - 1);
-  const currentPreviewGrid =
-    effectiveSource === 'fluids' && !editableFrames
-      ? activeSequenceFrames[0] || fluidLiveGrid
-      : activeSequenceFrames[safeFrameIdx] || createBlankFxGrid(canvasWidth, canvasHeight);
+  const currentPreviewGrid = !isOpen
+    ? []
+    : effectiveSource === 'fluids' && !editableFrames
+    ? activeSequenceFrames[0] || fluidLiveGrid
+    : activeSequenceFrames[safeFrameIdx] || createBlankFxGrid(canvasWidth, canvasHeight);
 
   // Playback timer for non-live sequences
   useEffect(() => {
     if (!isOpen || !isPlaying || totalPreviewFrames <= 1) return;
     if (effectiveSource === 'fluids' && !editableFrames) return;
     if (frameByFrameActive) return; // Pause playback automatically while painting frame-by-frame
-    const ms = Math.max(40, Math.round(1000 / Math.max(1, previewFps)));
+    const baseMs = Math.max(40, Math.round(1000 / Math.max(1, previewFps)));
+    const ms = performanceMode === 'performance' ? Math.max(140, baseMs * 1.8) : baseMs;
     const id = window.setInterval(() => {
+      if (document.hidden) return;
       setPreviewFrameIdx((prev) => (prev + 1) % totalPreviewFrames);
     }, ms);
     return () => window.clearInterval(id);
-  }, [isOpen, isPlaying, totalPreviewFrames, previewFps, effectiveSource, editableFrames, frameByFrameActive]);
+  }, [isOpen, isPlaying, totalPreviewFrames, previewFps, effectiveSource, editableFrames, frameByFrameActive, performanceMode]);
 
   // Render preview canvas with chosen backdrop (Dark / Light / Checkerboard / Custom Color) + Optional FX Base Guide
   useEffect(() => {
@@ -654,35 +683,31 @@ export const FxStudioModal: React.FC<FxStudioModalProps> = ({
       }
     }
 
-    // Draw solid base guide behind effect when solid
+    // Draw solid base guide behind effect when solid (cached single drawImage)
     if (baseGuideGrid && !baseGuide.showAsOverlay) {
       ctx.save();
       ctx.globalAlpha = 0.45;
-      for (let y = 0; y < canvasHeight; y++) {
-        const row = baseGuideGrid[y];
-        if (!row) continue;
-        for (let x = 0; x < canvasWidth; x++) {
-          const c = row[x];
-          if (c) {
-            ctx.fillStyle = c;
-            ctx.fillRect(x * scale, y * scale, scale, scale);
-          }
-        }
-      }
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(
+        getCachedPixelGridCanvas(baseGuideGrid, canvasWidth, canvasHeight),
+        0,
+        0,
+        canvasWidth * scale,
+        canvasHeight * scale
+      );
       ctx.restore();
     }
 
-    // Draw effect pixels
-    for (let y = 0; y < canvasHeight; y++) {
-      const row = currentPreviewGrid[y];
-      if (!row) continue;
-      for (let x = 0; x < canvasWidth; x++) {
-        const c = row[x];
-        if (c) {
-          ctx.fillStyle = c;
-          ctx.fillRect(x * scale, y * scale, scale, scale);
-        }
-      }
+    // Draw effect pixels (cached single drawImage)
+    if (currentPreviewGrid && currentPreviewGrid.length > 0) {
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(
+        getCachedPixelGridCanvas(currentPreviewGrid, canvasWidth, canvasHeight),
+        0,
+        0,
+        canvasWidth * scale,
+        canvasHeight * scale
+      );
     }
 
     // Draw hollow guide outline above effect when overlay mode enabled

@@ -48,6 +48,7 @@ import {
   Layer,
   LayerGroup,
   LayerKeyframe,
+  PerformanceMode,
   TimelineEvent,
   TimelineMarker,
 } from '../types';
@@ -59,6 +60,7 @@ import {
   renderPixelGridToCanvas,
   ThumbnailBoundsMode,
 } from '../utils/pixelMath';
+import { scheduleIdleTask } from '../utils/renderCache';
 import { StudioSlider } from './StudioSlider';
 import { STUDIO_Z } from './StudioTopLayer';
 
@@ -160,6 +162,7 @@ interface TimelineProps {
   onUiContextFocus?: () => void;
   onOpenCameraShakeControls?: () => void;
   cameraKeyframes?: CameraKeyframe[];
+  performanceMode?: PerformanceMode;
 }
 
 const PHASE_META: Record<FramePhase, { label: string; short: string; color: string }> = {
@@ -244,6 +247,7 @@ export const Timeline: React.FC<TimelineProps> = ({
   onUiContextFocus,
   onOpenCameraShakeControls,
   cameraKeyframes = [],
+  performanceMode = 'balanced',
 }) => {
   const [timelineViewMode, setTimelineViewMode] = useState<'cards' | 'tracks' | 'table' | 'compact'>('cards');
   const [thumbnailBoundsMode, setThumbnailBoundsMode] = useState<ThumbnailBoundsMode>(() => {
@@ -1750,6 +1754,8 @@ export const Timeline: React.FC<TimelineProps> = ({
                   height={canvasHeight}
                   layerGroups={layerGroups}
                   boundsMode={thumbnailBoundsMode}
+                  performanceMode={performanceMode}
+                  isPlaying={isPlaying}
                 />
               </div>
 
@@ -2601,34 +2607,87 @@ function celHasPixels(layer: Layer): boolean {
 }
 
 // Mini thumbnail canvas supporting Full Canvas ('canvas') or Tight Content Bounds ('content')
+// Virtualized with IntersectionObserver: invisible off-screen frames are NEVER composited or drawn.
 const FrameThumbnailCanvas: React.FC<{
   frame: Frame;
   width: number;
   height: number;
   layerGroups?: LayerGroup[];
   boundsMode: ThumbnailBoundsMode;
-}> = ({ frame, width, height, layerGroups = [], boundsMode }) => {
+  performanceMode?: PerformanceMode;
+  isPlaying?: boolean;
+}> = React.memo(({ frame, width, height, layerGroups = [], boundsMode, performanceMode = 'balanced', isPlaying = false }) => {
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
+  const [isVisible, setIsVisible] = React.useState<boolean>(false);
+  const lastRenderedKeyRef = React.useRef<string>('');
+  const lastLayersRef = React.useRef<Layer[] | null>(null);
+  const lastGroupsRef = React.useRef<LayerGroup[] | null>(null);
 
   React.useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const composited = compositeFrame(frame, width, height, -1, false, layerGroups);
-    renderPixelGridToCanvas(
-      ctx,
-      composited,
-      width,
-      height,
-      canvas.width,
-      canvas.height,
-      boundsMode,
-      3,
-      true
+    const el = canvasRef.current;
+    if (!el) return;
+    if (typeof IntersectionObserver === 'undefined') {
+      setIsVisible(true);
+      return;
+    }
+    const obs = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            setIsVisible(true);
+          } else {
+            setIsVisible(false);
+          }
+        }
+      },
+      { rootMargin: '160px' }
     );
-  }, [frame, width, height, layerGroups, boundsMode]);
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, []);
+
+  React.useEffect(() => {
+    if (!isVisible) return;
+    // In Performance mode, skip unnecessary thumbnail refreshes while animation is playing
+    if (performanceMode === 'performance' && isPlaying && lastLayersRef.current !== null) return;
+
+    const metaKey = `${width}x${height}|${boundsMode}`;
+    if (
+      lastLayersRef.current === frame.layers &&
+      lastGroupsRef.current === layerGroups &&
+      lastRenderedKeyRef.current === metaKey
+    ) {
+      return;
+    }
+
+    const draw = () => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      const composited = compositeFrame(frame, width, height, -1, false, layerGroups);
+      renderPixelGridToCanvas(
+        ctx,
+        composited,
+        width,
+        height,
+        canvas.width,
+        canvas.height,
+        boundsMode,
+        3,
+        true
+      );
+      lastLayersRef.current = frame.layers;
+      lastGroupsRef.current = layerGroups;
+      lastRenderedKeyRef.current = metaKey;
+    };
+
+    if (performanceMode === 'performance') {
+      return scheduleIdleTask(draw, 350);
+    }
+    draw();
+  }, [isVisible, frame, frame.layers, width, height, layerGroups, boundsMode, performanceMode, isPlaying]);
 
   return (
     <canvas
@@ -2638,7 +2697,7 @@ const FrameThumbnailCanvas: React.FC<{
       className="pixel-canvas w-full h-full object-contain"
     />
   );
-};
+});
 
 const FRAME_COLOR_LABELS = ['', '#ef4444', '#f59e0b', '#10b981', '#38bdf8', '#a855f7'];
 const EASING_OPTIONS: KeyframeEasing[] = ['linear', 'ease-in', 'ease-out', 'ease-in-out', 'hold'];

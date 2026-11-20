@@ -316,6 +316,7 @@ export interface LayerGroup {
   visible?: boolean;
   locked?: boolean;
   opacity?: number; // Group opacity multiplier (0..1)
+  blendMode?: LayerBlendMode;
   playbackMode?: 'loop' | 'pingpong' | 'once';
   fps?: number;
 }
@@ -1008,6 +1009,7 @@ export interface ProjectState {
   timelineMarkers?: TimelineMarker[];
   references?: ReferenceItem[];
   referenceGroups?: ReferenceGroup[];
+  guides?: CanvasGuide[];
   workMode?: ProjectWorkMode;
 }
 
@@ -1329,6 +1331,22 @@ export interface NewProjectConfig {
   enableAnimationMode: boolean;
 }
 
+export type RecentProjectFileFormat =
+  | 'pcs'
+  | 'json'
+  | 'psd'
+  | 'ase'
+  | 'png'
+  | 'jpg'
+  | 'jpeg'
+  | 'webp'
+  | 'gif'
+  | 'bmp'
+  | 'tiff'
+  | 'tga'
+  | 'ico'
+  | 'spritesheet';
+
 export interface RecentProjectEntry {
   id: string;
   name: string;
@@ -1336,13 +1354,21 @@ export interface RecentProjectEntry {
   height: number;
   category: string;
   openedAt: string;
+  modifiedAt?: string;
+  modifiedTimestamp?: number;
+  fileSize?: number;
+  frameCount?: number;
+  layerCount?: number;
   templateId?: string;
   backgroundMode?: NewProjectBackgroundMode;
   backgroundColor?: string;
   path?: string;
+  diskPath?: string;
+  sourceKind?: 'disk_path' | 'file_handle' | 'cached_blob' | 'project_snapshot';
+  hasStoredContent?: boolean;
   pinned?: boolean;
   thumbnailDataUrl?: string;
-  fileFormat?: 'pcs' | 'json' | 'psd' | 'ase' | 'png';
+  fileFormat?: RecentProjectFileFormat;
 }
 
 export type RulerUnit = 'px' | 'percent' | 'custom';
@@ -2075,6 +2101,30 @@ export interface FxExampleEntry {
   recipe: EditableFxRecipe;
 }
 
+// =========================================================
+// SYSTEM 10: PERFORMANCE MODE, SAVE-AS FORMATS & CLIPBOARD
+// =========================================================
+export type PerformanceMode = 'quality' | 'balanced' | 'performance';
 
+export type SaveAsFormatId =
+  | 'pcs'
+  | 'png'
+  | 'jpg'
+  | 'webp'
+  | 'gif'
+  | 'spritesheet'
+  | 'ase'
+  | 'psd'
+  | 'json';
 
+export type ClipboardPasteDestination =
+  | 'new_layer'
+  | 'selected_group'
+  | 'current_frame'
+  | 'all_frames'
+  | 'reference_canvas'
+  | 'reference_panel'
+  | 'asset_library'
+  | 'new_document';
 
+export type ClipboardFitMode = 'original' | 'fit' | 'fill';

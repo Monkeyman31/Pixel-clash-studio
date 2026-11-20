@@ -4,6 +4,7 @@ import {
   Film,
   Folder,
   FolderHeart,
+  FolderOpen,
   Image as ImageIcon,
   Layers,
   LayoutGrid,
@@ -11,6 +12,7 @@ import {
   Repeat,
   X,
 } from 'lucide-react';
+import { decodeFilePreviewDataUrl } from '../utils/fileImporter';
 
 export type SmartImportDestination =
   | 'new_layer'
@@ -33,6 +35,7 @@ interface SmartImportModalProps {
   activeFrameName: string;
   totalFrames: number;
   onConfirm: (destination: SmartImportDestination, fitMode: SmartImportFitMode) => void;
+  onOpenAsNewDocument?: (file: File) => void;
   onCancel: () => void;
 }
 
@@ -101,12 +104,13 @@ export const SmartImportModal: React.FC<SmartImportModalProps> = ({
   activeFrameName,
   totalFrames,
   onConfirm,
+  onOpenAsNewDocument,
   onCancel,
 }) => {
   const [destination, setDestination] = useState<SmartImportDestination>('new_layer');
   const [fitMode, setFitMode] = useState<SmartImportFitMode>('fit');
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [naturalSize, setNaturalSize] = useState<{ w: number; h: number } | null>(null);
+  const [naturalSize, setNaturalSize] = useState<{ w: number; h: number; frames?: number } | null>(null);
 
   const primaryFile = files[0] || null;
 
@@ -117,17 +121,21 @@ export const SmartImportModal: React.FC<SmartImportModalProps> = ({
       return;
     }
 
-    const url = URL.createObjectURL(primaryFile);
-    setPreviewUrl(url);
-
-    const img = new Image();
-    img.onload = () => {
-      setNaturalSize({ w: img.naturalWidth, h: img.naturalHeight });
-    };
-    img.src = url;
+    let cancelled = false;
+    decodeFilePreviewDataUrl(primaryFile)
+      .then((info) => {
+        if (cancelled) return;
+        setPreviewUrl(info.dataUrl || null);
+        setNaturalSize({ w: info.width, h: info.height, frames: info.frameCount });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setPreviewUrl(null);
+        setNaturalSize(null);
+      });
 
     return () => {
-      URL.revokeObjectURL(url);
+      cancelled = true;
     };
   }, [isOpen, primaryFile]);
 
@@ -218,6 +226,7 @@ export const SmartImportModal: React.FC<SmartImportModalProps> = ({
                 {naturalSize && (
                   <span>
                     Origen: {naturalSize.w}×{naturalSize.h} px
+                    {naturalSize.frames && naturalSize.frames > 1 ? ` (${naturalSize.frames} frames)` : ''}
                   </span>
                 )}
                 <span aria-hidden="true">·</span>
@@ -342,15 +351,30 @@ export const SmartImportModal: React.FC<SmartImportModalProps> = ({
 
         {/* Footer */}
         <div
-          className="px-5 py-3 border-t flex items-center justify-between gap-2"
+          className="px-5 py-3 border-t flex flex-wrap items-center justify-between gap-2"
           style={{
             backgroundColor: 'var(--studio-bg-bar)',
             borderColor: 'var(--studio-border)',
           }}
         >
-          <span className="text-[11px]" style={{ color: 'var(--studio-text-muted)' }}>
-            Para abrir como documento nuevo independiente usa Archivo → Abrir (Ctrl+O)
-          </span>
+          {onOpenAsNewDocument && primaryFile ? (
+            <button
+              type="button"
+              onClick={() => onOpenAsNewDocument(primaryFile)}
+              className="px-3 py-1.5 rounded-lg text-xs font-medium border hover:bg-white/5 transition-colors flex items-center gap-1.5 cursor-pointer"
+              style={{
+                borderColor: 'var(--studio-border-strong)',
+                color: 'var(--studio-text)',
+              }}
+            >
+              <FolderOpen className="w-3.5 h-3.5 text-amber-400" />
+              <span>Abrir como documento nuevo</span>
+            </button>
+          ) : (
+            <span className="text-[11px]" style={{ color: 'var(--studio-text-muted)' }}>
+              Para abrir como documento nuevo independiente usa Archivo → Abrir (Ctrl+O)
+            </span>
+          )}
           <div className="flex items-center gap-2 shrink-0">
             <button
               type="button"

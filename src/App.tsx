@@ -28,6 +28,19 @@ import { SmartDeleteModal } from './components/SmartDeleteModal';
 import { GuidesManagerModal } from './components/GuidesManagerModal';
 import { FxInjectionPayload, FxStudioModal } from './components/FxStudioModal';
 import {
+  FileLoadErrorModal,
+  FileLoadErrorPayload,
+  MissingRecentFileModal,
+  SpritesheetSlicerModal,
+} from './components/FileRecoveryAndSheetModals';
+import { SmartPasteModal } from './components/SmartPasteModal';
+import {
+  ModifiedDocumentSummary,
+  SaveAsFormatModal,
+  UnsavedAppCloseModal,
+  UnsavedDocumentCloseModal,
+} from './components/DocumentCloseAndSaveModals';
+import {
   StudioAlertNotificationHost,
   StudioNotificationItem,
   StudioTopLayerPortal,
@@ -76,6 +89,8 @@ import {
   CameraShakeConfig,
   CanvasGuide,
   ClipboardData,
+  ClipboardFitMode,
+  ClipboardPasteDestination,
   CombatFxConfig,
   DitherConfig,
   DummyOpponent,
@@ -108,17 +123,20 @@ import {
   OptionsBarState,
   ParametricShapeObject,
   PencilBrushSubMode,
+  PerformanceMode,
   PerspectiveGuideType,
   ProjectState,
   ProjectWorkMode,
   PureRefConfig,
   QuickAiBarOptions,
   RecentProjectEntry,
+  RecentProjectFileFormat,
   RecordedMacro,
   ReferenceGroup,
   ReferenceItem,
   RulerUnit,
   SampledColorInfo,
+  SaveAsFormatId,
   ScenarioGuidePresetId,
   SelectionArea,
   SelectionDisplayConfig,
@@ -227,6 +245,7 @@ import {
   DEFAULT_DITHER_CONFIG,
   DEFAULT_SYMMETRY_CONFIG,
   blendHexColors,
+  compositeFrame,
   createEmptyGrid,
   createMaskGrid,
   frameToCanvas,
@@ -248,13 +267,47 @@ import {
   saveAssetFolders,
   saveUserAssetLibrary,
 } from './utils/assetLibraryPresets';
-import { importGraphicFile } from './utils/fileImporter';
 import {
+  DecodedRgbaImage,
+  FileLoadError,
+  ImportResult,
+  SUPPORTED_IMAGE_ACCEPT,
+  SUPPORTED_OPEN_ACCEPT,
+  SpritesheetCandidateInfo,
+  SpritesheetSliceOptions,
+  decodeAnyRasterFileToRgba,
+  detectSpritesheetCandidate,
+  importGraphicFile,
+  isSupportedImageFile,
+  normalizeFileFormatTag,
+  rasterizeImageFileToTargetGrid,
+  rgbaBufferToPixelGrid,
+  sliceRgbaToSpritesheetResult,
+  validateDocumentFramesIntegrity,
+} from './utils/fileImporter';
+import {
+  clearAllRecentProjectPayloads,
+  deleteRecentProjectPayload,
+  getRecentProjectPayload,
+  pruneRecentProjectPayloads,
+  saveRecentProjectPayload,
+} from './utils/recentProjectsDb';
+import {
+  downloadBlob,
   downloadUint8Array,
   exportProjectAsAse,
   exportProjectAsPcs,
   exportProjectAsPsd,
+  exportProjectToFormat,
 } from './utils/fileExporter';
+import { gridHasTransparency, scheduleIdleTask } from './utils/renderCache';
+import {
+  ClipboardImagePayload,
+  rasterizeClipboardImageToGrid,
+  readImageFromClipboardEvent,
+  readImageFromGlobalClipboard,
+  writePixelGridToSystemClipboard,
+} from './utils/systemClipboard';
 import { 
   AnchorPosition, 
   flipCanvasHorizontal, 
@@ -293,8 +346,116 @@ interface OpenDocumentSnapshot {
   workMode?: ProjectWorkMode;
 }
 
+interface DesktopOpenFilePayload {
+  filePath: string;
+  name: string;
+  size: number;
+  lastModified: number;
+  bytes: Uint8Array;
+}
+
+interface PixelClashDesktopBridge {
+  platform?: string;
+  version?: string;
+  isNativeDesktop?: boolean;
+  openFileDialog?: (options?: { title?: string; multiple?: boolean }) => Promise<{
+    canceled: boolean;
+    error?: string;
+    files: DesktopOpenFilePayload[];
+  }>;
+  checkFileExists?: (filePath: string) => Promise<{
+    exists: boolean;
+    size?: number;
+    lastModified?: number;
+  }>;
+  readFileAtPath?: (filePath: string) => Promise<{
+    exists: boolean;
+    filePath?: string;
+    name?: string;
+    size?: number;
+    lastModified?: number;
+    bytes?: Uint8Array;
+    error?: string;
+  }>;
+  readClipboardImage?: () => Promise<{
+    hasImage: boolean;
+    pngBytes?: Uint8Array | number[];
+    width?: number;
+    height?: number;
+    error?: string;
+  }>;
+  writeClipboardImage?: (pngBytes: Uint8Array) => Promise<{ ok: boolean; error?: string }>;
+  setUnsavedState?: (hasUnsaved: boolean) => Promise<{ ok: boolean }> | void;
+  onRequestAppClose?: (cb: () => void) => () => void;
+  confirmAppClose?: () => Promise<{ ok: boolean }> | void;
+}
+
+function getDesktopBridge(): PixelClashDesktopBridge | null {
+  const w = window as unknown as { pixelClashDesktop?: PixelClashDesktopBridge };
+  return w.pixelClashDesktop || null;
+}
+
+function formatRecentDate(timestamp?: number): string {
+  const date =
+    typeof timestamp === 'number' && Number.isFinite(timestamp) && timestamp > 0
+      ? new Date(timestamp)
+      : new Date();
+  return date.toLocaleString('es-ES', { dateStyle: 'short', timeStyle: 'short' });
+}
+
+interface PendingSpritesheetOpenState {
+  file: File;
+  fileName: string;
+  rawRaster: DecodedRgbaImage;
+  candidate: SpritesheetCandidateInfo;
+  fallbackSingleResult: ImportResult | null;
+  diskPath?: string;
+  fileHandle?: FileSystemFileHandle;
+  replaceRecentId?: string;
+  allowOpenAsSingleImage: boolean;
+}
+
 const RECENT_SNAPSHOTS_STORAGE_KEY = 'pixelclash_recent_snapshots_v1';
 const WHEEL_NAV_STORAGE_KEY = 'pixelclash_wheel_nav_v1';
+const PERF_MODE_STORAGE_KEY = 'pixelclash_perf_mode_v1';
+const QUICK_PASTE_STORAGE_KEY = 'pixelclash_quick_paste_v1';
+
+function computeRgbaQuickSignature(data: Uint8ClampedArray, width: number, height: number): string {
+  let hash = 2166136261 >>> 0;
+  const len = data.length;
+  const step = Math.max(4, Math.floor(len / 4096) * 4);
+  for (let i = 0; i < len; i += step) {
+    hash ^= data[i];
+    hash = Math.imul(hash, 16777619) >>> 0;
+    hash ^= data[i + 1];
+    hash = Math.imul(hash, 16777619) >>> 0;
+    hash ^= data[i + 2];
+    hash = Math.imul(hash, 16777619) >>> 0;
+    hash ^= data[i + 3];
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return `${width}x${height}:${hash.toString(16)}`;
+}
+
+function computePixelGridQuickSignature(grid: (string | null)[][], width: number, height: number): string {
+  const tmp = document.createElement('canvas');
+  tmp.width = Math.max(1, width);
+  tmp.height = Math.max(1, height);
+  const ctx = tmp.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return `${width}x${height}:0`;
+  for (let y = 0; y < height; y++) {
+    const row = grid[y];
+    if (!row) continue;
+    for (let x = 0; x < width; x++) {
+      const col = row[x];
+      if (!col) continue;
+      ctx.fillStyle = col;
+      ctx.fillRect(x, y, 1, 1);
+    }
+  }
+  const rgba = ctx.getImageData(0, 0, tmp.width, tmp.height).data;
+  return computeRgbaQuickSignature(rgba, tmp.width, tmp.height);
+}
 
 function readRecentSnapshotsMap(): Record<string, OpenDocumentSnapshot> {
   try {
@@ -310,17 +471,18 @@ function writeRecentSnapshot(id: string, snap: OpenDocumentSnapshot, keepIds: st
     const current = readRecentSnapshotsMap();
     current[id] = snap;
     const pruned: Record<string, OpenDocumentSnapshot> = {};
-    const orderedKeys = [id, ...keepIds.filter((k) => k !== id && Boolean(current[k]))].slice(0, 6);
+    const orderedKeys = [id, ...keepIds.filter((k) => k !== id && Boolean(current[k]))].slice(0, 4);
     for (const k of orderedKeys) {
       if (current[k]) pruned[k] = current[k];
     }
     localStorage.setItem(RECENT_SNAPSHOTS_STORAGE_KEY, JSON.stringify(pruned));
   } catch {
-    // Ignore storage quota overflow gracefully
+    // Primary persistence is handled by IndexedDB (recentProjectsDb.ts); ignore legacy localStorage quota
   }
 }
 
 function removeRecentSnapshot(id: string): void {
+  void deleteRecentProjectPayload(id);
   try {
     const current = readRecentSnapshotsMap();
     if (current[id]) {
@@ -338,15 +500,11 @@ interface DocumentTabEntry {
   width: number;
   height: number;
   snapshot: OpenDocumentSnapshot | null;
-}
-
-function rgbToHex(r: number, g: number, b: number): string {
-  return (
-    '#' +
-    [r, g, b]
-      .map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0'))
-      .join('')
-  );
+  isDirty: boolean;
+  isNewUnsaved: boolean;
+  hasSavedLocation: boolean;
+  savedFormat?: SaveAsFormatId;
+  filePath?: string;
 }
 
 async function rasterizeImageFileToGrid(
@@ -360,63 +518,7 @@ async function rasterizeImageFileToGrid(
   naturalHeight: number;
   dataUrl: string;
 }> {
-  const dataUrl = await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ''));
-    reader.onerror = () => reject(new Error('No se pudo leer el archivo de imagen.'));
-    reader.readAsDataURL(file);
-  });
-
-  const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-    const image = new Image();
-    image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error('Imagen no válida o formato no compatible.'));
-    image.src = dataUrl;
-  });
-
-  const nw = Math.max(1, img.naturalWidth || 1);
-  const nh = Math.max(1, img.naturalHeight || 1);
-
-  const canvas = document.createElement('canvas');
-  canvas.width = targetW;
-  canvas.height = targetH;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) throw new Error('Contexto 2D no disponible.');
-  ctx.imageSmoothingEnabled = false;
-  ctx.clearRect(0, 0, targetW, targetH);
-
-  let drawW = targetW;
-  let drawH = targetH;
-  let dx = 0;
-  let dy = 0;
-
-  if (fitMode === 'fit') {
-    const scale = Math.min(targetW / nw, targetH / nh);
-    drawW = Math.max(1, Math.round(nw * scale));
-    drawH = Math.max(1, Math.round(nh * scale));
-    dx = Math.floor((targetW - drawW) / 2);
-    dy = Math.floor((targetH - drawH) / 2);
-  } else if (fitMode === 'original') {
-    drawW = nw;
-    drawH = nh;
-    dx = Math.floor((targetW - drawW) / 2);
-    dy = Math.floor((targetH - drawH) / 2);
-  }
-
-  ctx.drawImage(img, dx, dy, drawW, drawH);
-  const imgData = ctx.getImageData(0, 0, targetW, targetH).data;
-  const grid = createEmptyGrid(targetW, targetH);
-  for (let y = 0; y < targetH; y++) {
-    for (let x = 0; x < targetW; x++) {
-      const idx = (y * targetW + x) * 4;
-      const a = imgData[idx + 3];
-      if (a >= 64) {
-        grid[y][x] = rgbToHex(imgData[idx], imgData[idx + 1], imgData[idx + 2]);
-      }
-    }
-  }
-
-  return { grid, naturalWidth: nw, naturalHeight: nh, dataUrl };
+  return rasterizeImageFileToTargetGrid(file, targetW, targetH, fitMode);
 }
 
 async function extractPaletteFromImageFile(file: File, maxColors: number = 32): Promise<string[]> {
@@ -438,15 +540,17 @@ async function extractPaletteFromImageFile(file: File, maxColors: number = 32): 
 function getAcceptForImportMode(mode: ImportMenuMode | null): string {
   switch (mode) {
     case 'palette':
-      return '.hex,.gpl,.pal,.txt,.png,.jpg,.jpeg,.webp';
+      return `.hex,.gpl,.pal,.txt,${SUPPORTED_IMAGE_ACCEPT}`;
     case 'config':
       return '.pcslayout,.pcsshortcuts,.json';
     case 'brush':
-      return '.pcsbrush,.json,.png,.jpg,.jpeg,.webp';
+      return `.pcsbrush,.json,${SUPPORTED_IMAGE_ACCEPT}`;
     case 'external_project':
-      return '.pcs,.ase,.aseprite,.psd,.json';
+      return '.pcs,.ase,.aseprite,.psd,.json,.gif,.tif,.tiff';
+    case 'spritesheet':
+      return SUPPORTED_IMAGE_ACCEPT;
     default:
-      return 'image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif';
+      return SUPPORTED_IMAGE_ACCEPT;
   }
 }
 
@@ -963,7 +1067,10 @@ export default function App() {
   const [assetFolders, setAssetFolders] = useState<string[]>(() => loadAssetFolders());
 
   useEffect(() => {
-    saveUserAssetLibrary(userLibraryItems);
+    const timer = window.setTimeout(() => {
+      scheduleIdleTask(() => saveUserAssetLibrary(userLibraryItems), 1200);
+    }, 600);
+    return () => window.clearTimeout(timer);
   }, [userLibraryItems]);
 
   useEffect(() => {
@@ -981,16 +1088,87 @@ export default function App() {
     saveCustomBrushPresets(customBrushes);
   }, [customBrushes]);
 
-  // Multi-Document Tabs (Open creates independent tabs when active document has edits)
+  // Performance Mode (Ver -> Rendimiento: Calidad máxima | Equilibrado | Rendimiento)
+  const [performanceMode, setPerformanceMode] = useState<PerformanceMode>(() => {
+    try {
+      const saved = localStorage.getItem(PERF_MODE_STORAGE_KEY);
+      if (saved === 'quality' || saved === 'balanced' || saved === 'performance') return saved;
+    } catch {
+      // ignore
+    }
+    return 'balanced';
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(PERF_MODE_STORAGE_KEY, performanceMode);
+    } catch {
+      // ignore
+    }
+  }, [performanceMode]);
+
+  // Global OS Clipboard Smart Paste vs Quick Paste State
+  const [quickPasteMode, setQuickPasteMode] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(QUICK_PASTE_STORAGE_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(QUICK_PASTE_STORAGE_KEY, quickPasteMode ? '1' : '0');
+    } catch {
+      // ignore
+    }
+  }, [quickPasteMode]);
+  const [pendingClipboardImage, setPendingClipboardImage] = useState<ClipboardImagePayload | null>(null);
+  const lastInternalCopySigRef = useRef<string | null>(null);
+
+  // Multi-Document Tabs (Always visible, tracks dirty & save state per tab)
   const [activeDocumentId, setActiveDocumentId] = useState<string>('doc-initial');
   const [openDocuments, setOpenDocuments] = useState<DocumentTabEntry[]>([
-    { id: 'doc-initial', name: 'K.O. Fighter', width: 48, height: 48, snapshot: null },
+    {
+      id: 'doc-initial',
+      name: 'K.O. Fighter',
+      width: 48,
+      height: 48,
+      snapshot: null,
+      isDirty: false,
+      isNewUnsaved: true,
+      hasSavedLocation: false,
+    },
   ]);
+  const activeDocumentIdRef = useRef<string>(activeDocumentId);
+  activeDocumentIdRef.current = activeDocumentId;
+  const openDocumentsRef = useRef<DocumentTabEntry[]>(openDocuments);
+  openDocumentsRef.current = openDocuments;
+  const suppressDirtyMarkRef = useRef<boolean>(false);
+
+  // Document Tab Reorder, Safe Close, Multi-Doc App Exit & Save-As Modals State
+  const [draggedDocTabId, setDraggedDocTabId] = useState<string | null>(null);
+  const [pendingCloseDocId, setPendingCloseDocId] = useState<string | null>(null);
+  const [unsavedAppCloseModalOpen, setUnsavedAppCloseModalOpen] = useState<boolean>(false);
+  const [isAppClosingFromElectron, setIsAppClosingFromElectron] = useState<boolean>(false);
+  const [isBatchSavingDocs, setIsBatchSavingDocs] = useState<boolean>(false);
+  const [saveAsModalState, setSaveAsModalState] = useState<{
+    docId: string;
+    initialName: string;
+    initialFormat: SaveAsFormatId;
+    afterSaveAction?: 'close_doc' | null;
+  } | null>(null);
+  const [isSavingAs, setIsSavingAs] = useState<boolean>(false);
 
   // Dedicated Import Into Project State + Smart Import Modal + External OS Drop Overlay
   const [pendingImportMode, setPendingImportMode] = useState<ImportMenuMode | null>(null);
   const [smartImportFiles, setSmartImportFiles] = useState<File[]>([]);
   const [isExternalFileDragOver, setIsExternalFileDragOver] = useState<boolean>(false);
+
+  // Unified File Recovery, Load Validation Error & Spritesheet Slicer Modals
+  const [missingRecentEntry, setMissingRecentEntry] = useState<RecentProjectEntry | null>(null);
+  const [fileLoadError, setFileLoadError] = useState<FileLoadErrorPayload | null>(null);
+  const [pendingSpritesheetOpen, setPendingSpritesheetOpen] =
+    useState<PendingSpritesheetOpenState | null>(null);
+  const relocatingRecentIdRef = useRef<string | null>(null);
 
   // References System State
   const [references, setReferences] = useState<ReferenceItem[]>(() => {
@@ -1031,27 +1209,40 @@ export default function App() {
   });
 
   useEffect(() => {
-    try {
-      localStorage.setItem('pixelclash_pureref_v1', JSON.stringify(pureRefConfig));
-    } catch {
-      // ignore
-    }
+    const timer = window.setTimeout(() => {
+      try {
+        localStorage.setItem('pixelclash_pureref_v1', JSON.stringify(pureRefConfig));
+      } catch {
+        // ignore
+      }
+    }, 500);
+    return () => window.clearTimeout(timer);
   }, [pureRefConfig]);
 
+  // Debounced + idle-scheduled persistence for references (never blocks canvas drag/scale FPS)
   useEffect(() => {
-    try {
-      localStorage.setItem('pixelclash_references_v1', JSON.stringify(references));
-    } catch {
-      // ignore storage quota overflow for large reference images
-    }
-  }, [references]);
+    const delay = performanceMode === 'performance' ? 2000 : 800;
+    const timer = window.setTimeout(() => {
+      scheduleIdleTask(() => {
+        try {
+          localStorage.setItem('pixelclash_references_v1', JSON.stringify(references));
+        } catch {
+          // ignore storage quota overflow for large reference images
+        }
+      }, 1500);
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [references, performanceMode]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem('pixelclash_ref_groups_v1', JSON.stringify(referenceGroups));
-    } catch {
-      // ignore
-    }
+    const timer = window.setTimeout(() => {
+      try {
+        localStorage.setItem('pixelclash_ref_groups_v1', JSON.stringify(referenceGroups));
+      } catch {
+        // ignore
+      }
+    }, 500);
+    return () => window.clearTimeout(timer);
   }, [referenceGroups]);
 
   // Hybrid Timeline Markers & Playable Combat Test Mode
@@ -1572,7 +1763,38 @@ export default function App() {
     setHistoryLengthState(nextHistory.length);
     setCanUndo(historyIndexRef.current > 0);
     setCanRedo(false);
+    if (!suppressDirtyMarkRef.current) {
+      const curDocId = activeDocumentIdRef.current;
+      setOpenDocuments((prev) =>
+        prev.some((d) => d.id === curDocId && !d.isDirty)
+          ? prev.map((d) => (d.id === curDocId ? { ...d, isDirty: true } : d))
+          : prev
+      );
+    }
   }, []);
+
+  const markDocumentSaved = useCallback(
+    (docId: string, format: SaveAsFormatId, updatedName?: string) => {
+      setOpenDocuments((prev) =>
+        prev.map((d) =>
+          d.id === docId
+            ? {
+                ...d,
+                name: updatedName ? updatedName : d.name,
+                isDirty: false,
+                isNewUnsaved: false,
+                hasSavedLocation: true,
+                savedFormat: format,
+              }
+            : d
+        )
+      );
+      if (updatedName && docId === activeDocumentIdRef.current) {
+        setProjectName(updatedName);
+      }
+    },
+    []
+  );
 
   const pushHistory = useCallback(
     (newFrames: Frame[]) => {
@@ -1584,7 +1806,9 @@ export default function App() {
   useEffect(() => {
     if (!hasInitializedHistoryRef.current) {
       hasInitializedHistoryRef.current = true;
+      suppressDirtyMarkRef.current = true;
       pushHistorySnapshot();
+      suppressDirtyMarkRef.current = false;
     }
   }, [pushHistorySnapshot]);
 
@@ -2696,12 +2920,91 @@ export default function App() {
         },
       ];
 
+      // Never overwrite an active non-blank document when creating a new project: open in a fresh tab!
+      const curDocFrames = framesRef.current;
+      const curTabIsBlank =
+        openDocumentsRef.current.length === 1 &&
+        curDocFrames.length === 1 &&
+        curDocFrames[0]?.layers.length === 1 &&
+        curDocFrames[0].layers[0].pixels.every((row) => row.every((cell) => !cell));
+
+      if (!curTabIsBlank) {
+        const prevSnap: OpenDocumentSnapshot = {
+          name: projectName,
+          width: canvasWidth,
+          height: canvasHeight,
+          frames: JSON.parse(JSON.stringify(framesRef.current)),
+          currentFrameIndex: currentFrameIndexRef.current,
+          currentLayerIndex: currentLayerIndexRef.current,
+          layerGroups: JSON.parse(JSON.stringify(layerGroupsRef.current)),
+          globalPivot: { ...globalPivot },
+          actionTags: JSON.parse(JSON.stringify(actionTagsRef.current)),
+          playbackMode,
+          fps: animationFps,
+          references: JSON.parse(JSON.stringify(referencesRef.current)),
+          referenceGroups: JSON.parse(JSON.stringify(referenceGroupsRef.current)),
+          timelineMarkers: JSON.parse(JSON.stringify(timelineMarkersRef.current)),
+          cameraShake: { ...cameraShake },
+          cameraKeyframes: JSON.parse(JSON.stringify(cameraKeyframesRef.current)),
+          activePaletteColors: [...activePaletteColors],
+          guides: JSON.parse(JSON.stringify(guidesRef.current)),
+          workMode,
+        };
+        const newDocId = `doc-new-${Date.now()}`;
+        setOpenDocuments((prev) => [
+          ...prev.map((d) =>
+            d.id === activeDocumentIdRef.current
+              ? {
+                  ...d,
+                  name: prevSnap.name,
+                  width: prevSnap.width,
+                  height: prevSnap.height,
+                  snapshot: prevSnap,
+                }
+              : d
+          ),
+          {
+            id: newDocId,
+            name: finalName,
+            width: newW,
+            height: newH,
+            snapshot: null,
+            isDirty: false,
+            isNewUnsaved: true,
+            hasSavedLocation: false,
+          },
+        ]);
+        activeDocumentIdRef.current = newDocId;
+        setActiveDocumentId(newDocId);
+      } else {
+        setOpenDocuments((prev) =>
+          prev.map((d) =>
+            d.id === activeDocumentIdRef.current
+              ? {
+                  ...d,
+                  name: finalName,
+                  width: newW,
+                  height: newH,
+                  snapshot: null,
+                  isDirty: false,
+                  isNewUnsaved: true,
+                  hasSavedLocation: false,
+                }
+              : d
+          )
+        );
+      }
+
       setProjectName(finalName);
       setCanvasWidth(newW);
       setCanvasHeight(newH);
+      layerGroupsRef.current = nextGroups;
       setLayerGroups(nextGroups);
+      framesRef.current = newFrames;
       setFrames(newFrames);
+      currentFrameIndexRef.current = 0;
       setCurrentFrameIndex(0);
+      currentLayerIndexRef.current = 0;
       setCurrentLayerIndex(0);
       setSelectedFrameIndices([0]);
       setSelectedLayerIndices([0]);
@@ -2726,28 +3029,59 @@ export default function App() {
         ),
       }));
 
+      suppressDirtyMarkRef.current = true;
       pushHistorySnapshot({
         frames: newFrames,
         layerGroups: nextGroups,
         currentFrameIndex: 0,
         currentLayerIndex: 0,
       });
+      suppressDirtyMarkRef.current = false;
 
       const safeSlug = finalName.replace(/\s+/g, '_');
       const thumbUrl = renderProjectThumbnailDataUrl(newFrames, newW, newH, nextGroups);
-      const entryId = `recent-${Date.now()}`;
+      const nowMs = Date.now();
+      const formattedNow = formatRecentDate(nowMs);
+      const entryId = `recent-${nowMs}`;
+      const createdSnapshot: OpenDocumentSnapshot = {
+        name: finalName,
+        width: newW,
+        height: newH,
+        frames: JSON.parse(JSON.stringify(newFrames)),
+        currentFrameIndex: 0,
+        currentLayerIndex: 0,
+        layerGroups: JSON.parse(JSON.stringify(nextGroups)),
+        globalPivot: { x: Math.floor(newW / 2), y: Math.floor(newH * 0.8) },
+        actionTags: [],
+        playbackMode: 'loop',
+        fps: animationFps,
+        references: [],
+        referenceGroups: [],
+        timelineMarkers: [],
+        cameraShake: { ...cameraShake },
+        cameraKeyframes: [],
+        activePaletteColors: [...activePaletteColors],
+        guides: [],
+        workMode,
+      };
       const entry: RecentProjectEntry = {
         id: entryId,
         name: finalName,
         width: newW,
         height: newH,
         category: cfg.category || 'Personalizado',
-        openedAt: new Date().toLocaleString('es-ES', { dateStyle: 'short', timeStyle: 'short' }),
+        openedAt: formattedNow,
+        modifiedAt: formattedNow,
+        modifiedTimestamp: nowMs,
+        frameCount: newFrames.length,
+        layerCount: newFrames[0]?.layers.length || 1,
         templateId: cfg.templateId,
         backgroundMode: cfg.backgroundMode,
         backgroundColor: cfg.backgroundColor,
         path: `Proyectos/${safeSlug}.pcs`,
         fileFormat: 'pcs',
+        sourceKind: 'project_snapshot',
+        hasStoredContent: true,
         thumbnailDataUrl: thumbUrl,
       };
       setRecentProjects((prev) => {
@@ -2763,13 +3097,35 @@ export default function App() {
         const combined = [mergedEntry, ...rest];
         const pinnedItems = combined.filter((r) => r.pinned);
         const unpinnedItems = combined.filter((r) => !r.pinned).slice(0, Math.max(0, 16 - pinnedItems.length));
-        return [...pinnedItems, ...unpinnedItems];
+        const finalList = [...pinnedItems, ...unpinnedItems];
+        writeRecentSnapshot(
+          mergedEntry.id,
+          createdSnapshot,
+          finalList.map((item) => item.id)
+        );
+        void saveRecentProjectPayload({
+          id: mergedEntry.id,
+          snapshot: createdSnapshot,
+          updatedAt: nowMs,
+        }).then(() => pruneRecentProjectPayloads(finalList.map((item) => item.id)));
+        return finalList;
       });
 
       setImportNotification(`¡Proyecto "${finalName}" (${newW}×${newH}px) creado!`);
       setTimeout(() => setImportNotification(null), 3000);
     },
-    [pushHistorySnapshot]
+    [
+      pushHistorySnapshot,
+      projectName,
+      canvasWidth,
+      canvasHeight,
+      globalPivot,
+      playbackMode,
+      animationFps,
+      cameraShake,
+      activePaletteColors,
+      workMode,
+    ]
   );
 
   const handleCreateNewProject = (name: string, newW: number, newH: number) => {
@@ -2788,7 +3144,8 @@ export default function App() {
     });
   };
 
-  // Helper to record any opened or saved project into "Archivo -> Abrir Recientes" with thumbnail & snapshot
+  // Helper to record any opened or saved project into "Archivo -> Abrir Recientes"
+  // Persists full snapshot + raw file Blob / FileHandle / diskPath in IndexedDB so opening ALWAYS restores real content
   const recordRecentProject = useCallback(
     (opts: {
       name: string;
@@ -2798,8 +3155,15 @@ export default function App() {
       layerGroups?: LayerGroup[];
       category?: string;
       path?: string;
-      fileFormat?: 'pcs' | 'json' | 'psd' | 'ase' | 'png';
+      diskPath?: string;
+      fileFormat?: RecentProjectFileFormat;
+      modifiedTimestamp?: number;
+      fileSize?: number;
       snapshot?: OpenDocumentSnapshot;
+      fileBlob?: Blob;
+      fileName?: string;
+      fileHandle?: FileSystemFileHandle;
+      replaceRecentId?: string;
     }) => {
       const ext = opts.fileFormat || 'pcs';
       const safeSlug = (opts.name || 'proyecto').replace(/\s+/g, '_');
@@ -2809,20 +3173,41 @@ export default function App() {
         opts.height,
         opts.layerGroups || []
       );
-      const openedAt = new Date().toLocaleString('es-ES', {
-        dateStyle: 'short',
-        timeStyle: 'short',
-      });
+      const nowMs = Date.now();
+      const modTs =
+        typeof opts.modifiedTimestamp === 'number' && opts.modifiedTimestamp > 0
+          ? opts.modifiedTimestamp
+          : nowMs;
+      const openedAt = formatRecentDate(nowMs);
+      const modifiedAt = formatRecentDate(modTs);
+      const layerCount = opts.frames.reduce((max, f) => Math.max(max, f.layers?.length || 0), 1);
 
-      let resolvedId = `recent-${Date.now()}`;
+      const sourceKind: RecentProjectEntry['sourceKind'] = opts.diskPath
+        ? 'disk_path'
+        : opts.fileHandle
+        ? 'file_handle'
+        : opts.fileBlob
+        ? 'cached_blob'
+        : 'project_snapshot';
+
+      let resolvedId = opts.replaceRecentId || `recent-${nowMs}`;
       setRecentProjects((prev) => {
-        const existing = prev.find(
+        const existingById = opts.replaceRecentId
+          ? prev.find((r) => r.id === opts.replaceRecentId)
+          : undefined;
+        const existingByPath = opts.diskPath
+          ? prev.find((r) => r.diskPath && r.diskPath.toLowerCase() === opts.diskPath!.toLowerCase())
+          : undefined;
+        const existingByName = prev.find(
           (r) =>
             r.name.toLowerCase() === opts.name.toLowerCase() &&
             r.width === opts.width &&
-            r.height === opts.height
+            r.height === opts.height &&
+            (r.fileFormat || 'pcs') === ext
         );
+        const existing = existingById || existingByPath || existingByName;
         resolvedId = existing?.id || resolvedId;
+
         const nextEntry: RecentProjectEntry = {
           id: resolvedId,
           name: opts.name,
@@ -2830,8 +3215,16 @@ export default function App() {
           height: opts.height,
           category: opts.category || 'Proyecto PixelClash',
           openedAt,
-          path: opts.path || existing?.path || `Proyectos/${safeSlug}.${ext}`,
+          modifiedAt,
+          modifiedTimestamp: modTs,
+          fileSize: opts.fileSize ?? existing?.fileSize,
+          frameCount: opts.frames.length,
+          layerCount,
+          path: opts.diskPath || opts.path || existing?.path || `Proyectos/${safeSlug}.${ext}`,
+          diskPath: opts.diskPath || existing?.diskPath,
           fileFormat: ext,
+          sourceKind,
+          hasStoredContent: Boolean(opts.snapshot || opts.fileBlob || opts.fileHandle || opts.diskPath),
           pinned: existing?.pinned || false,
           thumbnailDataUrl: thumbUrl || existing?.thumbnailDataUrl,
         };
@@ -2842,12 +3235,23 @@ export default function App() {
           .filter((r) => !r.pinned)
           .slice(0, Math.max(0, 16 - pinnedItems.length));
         const finalList = [...pinnedItems, ...unpinnedItems];
+        const keepIds = finalList.map((item) => item.id);
+
         if (opts.snapshot) {
-          writeRecentSnapshot(
-            resolvedId,
-            opts.snapshot,
-            finalList.map((item) => item.id)
-          );
+          writeRecentSnapshot(resolvedId, opts.snapshot, keepIds);
+        }
+        if (opts.snapshot || opts.fileBlob || opts.fileHandle || opts.diskPath) {
+          void saveRecentProjectPayload({
+            id: resolvedId,
+            snapshot: opts.snapshot,
+            fileBlob: opts.fileBlob,
+            fileName: opts.fileName || `${safeSlug}.${ext}`,
+            fileMime: opts.fileBlob?.type,
+            fileLastModified: modTs,
+            fileHandle: opts.fileHandle,
+            diskPath: opts.diskPath,
+            updatedAt: nowMs,
+          }).then(() => pruneRecentProjectPayloads(keepIds));
         }
         return finalList;
       });
@@ -2855,12 +3259,33 @@ export default function App() {
     []
   );
 
-  // Seed initial starter project into Recents once if list is empty
+  // Seed initial starter project into Recents once with its real full snapshot if list is empty
   const hasSeededInitialRecentRef = useRef<boolean>(false);
   useEffect(() => {
     if (hasSeededInitialRecentRef.current) return;
     hasSeededInitialRecentRef.current = true;
     if (recentProjects.length === 0 && framesRef.current.length > 0) {
+      const initialSnap: OpenDocumentSnapshot = {
+        name: projectName,
+        width: canvasWidth,
+        height: canvasHeight,
+        frames: JSON.parse(JSON.stringify(framesRef.current)),
+        currentFrameIndex: 0,
+        currentLayerIndex: 0,
+        layerGroups: JSON.parse(JSON.stringify(layerGroupsRef.current)),
+        globalPivot: { ...globalPivot },
+        actionTags: JSON.parse(JSON.stringify(actionTags)),
+        playbackMode,
+        fps: animationFps,
+        references: JSON.parse(JSON.stringify(referencesRef.current)),
+        referenceGroups: JSON.parse(JSON.stringify(referenceGroupsRef.current)),
+        timelineMarkers: JSON.parse(JSON.stringify(timelineMarkersRef.current)),
+        cameraShake: { ...cameraShake },
+        cameraKeyframes: JSON.parse(JSON.stringify(cameraKeyframesRef.current)),
+        activePaletteColors: [...activePaletteColors],
+        guides: JSON.parse(JSON.stringify(guidesRef.current)),
+        workMode,
+      };
       recordRecentProject({
         name: projectName,
         width: canvasWidth,
@@ -2870,9 +3295,23 @@ export default function App() {
         category: 'Sprite Luchador',
         path: `Proyectos/${projectName.replace(/\s+/g, '_')}.pcs`,
         fileFormat: 'pcs',
+        snapshot: initialSnap,
       });
     }
-  }, [recentProjects.length, projectName, canvasWidth, canvasHeight, recordRecentProject]);
+  }, [
+    recentProjects.length,
+    projectName,
+    canvasWidth,
+    canvasHeight,
+    globalPivot,
+    actionTags,
+    playbackMode,
+    animationFps,
+    cameraShake,
+    activePaletteColors,
+    workMode,
+    recordRecentProject,
+  ]);
 
   const handleTogglePinRecentProject = useCallback((id: string) => {
     setRecentProjects((prev) =>
@@ -2893,6 +3332,7 @@ export default function App() {
         return prev.filter((r) => r.pinned);
       }
       prev.forEach((r) => removeRecentSnapshot(r.id));
+      void clearAllRecentProjectPayloads();
       return [];
     });
     setImportNotification('Lista de archivos recientes actualizada.');
@@ -3043,6 +3483,30 @@ export default function App() {
       const bytes = await exportProjectAsPcs(pcsProject);
       const baseName = projectName.toLowerCase().replace(/\s+/g, '_') || 'fighter_project';
       downloadUint8Array(bytes, `${baseName}.pcs`, 'application/octet-stream');
+      const pcsBlobCopy = new Uint8Array(bytes.byteLength);
+      pcsBlobCopy.set(bytes);
+      const pcsBlob = new Blob([pcsBlobCopy.buffer], { type: 'application/octet-stream' });
+      const snapToStore: OpenDocumentSnapshot = {
+        name: projectName,
+        width: canvasWidth,
+        height: canvasHeight,
+        frames: JSON.parse(JSON.stringify(frames)),
+        currentFrameIndex,
+        currentLayerIndex,
+        layerGroups: JSON.parse(JSON.stringify(layerGroups)),
+        globalPivot: { ...globalPivot },
+        actionTags: JSON.parse(JSON.stringify(actionTags)),
+        playbackMode,
+        fps: animationFps,
+        references: JSON.parse(JSON.stringify(references)),
+        referenceGroups: JSON.parse(JSON.stringify(referenceGroups)),
+        timelineMarkers: JSON.parse(JSON.stringify(timelineMarkers)),
+        cameraShake: { ...cameraShake },
+        cameraKeyframes: JSON.parse(JSON.stringify(cameraKeyframes)),
+        activePaletteColors: [...activePaletteColors],
+        guides: JSON.parse(JSON.stringify(guidesRef.current)),
+        workMode,
+      };
       recordRecentProject({
         name: projectName,
         width: canvasWidth,
@@ -3052,7 +3516,12 @@ export default function App() {
         category: 'Proyecto .PCS',
         path: `Proyectos/${baseName}.pcs`,
         fileFormat: 'pcs',
+        fileSize: bytes.byteLength,
+        snapshot: snapToStore,
+        fileBlob: pcsBlob,
+        fileName: `${baseName}.pcs`,
       });
+      markDocumentSaved(activeDocumentIdRef.current, 'pcs');
       setImportNotification(`Proyecto PixelClash guardado: ${baseName}.pcs`);
       setTimeout(() => setImportNotification(null), 4000);
     } catch (err: any) {
@@ -3068,45 +3537,49 @@ export default function App() {
     stageOpacity, groundConfig, dummyOpponent, combatFx, cameraShake, cameraKeyframes, onionSkinEnabled,
     onionSkinPrev, onionSkinNext, onionSkinOpacity, playbackMode, activeGroupId,
     isolateActiveGroup, brushSettings, activePaletteColors, animationFps,
-    references, referenceGroups, timelineMarkers, recordRecentProject,
+    references, referenceGroups, timelineMarkers, workMode, recordRecentProject, markDocumentSaved,
   ]);
 
-  // Periodic debounced local autosave
+  // Periodic debounced + idle-scheduled local autosave (respects Performance Mode to avoid main-thread stalls)
   useEffect(() => {
+    const autosaveDelayMs =
+      performanceMode === 'performance' ? 10000 : performanceMode === 'balanced' ? 5000 : 3500;
     const timer = window.setTimeout(() => {
-      try {
-        const snapshot = {
-          name: projectName,
-          width: canvasWidth,
-          height: canvasHeight,
-          frames,
-          clips,
-          actionTags,
-          layerGroups,
-          globalPivot,
-          stageType,
-          groundConfig,
-          dummyOpponent,
-          combatFx,
-          cameraShake,
-          cameraKeyframes,
-          playbackMode,
-          brushSettings,
-          activePaletteColors,
-          fps: animationFps,
-          savedAt: new Date().toISOString(),
-        };
-        localStorage.setItem(AUTOSAVE_STORAGE_KEY, JSON.stringify(snapshot));
-        setHasAutosave(true);
-      } catch {
-        // Ignore quota errors on very large projects
-      }
-    }, 3500);
+      scheduleIdleTask(() => {
+        try {
+          const snapshot = {
+            name: projectName,
+            width: canvasWidth,
+            height: canvasHeight,
+            frames,
+            clips,
+            actionTags,
+            layerGroups,
+            globalPivot,
+            stageType,
+            groundConfig,
+            dummyOpponent,
+            combatFx,
+            cameraShake,
+            cameraKeyframes,
+            playbackMode,
+            brushSettings,
+            activePaletteColors,
+            fps: animationFps,
+            savedAt: new Date().toISOString(),
+          };
+          localStorage.setItem(AUTOSAVE_STORAGE_KEY, JSON.stringify(snapshot));
+          setHasAutosave(true);
+        } catch {
+          // Ignore quota errors on very large projects
+        }
+      }, 2500);
+    }, autosaveDelayMs);
     return () => window.clearTimeout(timer);
   }, [
     projectName, canvasWidth, canvasHeight, frames, clips, actionTags, layerGroups,
     globalPivot, stageType, groundConfig, dummyOpponent, combatFx, cameraShake, cameraKeyframes, playbackMode,
-    brushSettings, activePaletteColors, animationFps,
+    brushSettings, activePaletteColors, animationFps, performanceMode,
   ]);
 
   const handleRestoreAutosave = useCallback(() => {
@@ -3188,7 +3661,34 @@ export default function App() {
       category: 'Proyecto JSON',
       path: `Proyectos/${fileName}`,
       fileFormat: 'json',
+      fileSize: blob.size,
+      fileBlob: blob,
+      fileName,
+      snapshot: {
+        name: projectName,
+        width: canvasWidth,
+        height: canvasHeight,
+        frames: JSON.parse(JSON.stringify(frames)),
+        currentFrameIndex,
+        currentLayerIndex,
+        layerGroups: JSON.parse(JSON.stringify(layerGroups)),
+        globalPivot: { ...globalPivot },
+        actionTags: JSON.parse(JSON.stringify(actionTags)),
+        playbackMode,
+        fps: animationFps,
+        references: JSON.parse(JSON.stringify(references)),
+        referenceGroups: JSON.parse(JSON.stringify(referenceGroups)),
+        timelineMarkers: JSON.parse(JSON.stringify(timelineMarkers)),
+        cameraShake: { ...cameraShake },
+        cameraKeyframes: JSON.parse(JSON.stringify(cameraKeyframes)),
+        activePaletteColors: [...activePaletteColors],
+        guides: JSON.parse(JSON.stringify(guidesRef.current)),
+        workMode,
+      },
     });
+    markDocumentSaved(activeDocumentIdRef.current, 'json');
+    setImportNotification(`Proyecto guardado en JSON: ${fileName}`);
+    setTimeout(() => setImportNotification(null), 3500);
   };
 
   // Save Project as Aseprite (.ase)
@@ -3197,6 +3697,9 @@ export default function App() {
       const bytes = exportProjectAsAse(currentProjectState);
       const baseName = projectName.toLowerCase().replace(/\s+/g, '_');
       downloadUint8Array(bytes, `${baseName}.ase`, 'application/octet-stream');
+      const aseCopy = new Uint8Array(bytes.byteLength);
+      aseCopy.set(bytes);
+      const aseBlob = new Blob([aseCopy.buffer], { type: 'application/octet-stream' });
       recordRecentProject({
         name: projectName,
         width: canvasWidth,
@@ -3206,7 +3709,32 @@ export default function App() {
         category: 'Aseprite (.ase)',
         path: `Proyectos/${baseName}.ase`,
         fileFormat: 'ase',
+        fileSize: bytes.byteLength,
+        fileBlob: aseBlob,
+        fileName: `${baseName}.ase`,
+        snapshot: {
+          name: projectName,
+          width: canvasWidth,
+          height: canvasHeight,
+          frames: JSON.parse(JSON.stringify(frames)),
+          currentFrameIndex,
+          currentLayerIndex,
+          layerGroups: JSON.parse(JSON.stringify(layerGroups)),
+          globalPivot: { ...globalPivot },
+          actionTags: JSON.parse(JSON.stringify(actionTags)),
+          playbackMode,
+          fps: animationFps,
+          references: JSON.parse(JSON.stringify(references)),
+          referenceGroups: JSON.parse(JSON.stringify(referenceGroups)),
+          timelineMarkers: JSON.parse(JSON.stringify(timelineMarkers)),
+          cameraShake: { ...cameraShake },
+          cameraKeyframes: JSON.parse(JSON.stringify(cameraKeyframes)),
+          activePaletteColors: [...activePaletteColors],
+          guides: JSON.parse(JSON.stringify(guidesRef.current)),
+          workMode,
+        },
       });
+      markDocumentSaved(activeDocumentIdRef.current, 'ase');
       setImportNotification(`Proyecto guardado en formato Aseprite: ${baseName}.ase`);
       setTimeout(() => setImportNotification(null), 4000);
     } catch (err: any) {
@@ -3221,6 +3749,9 @@ export default function App() {
       const bytes = exportProjectAsPsd(currentProjectState, currentFrameIndex);
       const baseName = projectName.toLowerCase().replace(/\s+/g, '_');
       downloadUint8Array(bytes, `${baseName}.psd`, 'image/vnd.adobe.photoshop');
+      const psdCopy = new Uint8Array(bytes.byteLength);
+      psdCopy.set(bytes);
+      const psdBlob = new Blob([psdCopy.buffer], { type: 'image/vnd.adobe.photoshop' });
       recordRecentProject({
         name: projectName,
         width: canvasWidth,
@@ -3230,7 +3761,32 @@ export default function App() {
         category: 'Photoshop (.psd)',
         path: `Proyectos/${baseName}.psd`,
         fileFormat: 'psd',
+        fileSize: bytes.byteLength,
+        fileBlob: psdBlob,
+        fileName: `${baseName}.psd`,
+        snapshot: {
+          name: projectName,
+          width: canvasWidth,
+          height: canvasHeight,
+          frames: JSON.parse(JSON.stringify(frames)),
+          currentFrameIndex,
+          currentLayerIndex,
+          layerGroups: JSON.parse(JSON.stringify(layerGroups)),
+          globalPivot: { ...globalPivot },
+          actionTags: JSON.parse(JSON.stringify(actionTags)),
+          playbackMode,
+          fps: animationFps,
+          references: JSON.parse(JSON.stringify(references)),
+          referenceGroups: JSON.parse(JSON.stringify(referenceGroups)),
+          timelineMarkers: JSON.parse(JSON.stringify(timelineMarkers)),
+          cameraShake: { ...cameraShake },
+          cameraKeyframes: JSON.parse(JSON.stringify(cameraKeyframes)),
+          activePaletteColors: [...activePaletteColors],
+          guides: JSON.parse(JSON.stringify(guidesRef.current)),
+          workMode,
+        },
       });
+      markDocumentSaved(activeDocumentIdRef.current, 'psd');
       setImportNotification(`Proyecto guardado en formato Photoshop: ${baseName}.psd`);
       setTimeout(() => setImportNotification(null), 4000);
     } catch (err: any) {
@@ -5297,12 +5853,15 @@ export default function App() {
           pixels: sub,
         };
         setClipboard(clip);
+        lastInternalCopySigRef.current = computePixelGridQuickSignature(sub, w, h);
+        void writePixelGridToSystemClipboard(sub, w, h);
         setImportNotification(`Selección (${w}×${h}) copiada de "${l.name}" (Frame #${currentFrameIndex + 1})`);
         setTimeout(() => setImportNotification(null), 2500);
         return clip;
       }
     }
 
+    const copiedPixels = l.pixels.map((r) => [...r]);
     const clip: ClipboardData = {
       kind: 'layer',
       sourceName: l.name,
@@ -5311,9 +5870,11 @@ export default function App() {
       originY: 0,
       width: canvasWidth,
       height: canvasHeight,
-      pixels: l.pixels.map((r) => [...r]),
+      pixels: copiedPixels,
     };
     setClipboard(clip);
+    lastInternalCopySigRef.current = computePixelGridQuickSignature(copiedPixels, canvasWidth, canvasHeight);
+    void writePixelGridToSystemClipboard(copiedPixels, canvasWidth, canvasHeight);
     setImportNotification(`Capa "${l.name}" copiada (Frame #${currentFrameIndex + 1})`);
     setTimeout(() => setImportNotification(null), 2500);
     return clip;
@@ -6662,7 +7223,9 @@ export default function App() {
       setWorkMode(snap.workMode || 'fighter');
       setSelectedGuideId(null);
       setSelection(null);
+      suppressDirtyMarkRef.current = true;
       pushHistorySnapshot({ frames: nextFrames, guides: nextGuides, layerGroups: nextGroups });
+      suppressDirtyMarkRef.current = false;
     },
     [pushHistorySnapshot]
   );
@@ -7058,81 +7621,621 @@ export default function App() {
     [animationFps, canvasWidth, canvasHeight, currentFrameIndex, pushHistorySnapshot]
   );
 
-  // Open a project from "Archivo -> Abrir Recientes" (restores cached snapshot in a new tab if available)
-  const handleOpenRecentProject = useCallback(
-    (entry: RecentProjectEntry) => {
-      const snapsMap = readRecentSnapshotsMap();
-      const cachedSnap = snapsMap[entry.id];
-      if (cachedSnap && Array.isArray(cachedSnap.frames) && cachedSnap.frames.length > 0) {
-        const shouldCreateNewTab = openDocuments.length > 1 || framesRef.current.length > 1 ||
-          framesRef.current[0]?.layers.some((l) => l.pixels.some((row) => row.some(Boolean)));
-        if (shouldCreateNewTab) {
-          const currentSnap = buildCurrentDocumentSnapshot();
-          const newDocId = `doc-${Date.now()}`;
-          setOpenDocuments((prev) => [
-            ...prev.map((d) =>
-              d.id === activeDocumentId
-                ? {
-                    ...d,
-                    name: currentSnap.name,
-                    width: currentSnap.width,
-                    height: currentSnap.height,
-                    snapshot: currentSnap,
-                  }
-                : d
-            ),
-            {
-              id: newDocId,
-              name: cachedSnap.name,
-              width: cachedSnap.width,
-              height: cachedSnap.height,
-              snapshot: null,
-            },
-          ]);
-          setActiveDocumentId(newDocId);
-        }
-        applyDocumentSnapshot(cachedSnap);
-        recordRecentProject({
-          name: cachedSnap.name,
-          width: cachedSnap.width,
-          height: cachedSnap.height,
-          frames: cachedSnap.frames,
-          layerGroups: cachedSnap.layerGroups,
-          category: entry.category,
-          path: entry.path,
-          fileFormat: entry.fileFormat,
-          snapshot: cachedSnap,
-        });
-        setNewProjectModalOpen(false);
-        setImportNotification(`Proyecto reciente restaurado: "${cachedSnap.name}" (${cachedSnap.width}×${cachedSnap.height}px)`);
-        setTimeout(() => setImportNotification(null), 3200);
-        return;
+  // =========================================================================
+  // SISTEMA UNIFICADO DE HIDRATACIÓN Y APERTURA DE DOCUMENTOS
+  // Usado por: Archivo -> Abrir, Abrir Recientes, Spritesheets y Drag & Drop
+  // =========================================================================
+  const reportFileLoadFailure = useCallback(
+    (fileName: string, err: unknown, fallbackFormat: string = 'Archivo') => {
+      const isStructured = err instanceof FileLoadError;
+      const message = isStructured
+        ? err.message
+        : err instanceof Error
+        ? err.message
+        : 'El archivo está dañado o no tiene un formato compatible.';
+      const formatLabel = isStructured ? err.formatLabel : fallbackFormat;
+      const technicalDetails = isStructured
+        ? err.technicalDetails
+        : err instanceof Error
+        ? err.stack || err.message
+        : String(err);
+
+      console.error(`[PixelClash FileLoader] Error al abrir "${fileName}":`, err);
+      appendStudioLog(`Error al abrir "${fileName}" (${formatLabel}): ${message}`);
+      setImportNotification(`Error al abrir "${fileName}": ${message}`);
+      setTimeout(() => setImportNotification(null), 5000);
+      setFileLoadError({
+        fileName,
+        formatLabel,
+        message,
+        technicalDetails,
+      });
+    },
+    [appendStudioLog]
+  );
+
+  const isCurrentDocumentBlank = useCallback((): boolean => {
+    if (openDocuments.length > 1) return false;
+    const curFrames = framesRef.current;
+    if (curFrames.length > 1) return false;
+    const f0 = curFrames[0];
+    if (!f0 || f0.layers.length > 1) return false;
+    const grid = f0.layers[0]?.pixels;
+    if (!grid) return true;
+    for (const row of grid) {
+      for (const cell of row) {
+        if (cell) return false;
+      }
+    }
+    return true;
+  }, [openDocuments.length]);
+
+  const hydrateOpenedDocumentSnapshot = useCallback(
+    (
+      snapshot: OpenDocumentSnapshot,
+      formatLabel: string,
+      tabMeta?: {
+        isDirty?: boolean;
+        isNewUnsaved?: boolean;
+        hasSavedLocation?: boolean;
+        savedFormat?: SaveAsFormatId;
+        filePath?: string;
+      }
+    ): boolean => {
+      const validated = validateDocumentFramesIntegrity(
+        snapshot.width,
+        snapshot.height,
+        snapshot.frames,
+        snapshot.name,
+        formatLabel
+      );
+      const safeSnapshot: OpenDocumentSnapshot = {
+        ...snapshot,
+        frames: validated.normalizedFrames,
+      };
+
+      const resolvedMeta = {
+        isDirty: tabMeta?.isDirty ?? false,
+        isNewUnsaved: tabMeta?.isNewUnsaved ?? false,
+        hasSavedLocation: tabMeta?.hasSavedLocation ?? true,
+        savedFormat: tabMeta?.savedFormat,
+        filePath: tabMeta?.filePath,
+      };
+
+      const shouldCreateNewTab = !isCurrentDocumentBlank();
+      if (shouldCreateNewTab) {
+        const currentSnap = buildCurrentDocumentSnapshot();
+        const newDocId = `doc-${Date.now()}`;
+        setOpenDocuments((prev) => [
+          ...prev.map((d) =>
+            d.id === activeDocumentId
+              ? {
+                  ...d,
+                  name: currentSnap.name,
+                  width: currentSnap.width,
+                  height: currentSnap.height,
+                  snapshot: currentSnap,
+                }
+              : d
+          ),
+          {
+            id: newDocId,
+            name: safeSnapshot.name,
+            width: safeSnapshot.width,
+            height: safeSnapshot.height,
+            snapshot: null,
+            ...resolvedMeta,
+          },
+        ]);
+        activeDocumentIdRef.current = newDocId;
+        setActiveDocumentId(newDocId);
+      } else {
+        setOpenDocuments((prev) =>
+          prev.map((d) =>
+            d.id === activeDocumentId
+              ? {
+                  ...d,
+                  name: safeSnapshot.name,
+                  width: safeSnapshot.width,
+                  height: safeSnapshot.height,
+                  snapshot: null,
+                  ...resolvedMeta,
+                }
+              : d
+          )
+        );
       }
 
-      handleCreateProjectConfig({
-        name: entry.name,
-        width: entry.width,
-        height: entry.height,
-        pixelScale: 1,
-        category: entry.category,
-        templateId: entry.templateId,
-        backgroundMode: entry.backgroundMode || 'transparent',
-        backgroundColor: entry.backgroundColor || '#111524',
-        enableGrid: true,
-        enablePixelPerfect: true,
-        createInitialLayer: true,
-        createInitialGroup: false,
-        enableAnimationMode: true,
+      applyDocumentSnapshot(safeSnapshot);
+      return shouldCreateNewTab;
+    },
+    [activeDocumentId, applyDocumentSnapshot, buildCurrentDocumentSnapshot, isCurrentDocumentBlank]
+  );
+
+  const hydrateImportResultAsDocument = useCallback(
+    (
+      res: ImportResult,
+      file: File,
+      opts?: {
+        diskPath?: string;
+        fileHandle?: FileSystemFileHandle;
+        replaceRecentId?: string;
+        overrideFormat?: RecentProjectFileFormat;
+      }
+    ) => {
+      let nextGroups: LayerGroup[] = Array.isArray(res.layerGroups) ? res.layerGroups : [];
+      let nextPivot = res.projectState?.globalPivot || {
+        x: Math.floor(res.width / 2),
+        y: Math.floor(res.height * 0.8),
+      };
+      let nextActionTags: ActionTag[] = Array.isArray(res.actionTags) ? res.actionTags : [];
+      let nextPlaybackMode: 'loop' | 'pingpong' | 'once' = 'loop';
+      let nextFps = typeof res.fps === 'number' ? res.fps : 12;
+      let nextRefs: ReferenceItem[] = [];
+      let nextRefGroups: ReferenceGroup[] = [];
+      let nextMarkers: TimelineMarker[] = [];
+      let nextShake = cameraShake;
+      let nextCamKf: CameraKeyframe[] = [];
+      let nextPalette: string[] = [];
+      let nextGuides: CanvasGuide[] = [];
+      let nextWorkMode: ProjectWorkMode = 'fighter';
+
+      if (res.projectState) {
+        const ps = res.projectState;
+        if (Array.isArray(ps.layerGroups) && ps.layerGroups.length > 0) nextGroups = ps.layerGroups;
+        if (Array.isArray(ps.clips)) setClips(ps.clips);
+        if (ps.activeClipId) setActiveClipId(ps.activeClipId);
+        if (ps.stageType) setStageType(ps.stageType);
+        if (typeof ps.stageOpacity === 'number') setStageOpacity(ps.stageOpacity);
+        if (ps.groundConfig) setGroundConfig(ps.groundConfig);
+        if (ps.dummyOpponent) setDummyOpponent(ps.dummyOpponent);
+        if (ps.combatFx) setCombatFx(ps.combatFx);
+        if (ps.cameraShake) nextShake = ps.cameraShake;
+        if (Array.isArray(ps.cameraKeyframes)) nextCamKf = ps.cameraKeyframes;
+        if (ps.playbackMode) nextPlaybackMode = ps.playbackMode;
+        if (ps.brushSettings) handleChangeBrushSettings({ ...DEFAULT_BRUSH_SETTINGS, ...ps.brushSettings });
+        if (Array.isArray(ps.activePaletteColors)) nextPalette = ps.activePaletteColors;
+        if (typeof ps.fps === 'number') nextFps = ps.fps;
+        if (ps.primaryColor) setPrimaryColor(ps.primaryColor);
+        if (ps.secondaryColor) setSecondaryColor(ps.secondaryColor);
+        if (Array.isArray(ps.references)) nextRefs = ps.references;
+        if (Array.isArray(ps.referenceGroups)) nextRefGroups = ps.referenceGroups;
+        if (Array.isArray(ps.timelineMarkers)) nextMarkers = ps.timelineMarkers;
+        if (Array.isArray(ps.guides)) nextGuides = ps.guides;
+        if (ps.workMode) nextWorkMode = ps.workMode;
+      }
+
+      const openedSnapshot: OpenDocumentSnapshot = {
+        name: res.name,
+        width: res.width,
+        height: res.height,
+        frames: res.frames,
+        currentFrameIndex: res.projectState?.currentFrameIndex ?? 0,
+        currentLayerIndex: res.projectState?.currentLayerIndex ?? 0,
+        layerGroups: nextGroups,
+        globalPivot: nextPivot,
+        actionTags: nextActionTags,
+        playbackMode: nextPlaybackMode,
+        fps: nextFps,
+        references: nextRefs,
+        referenceGroups: nextRefGroups,
+        timelineMarkers: nextMarkers,
+        cameraShake: nextShake,
+        cameraKeyframes: nextCamKf,
+        activePaletteColors: nextPalette,
+        guides: nextGuides,
+        workMode: nextWorkMode,
+      };
+
+      const fmt: RecentProjectFileFormat =
+        opts?.overrideFormat || res.stats.fileFormat || normalizeFileFormatTag(file.name);
+      const displayPath =
+        opts?.diskPath ||
+        (file as File & { webkitRelativePath?: string }).webkitRelativePath ||
+        `Documentos/${file.name}`;
+      const mappedSaveFormat: SaveAsFormatId =
+        fmt === 'pcs' || fmt === 'json' || fmt === 'ase' || fmt === 'psd' || fmt === 'png' || fmt === 'jpg' || fmt === 'webp' || fmt === 'gif'
+          ? fmt
+          : fmt === 'jpeg'
+          ? 'jpg'
+          : 'pcs';
+      const openedInNewTab = hydrateOpenedDocumentSnapshot(openedSnapshot, res.stats.formatLabel, {
+        isDirty: false,
+        isNewUnsaved: false,
+        hasSavedLocation: true,
+        savedFormat: mappedSaveFormat,
+        filePath: displayPath,
       });
+
+      recordRecentProject({
+        name: res.name,
+        width: res.width,
+        height: res.height,
+        frames: res.frames,
+        layerGroups: nextGroups,
+        category: res.stats.formatLabel,
+        path: displayPath,
+        diskPath: opts?.diskPath,
+        fileFormat: fmt,
+        modifiedTimestamp: file.lastModified || Date.now(),
+        fileSize: file.size,
+        snapshot: openedSnapshot,
+        fileBlob: file,
+        fileName: file.name,
+        fileHandle: opts?.fileHandle,
+        replaceRecentId: opts?.replaceRecentId,
+      });
+
       setNewProjectModalOpen(false);
+      const scaleNote = res.stats.wasDownscaled
+        ? ` · ajustado desde ${res.stats.originalWidth}×${res.stats.originalHeight}`
+        : '';
+      const frameNote =
+        res.frames.length > 1
+          ? ` · ${res.frames.length} fotogramas`
+          : res.stats.layerCount > 1
+          ? ` · ${res.stats.layerCount} capas`
+          : '';
+      setImportNotification(
+        `${res.stats.formatLabel} abierto${openedInNewTab ? ' en nueva pestaña' : ''}: ${file.name} (${res.width}×${res.height} px${frameNote}${scaleNote})`
+      );
+      setTimeout(() => setImportNotification(null), 4000);
+    },
+    [cameraShake, handleChangeBrushSettings, hydrateOpenedDocumentSnapshot, recordRecentProject]
+  );
+
+  // =========================================================================
+  // ABRIR DOCUMENTO UNIFICADO (Ctrl+O, Recientes, Drag & Drop, Spritesheets)
+  // =========================================================================
+  const handleOpenDocumentFile = useCallback(
+    async (
+      file: File,
+      opts?: {
+        diskPath?: string;
+        fileHandle?: FileSystemFileHandle;
+        replaceRecentId?: string;
+        skipSpritesheetPrompt?: boolean;
+        forceSpritesheetSlicer?: boolean;
+      }
+    ) => {
+      try {
+        setImportNotification(`Abriendo "${file.name}"...`);
+
+        if (opts?.forceSpritesheetSlicer) {
+          const rawRaster = await decodeAnyRasterFileToRgba(file);
+          const candidate = detectSpritesheetCandidate(file.name, rawRaster.width, rawRaster.height);
+          setImportNotification(null);
+          setPendingSpritesheetOpen({
+            file,
+            fileName: file.name,
+            rawRaster,
+            candidate,
+            fallbackSingleResult: null,
+            diskPath: opts.diskPath,
+            fileHandle: opts.fileHandle,
+            replaceRecentId: opts.replaceRecentId,
+            allowOpenAsSingleImage: true,
+          });
+          return;
+        }
+
+        const res = await importGraphicFile(file);
+
+        // Offer Spritesheet Slicer automatically when a spritesheet strip/grid is detected
+        if (
+          res.spritesheetCandidate?.isCandidate &&
+          res.rawRaster &&
+          !opts?.skipSpritesheetPrompt
+        ) {
+          setImportNotification(null);
+          setPendingSpritesheetOpen({
+            file,
+            fileName: file.name,
+            rawRaster: res.rawRaster,
+            candidate: res.spritesheetCandidate,
+            fallbackSingleResult: res,
+            diskPath: opts?.diskPath,
+            fileHandle: opts?.fileHandle,
+            replaceRecentId: opts?.replaceRecentId,
+            allowOpenAsSingleImage: true,
+          });
+          return;
+        }
+
+        hydrateImportResultAsDocument(res, file, opts);
+      } catch (err) {
+        reportFileLoadFailure(file.name, err);
+      }
+    },
+    [hydrateImportResultAsDocument, reportFileLoadFailure]
+  );
+
+  const handleConfirmSpritesheetSlice = useCallback(
+    (options: SpritesheetSliceOptions) => {
+      if (!pendingSpritesheetOpen) return;
+      const pending = pendingSpritesheetOpen;
+      setPendingSpritesheetOpen(null);
+      try {
+        const sliced = sliceRgbaToSpritesheetResult(pending.rawRaster, options);
+        hydrateImportResultAsDocument(sliced, pending.file, {
+          diskPath: pending.diskPath,
+          fileHandle: pending.fileHandle,
+          replaceRecentId: pending.replaceRecentId,
+          overrideFormat: 'spritesheet',
+        });
+      } catch (err) {
+        reportFileLoadFailure(pending.fileName, err, 'Spritesheet');
+      }
+    },
+    [pendingSpritesheetOpen, hydrateImportResultAsDocument, reportFileLoadFailure]
+  );
+
+  const handleOpenSpritesheetAsSingleImage = useCallback(async () => {
+    if (!pendingSpritesheetOpen) return;
+    const pending = pendingSpritesheetOpen;
+    setPendingSpritesheetOpen(null);
+    try {
+      const res = pending.fallbackSingleResult || (await importGraphicFile(pending.file));
+      hydrateImportResultAsDocument(res, pending.file, {
+        diskPath: pending.diskPath,
+        fileHandle: pending.fileHandle,
+        replaceRecentId: pending.replaceRecentId,
+      });
+    } catch (err) {
+      reportFileLoadFailure(pending.fileName, err);
+    }
+  }, [pendingSpritesheetOpen, hydrateImportResultAsDocument, reportFileLoadFailure]);
+
+  // Unified File Picker (Electron native dialog -> Chromium FileSystemFileHandle -> <input>)
+  const handleOpenFilePicker = useCallback(
+    async (replaceRecentId?: string) => {
+      const desktop = getDesktopBridge();
+      if (desktop?.openFileDialog) {
+        try {
+          const dialogRes = await desktop.openFileDialog({
+            title: replaceRecentId
+              ? 'Ubicar archivo movido o renombrado'
+              : 'Abrir archivo en PixelClash Studio',
+          });
+          if (dialogRes.canceled || !dialogRes.files || dialogRes.files.length === 0) {
+            if (dialogRes.error) {
+              reportFileLoadFailure('Archivo local', new Error(dialogRes.error));
+            }
+            return;
+          }
+          const picked = dialogRes.files[0];
+          const copy = new Uint8Array(picked.bytes.byteLength);
+          copy.set(picked.bytes);
+          const file = new File([copy.buffer], picked.name, {
+            lastModified: picked.lastModified || Date.now(),
+          });
+          await handleOpenDocumentFile(file, {
+            diskPath: picked.filePath,
+            replaceRecentId,
+          });
+          return;
+        } catch (err) {
+          console.warn('[PixelClash Desktop] Fallback a selector estándar:', err);
+        }
+      }
+
+      // Top-level Chromium File System Access API (persists live FileSystemFileHandle in IndexedDB)
+      const isTopLevelWindow = (() => {
+        try {
+          return window.self === window.top;
+        } catch {
+          return false;
+        }
+      })();
+      const winPicker = (
+        window as unknown as {
+          showOpenFilePicker?: (options?: unknown) => Promise<FileSystemFileHandle[]>;
+        }
+      ).showOpenFilePicker;
+
+      if (isTopLevelWindow && typeof winPicker === 'function') {
+        try {
+          const handles = await winPicker({
+            multiple: false,
+            types: [
+              {
+                description: 'PixelClash Studio · Imágenes, Animaciones y Proyectos',
+                accept: {
+                  'image/*': [
+                    '.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.tif', '.tiff', '.tga', '.ico',
+                  ],
+                  'application/octet-stream': ['.pcs', '.ase', '.aseprite', '.psd'],
+                  'application/json': ['.json'],
+                },
+              },
+            ],
+            excludeAcceptAllOption: false,
+          });
+          const handle = handles?.[0];
+          if (handle) {
+            const file = await handle.getFile();
+            await handleOpenDocumentFile(file, {
+              fileHandle: handle,
+              replaceRecentId,
+            });
+          }
+          return;
+        } catch (err: any) {
+          if (err?.name === 'AbortError') return;
+          // Fall through cleanly to <input type="file"> on SecurityError or unsupported filters
+        }
+      }
+
+      relocatingRecentIdRef.current = replaceRecentId || null;
+      fileInputRef.current?.click();
+    },
+    [handleOpenDocumentFile, reportFileLoadFailure]
+  );
+
+  // =========================================================================
+  // ABRIR RECIENTES — Carga completa y verificación real de ruta / contenido
+  // Jamás crea un lienzo vacío cuando falta el archivo o falla la carga
+  // =========================================================================
+  const handleOpenRecentProject = useCallback(
+    async (entry: RecentProjectEntry) => {
+      try {
+        setImportNotification(`Cargando reciente "${entry.name}"...`);
+
+        // 1. Electron Desktop: verify real disk path directly before loading
+        const desktop = getDesktopBridge();
+        if (entry.diskPath && desktop?.readFileAtPath) {
+          const diskRes = await desktop.readFileAtPath(entry.diskPath);
+          if (!diskRes.exists || !diskRes.bytes) {
+            setImportNotification(null);
+            setNewProjectModalOpen(false);
+            appendStudioLog(`Archivo reciente no encontrado en disco: ${entry.diskPath}`);
+            setMissingRecentEntry(entry);
+            return;
+          }
+          const copy = new Uint8Array(diskRes.bytes.byteLength);
+          copy.set(diskRes.bytes);
+          const diskFile = new File([copy.buffer], diskRes.name || `${entry.name}.${entry.fileFormat || 'pcs'}`, {
+            lastModified: diskRes.lastModified || entry.modifiedTimestamp || Date.now(),
+          });
+          await handleOpenDocumentFile(diskFile, {
+            diskPath: diskRes.filePath || entry.diskPath,
+            replaceRecentId: entry.id,
+            skipSpritesheetPrompt: entry.fileFormat !== 'spritesheet',
+          });
+          return;
+        }
+
+        // 2. IndexedDB persistent payload lookup (handles FileSystemFileHandle, raw File Blob & full Snapshot)
+        const payload = await getRecentProjectPayload<OpenDocumentSnapshot>(entry.id);
+
+        // 2a. Live FileSystemFileHandle (verifies file still exists in original location!)
+        if (payload?.fileHandle) {
+          try {
+            const fh = payload.fileHandle as FileSystemFileHandle & {
+              queryPermission?: (opts: { mode: string }) => Promise<string>;
+              requestPermission?: (opts: { mode: string }) => Promise<string>;
+            };
+            if (typeof fh.queryPermission === 'function') {
+              const perm = await fh.queryPermission({ mode: 'read' });
+              if (perm !== 'granted' && typeof fh.requestPermission === 'function') {
+                await fh.requestPermission({ mode: 'read' });
+              }
+            }
+            const liveFile = await payload.fileHandle.getFile();
+            await handleOpenDocumentFile(liveFile, {
+              fileHandle: payload.fileHandle,
+              replaceRecentId: entry.id,
+              skipSpritesheetPrompt: entry.fileFormat !== 'spritesheet',
+            });
+            return;
+          } catch (handleErr: any) {
+            if (handleErr?.name === 'NotFoundError') {
+              // File was moved or deleted from its original location!
+              setImportNotification(null);
+              setNewProjectModalOpen(false);
+              appendStudioLog(`Archivo reciente movido o eliminado: ${entry.path || entry.name}`);
+              setMissingRecentEntry(entry);
+              return;
+            }
+            // If permission was denied or handle expired, fall through to stored snapshot/blob
+          }
+        }
+
+        // 2b. Full validated snapshot persisted in IndexedDB (exact layers, frames, guides, palettes & settings)
+        if (payload?.snapshot && Array.isArray(payload.snapshot.frames) && payload.snapshot.frames.length > 0) {
+          const openedInNewTab = hydrateOpenedDocumentSnapshot(
+            payload.snapshot,
+            entry.category || 'Proyecto Reciente'
+          );
+          recordRecentProject({
+            name: payload.snapshot.name,
+            width: payload.snapshot.width,
+            height: payload.snapshot.height,
+            frames: payload.snapshot.frames,
+            layerGroups: payload.snapshot.layerGroups,
+            category: entry.category,
+            path: entry.path,
+            diskPath: entry.diskPath,
+            fileFormat: entry.fileFormat,
+            modifiedTimestamp: entry.modifiedTimestamp || payload.fileLastModified || payload.updatedAt,
+            fileSize: entry.fileSize,
+            snapshot: payload.snapshot,
+            fileBlob: payload.fileBlob,
+            fileName: payload.fileName,
+            fileHandle: payload.fileHandle,
+            replaceRecentId: entry.id,
+          });
+          setNewProjectModalOpen(false);
+          setImportNotification(
+            `Proyecto reciente abierto${openedInNewTab ? ' en nueva pestaña' : ''}: "${payload.snapshot.name}" (${payload.snapshot.width}×${payload.snapshot.height} px · ${payload.snapshot.frames.length} fotograma(s))`
+          );
+          setTimeout(() => setImportNotification(null), 3600);
+          return;
+        }
+
+        // 2c. Original File Blob persisted in IndexedDB -> execute exact same unified open pipeline!
+        if (payload?.fileBlob) {
+          const reconstructedFile = new File(
+            [payload.fileBlob],
+            payload.fileName || `${entry.name}.${entry.fileFormat || 'png'}`,
+            {
+              type: payload.fileMime || payload.fileBlob.type,
+              lastModified: payload.fileLastModified || entry.modifiedTimestamp || Date.now(),
+            }
+          );
+          await handleOpenDocumentFile(reconstructedFile, {
+            replaceRecentId: entry.id,
+            skipSpritesheetPrompt: entry.fileFormat !== 'spritesheet',
+          });
+          return;
+        }
+
+        // 2d. Legacy localStorage snapshot fallback (auto-migrates to IndexedDB)
+        const snapsMap = readRecentSnapshotsMap();
+        const legacySnap = snapsMap[entry.id];
+        if (legacySnap && Array.isArray(legacySnap.frames) && legacySnap.frames.length > 0) {
+          const openedInNewTab = hydrateOpenedDocumentSnapshot(
+            legacySnap,
+            entry.category || 'Proyecto Reciente'
+          );
+          recordRecentProject({
+            name: legacySnap.name,
+            width: legacySnap.width,
+            height: legacySnap.height,
+            frames: legacySnap.frames,
+            layerGroups: legacySnap.layerGroups,
+            category: entry.category,
+            path: entry.path,
+            fileFormat: entry.fileFormat,
+            modifiedTimestamp: entry.modifiedTimestamp || Date.now(),
+            snapshot: legacySnap,
+            replaceRecentId: entry.id,
+          });
+          setNewProjectModalOpen(false);
+          setImportNotification(
+            `Proyecto reciente restaurado${openedInNewTab ? ' en nueva pestaña' : ''}: "${legacySnap.name}" (${legacySnap.width}×${legacySnap.height} px)`
+          );
+          setTimeout(() => setImportNotification(null), 3500);
+          return;
+        }
+
+        // 3. File content not found in original location or storage -> NEVER create an empty canvas!
+        setImportNotification(null);
+        setNewProjectModalOpen(false);
+        appendStudioLog(
+          `El archivo reciente "${entry.name}" (${entry.path || 'sin ruta'}) no se encuentra en su ubicación original.`
+        );
+        setMissingRecentEntry(entry);
+      } catch (err) {
+        reportFileLoadFailure(entry.name, err, entry.category || 'Archivo Reciente');
+      }
     },
     [
-      openDocuments.length,
-      activeDocumentId,
-      buildCurrentDocumentSnapshot,
-      applyDocumentSnapshot,
+      appendStudioLog,
+      handleOpenDocumentFile,
+      hydrateOpenedDocumentSnapshot,
       recordRecentProject,
-      handleCreateProjectConfig,
+      reportFileLoadFailure,
     ]
   );
 
@@ -7160,17 +8263,87 @@ export default function App() {
     [activeDocumentId, openDocuments, buildCurrentDocumentSnapshot, applyDocumentSnapshot]
   );
 
-  const handleCloseDocumentTab = useCallback(
+  const createFreshBlankDocumentSnapshot = useCallback(
+    (name: string = 'Nuevo Proyecto', w: number = 48, h: number = 48): OpenDocumentSnapshot => ({
+      name,
+      width: w,
+      height: h,
+      frames: [
+        {
+          id: `frame-blank-${Date.now()}`,
+          name: 'Frame 1',
+          durationTicks: 4,
+          durationMs: 83,
+          phase: 'neutral',
+          layers: [
+            {
+              id: `layer-blank-${Date.now()}`,
+              name: 'Capa 1',
+              visible: true,
+              locked: false,
+              opacity: 1,
+              fillOpacity: 1,
+              blendMode: 'normal',
+              pixels: createEmptyGrid(w, h),
+            },
+          ],
+          hitboxes: [],
+        },
+      ],
+      currentFrameIndex: 0,
+      currentLayerIndex: 0,
+      layerGroups: [],
+      globalPivot: { x: Math.floor(w / 2), y: Math.floor(h * 0.8) },
+      actionTags: [],
+      playbackMode: 'loop',
+      fps: 12,
+      references: [],
+      referenceGroups: [],
+      timelineMarkers: [],
+      cameraShake: { ...cameraShake },
+      cameraKeyframes: [],
+      activePaletteColors: [...activePaletteColors],
+      guides: [],
+      workMode: 'fighter',
+    }),
+    [cameraShake, activePaletteColors]
+  );
+
+  const forceCloseDocumentTab = useCallback(
     (docId: string) => {
-      if (openDocuments.length <= 1) return;
-      const idx = openDocuments.findIndex((d) => d.id === docId);
+      const docs = openDocumentsRef.current;
+      const idx = docs.findIndex((d) => d.id === docId);
       if (idx < 0) return;
-      const remaining = openDocuments.filter((d) => d.id !== docId);
-      if (docId === activeDocumentId) {
+
+      if (docs.length <= 1) {
+        // Closing the final open tab resets workspace cleanly to a fresh blank document tab
+        const blankSnap = createFreshBlankDocumentSnapshot('Proyecto 1', 48, 48);
+        const freshId = `doc-blank-${Date.now()}`;
+        setOpenDocuments([
+          {
+            id: freshId,
+            name: blankSnap.name,
+            width: blankSnap.width,
+            height: blankSnap.height,
+            snapshot: null,
+            isDirty: false,
+            isNewUnsaved: true,
+            hasSavedLocation: false,
+          },
+        ]);
+        activeDocumentIdRef.current = freshId;
+        setActiveDocumentId(freshId);
+        applyDocumentSnapshot(blankSnap);
+        return;
+      }
+
+      const remaining = docs.filter((d) => d.id !== docId);
+      if (docId === activeDocumentIdRef.current) {
         const nextActive = remaining[Math.max(0, idx - 1)] || remaining[0];
         if (nextActive?.snapshot) {
           applyDocumentSnapshot(nextActive.snapshot);
         }
+        activeDocumentIdRef.current = nextActive.id;
         setActiveDocumentId(nextActive.id);
         setOpenDocuments(
           remaining.map((d) => (d.id === nextActive.id ? { ...d, snapshot: null } : d))
@@ -7179,179 +8352,673 @@ export default function App() {
         setOpenDocuments(remaining);
       }
     },
-    [openDocuments, activeDocumentId, applyDocumentSnapshot]
+    [applyDocumentSnapshot, createFreshBlankDocumentSnapshot]
   );
 
-  const isCurrentDocumentBlank = useCallback((): boolean => {
-    if (openDocuments.length > 1) return false;
-    const curFrames = framesRef.current;
-    if (curFrames.length > 1) return false;
-    const f0 = curFrames[0];
-    if (!f0 || f0.layers.length > 1) return false;
-    const grid = f0.layers[0]?.pixels;
-    if (!grid) return true;
-    for (const row of grid) {
-      for (const cell of row) {
-        if (cell) return false;
-      }
-    }
-    return true;
-  }, [openDocuments.length]);
-
-  // =========================================================================
-  // ABRIR DOCUMENTO (Ctrl+O): Siempre abre un archivo como documento independiente
-  // (crea nueva pestaña si el documento activo tiene contenido)
-  // =========================================================================
-  const handleOpenDocumentFile = async (file: File) => {
-    try {
-      setImportNotification(`Abriendo documento "${file.name}"...`);
-
-      let nextName = file.name.replace(/\.[^.]+$/, '');
-      let nextW = canvasWidth;
-      let nextH = canvasHeight;
-      let nextFrames: Frame[] = [];
-      let nextFrameIdx = 0;
-      let nextLayerIdx = 0;
-      let nextGroups: LayerGroup[] = [];
-      let nextPivot = { x: 24, y: 38 };
-      let nextActionTags: ActionTag[] = [];
-      let nextPlaybackMode: 'loop' | 'pingpong' | 'once' = 'loop';
-      let nextFps = 12;
-      let nextRefs: ReferenceItem[] = [];
-      let nextRefGroups: ReferenceGroup[] = [];
-      let nextMarkers: TimelineMarker[] = [];
-      let nextShake = cameraShake;
-      let nextCamKf: CameraKeyframe[] = [];
-      let nextPalette: string[] = [];
-
-      if (file.name.toLowerCase().endsWith('.json')) {
-        const text = await file.text();
-        const json = JSON.parse(text);
-        if (!json.width || !json.height || !Array.isArray(json.frames)) {
-          throw new Error('El JSON no corresponde a un proyecto PixelClash válido.');
-        }
-        nextName = json.name || nextName;
-        nextW = json.width;
-        nextH = json.height;
-        nextFrames = json.frames;
-        nextGroups = Array.isArray(json.layerGroups) ? json.layerGroups : [];
-        nextPivot = json.globalPivot || { x: Math.floor(nextW / 2), y: Math.floor(nextH * 0.8) };
-        nextActionTags = Array.isArray(json.actionTags) ? json.actionTags : [];
-        nextPlaybackMode = json.playbackMode || 'loop';
-        nextFps = typeof json.fps === 'number' ? json.fps : 12;
-        nextRefs = Array.isArray(json.references) ? json.references : [];
-        nextRefGroups = Array.isArray(json.referenceGroups) ? json.referenceGroups : [];
-        nextMarkers = Array.isArray(json.timelineMarkers) ? json.timelineMarkers : [];
-        if (json.cameraShake) nextShake = json.cameraShake;
-        nextCamKf = Array.isArray(json.cameraKeyframes) ? json.cameraKeyframes : [];
-        nextPalette = Array.isArray(json.activePaletteColors) ? json.activePaletteColors : [];
+  const handleRequestCloseDocumentTab = useCallback(
+    (docId: string) => {
+      const doc = openDocumentsRef.current.find((d) => d.id === docId);
+      if (!doc) return;
+      if (doc.isDirty) {
+        setPendingCloseDocId(docId);
       } else {
-        const res = await importGraphicFile(file);
-        nextName = res.name;
-        nextW = res.width;
-        nextH = res.height;
-        nextFrames = res.frames;
-        nextFrameIdx = res.projectState?.currentFrameIndex ?? 0;
-        nextLayerIdx = res.projectState?.currentLayerIndex ?? 0;
-        nextPivot = res.projectState?.globalPivot || { x: Math.floor(res.width / 2), y: Math.floor(res.height * 0.8) };
-        if (res.actionTags) nextActionTags = res.actionTags;
-        if (res.projectState) {
-          const ps = res.projectState;
-          if (Array.isArray(ps.layerGroups)) nextGroups = ps.layerGroups;
-          if (Array.isArray(ps.clips)) setClips(ps.clips);
-          if (ps.activeClipId) setActiveClipId(ps.activeClipId);
-          if (ps.stageType) setStageType(ps.stageType);
-          if (typeof ps.stageOpacity === 'number') setStageOpacity(ps.stageOpacity);
-          if (ps.groundConfig) setGroundConfig(ps.groundConfig);
-          if (ps.dummyOpponent) setDummyOpponent(ps.dummyOpponent);
-          if (ps.combatFx) setCombatFx(ps.combatFx);
-          if (ps.cameraShake) nextShake = ps.cameraShake;
-          if (Array.isArray(ps.cameraKeyframes)) nextCamKf = ps.cameraKeyframes;
-          if (ps.playbackMode) nextPlaybackMode = ps.playbackMode;
-          if (ps.brushSettings) handleChangeBrushSettings({ ...DEFAULT_BRUSH_SETTINGS, ...ps.brushSettings });
-          if (Array.isArray(ps.activePaletteColors)) nextPalette = ps.activePaletteColors;
-          if (typeof ps.fps === 'number') nextFps = ps.fps;
-          if (ps.primaryColor) setPrimaryColor(ps.primaryColor);
-          if (ps.secondaryColor) setSecondaryColor(ps.secondaryColor);
-          if (Array.isArray(ps.references)) nextRefs = ps.references;
-          if (Array.isArray(ps.referenceGroups)) nextRefGroups = ps.referenceGroups;
-          if (Array.isArray(ps.timelineMarkers)) nextMarkers = ps.timelineMarkers;
-        }
+        forceCloseDocumentTab(docId);
       }
+    },
+    [forceCloseDocumentTab]
+  );
 
-      const openedSnapshot: OpenDocumentSnapshot = {
-        name: nextName,
-        width: nextW,
-        height: nextH,
-        frames: nextFrames,
-        currentFrameIndex: nextFrameIdx,
-        currentLayerIndex: nextLayerIdx,
-        layerGroups: nextGroups,
-        globalPivot: nextPivot,
-        actionTags: nextActionTags,
-        playbackMode: nextPlaybackMode,
-        fps: nextFps,
-        references: nextRefs,
-        referenceGroups: nextRefGroups,
-        timelineMarkers: nextMarkers,
-        cameraShake: nextShake,
-        cameraKeyframes: nextCamKf,
-        activePaletteColors: nextPalette,
+  const handleCloseDocumentTab = handleRequestCloseDocumentTab;
+
+  const handleReorderDocumentTabs = useCallback((draggedId: string, targetId: string) => {
+    if (!draggedId || !targetId || draggedId === targetId) return;
+    setOpenDocuments((prev) => {
+      const fromIdx = prev.findIndex((d) => d.id === draggedId);
+      const toIdx = prev.findIndex((d) => d.id === targetId);
+      if (fromIdx < 0 || toIdx < 0) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(fromIdx, 1);
+      next.splice(toIdx, 0, moved);
+      return next;
+    });
+  }, []);
+
+  const buildProjectStateForDocument = useCallback(
+    (doc: DocumentTabEntry, overrideName?: string): ProjectState => {
+      const isLive = doc.id === activeDocumentIdRef.current || !doc.snapshot;
+      const snap = isLive ? null : doc.snapshot;
+      return {
+        name: overrideName || (isLive ? projectName : snap!.name),
+        width: isLive ? canvasWidth : snap!.width,
+        height: isLive ? canvasHeight : snap!.height,
+        frames: isLive ? framesRef.current : snap!.frames,
+        clips,
+        actionTags: isLive ? actionTagsRef.current : snap!.actionTags || [],
+        layerGroups: isLive ? layerGroupsRef.current : snap!.layerGroups || [],
+        activeClipId,
+        activeActionTagId,
+        currentFrameIndex: isLive ? currentFrameIndexRef.current : snap!.currentFrameIndex || 0,
+        currentLayerIndex: isLive ? currentLayerIndexRef.current : snap!.currentLayerIndex || 0,
+        primaryColor,
+        primaryAlpha,
+        secondaryColor,
+        secondaryAlpha,
+        activeTool,
+        brushSize,
+        pixelPerfect,
+        ditherPattern,
+        activeHitboxType,
+        symmetryEnabled,
+        symmetryAxis,
+        showGrid,
+        showHitboxes,
+        showPivot,
+        globalPivot: isLive ? globalPivot : snap!.globalPivot,
+        stageType,
+        stageOpacity,
+        groundConfig,
+        dummyOpponent,
+        combatFx,
+        cameraShake: isLive ? cameraShake : snap!.cameraShake || cameraShake,
+        cameraKeyframes: isLive ? cameraKeyframesRef.current : snap!.cameraKeyframes || [],
+        onionSkinEnabled,
+        onionSkinPrev,
+        onionSkinNext,
+        onionSkinOpacity,
+        playbackMode: isLive ? playbackMode : snap!.playbackMode || 'loop',
+        activeGroupId,
+        isolateActiveGroup,
+        brushSettings,
+        activePaletteColors: isLive ? activePaletteColors : snap!.activePaletteColors || activePaletteColors,
+        fps: isLive ? animationFps : snap!.fps || 12,
+        references: isLive ? referencesRef.current : snap!.references || [],
+        referenceGroups: isLive ? referenceGroupsRef.current : snap!.referenceGroups || [],
+        timelineMarkers: isLive ? timelineMarkersRef.current : snap!.timelineMarkers || [],
+        guides: isLive ? guidesRef.current : snap!.guides || [],
+        workMode: isLive ? workMode : snap!.workMode || 'fighter',
       };
+    },
+    [
+      projectName, canvasWidth, canvasHeight, clips, activeClipId, activeActionTagId,
+      primaryColor, primaryAlpha, secondaryColor, secondaryAlpha, activeTool, brushSize,
+      pixelPerfect, ditherPattern, activeHitboxType, symmetryEnabled, symmetryAxis,
+      showGrid, showHitboxes, showPivot, globalPivot, stageType, stageOpacity,
+      groundConfig, dummyOpponent, combatFx, cameraShake, onionSkinEnabled, onionSkinPrev,
+      onionSkinNext, onionSkinOpacity, playbackMode, activeGroupId, isolateActiveGroup,
+      brushSettings, activePaletteColors, animationFps, workMode,
+    ]
+  );
 
-      const shouldCreateNewTab = !isCurrentDocumentBlank();
-      if (shouldCreateNewTab) {
-        const currentSnap = buildCurrentDocumentSnapshot();
-        const newDocId = `doc-${Date.now()}`;
-        setOpenDocuments((prev) => [
-          ...prev.map((d) =>
-            d.id === activeDocumentId
-              ? { ...d, name: currentSnap.name, width: currentSnap.width, height: currentSnap.height, snapshot: currentSnap }
-              : d
-          ),
-          { id: newDocId, name: nextName, width: nextW, height: nextH, snapshot: null },
-        ]);
-        setActiveDocumentId(newDocId);
+  const handleSaveDocumentInFormat = useCallback(
+    async (
+      docId: string,
+      format: SaveAsFormatId,
+      opts?: { fileName?: string; scale?: number; jpgBackgroundColor?: string; silent?: boolean }
+    ): Promise<boolean> => {
+      const doc = openDocumentsRef.current.find((d) => d.id === docId);
+      if (!doc) return false;
+      try {
+        const cleanTitle = (opts?.fileName || doc.name || 'Proyecto').trim();
+        const projectObj = buildProjectStateForDocument(doc, cleanTitle);
+        const exported = await exportProjectToFormat(projectObj, format, {
+          fileName: cleanTitle,
+          scale: opts?.scale ?? 1,
+          jpgBackgroundColor: opts?.jpgBackgroundColor,
+          currentFrameIndex: projectObj.currentFrameIndex,
+        });
+        downloadBlob(exported.blob, exported.filename);
+        markDocumentSaved(docId, format, cleanTitle);
+
+        const recFmt: RecentProjectFileFormat =
+          format === 'spritesheet' ? 'png' : format;
+        const snapForRec: OpenDocumentSnapshot =
+          doc.id === activeDocumentIdRef.current
+            ? { ...buildCurrentDocumentSnapshot(), name: cleanTitle }
+            : { ...(doc.snapshot || buildCurrentDocumentSnapshot()), name: cleanTitle };
+        recordRecentProject({
+          name: cleanTitle,
+          width: projectObj.width,
+          height: projectObj.height,
+          frames: projectObj.frames,
+          layerGroups: projectObj.layerGroups,
+          category: format.toUpperCase(),
+          path: `Proyectos/${exported.filename}`,
+          fileFormat: recFmt,
+          fileSize: exported.blob.size,
+          snapshot: snapForRec,
+          fileBlob: exported.blob,
+          fileName: exported.filename,
+        });
+
+        if (!opts?.silent) {
+          setImportNotification(`Guardado correctamente: ${exported.filename}`);
+          setTimeout(() => setImportNotification(null), 3500);
+        }
+        return true;
+      } catch (err: any) {
+        setImportNotification(`Error al guardar documento: ${err?.message || 'Error desconocido'}`);
+        setTimeout(() => setImportNotification(null), 4500);
+        return false;
       }
+    },
+    [buildProjectStateForDocument, buildCurrentDocumentSnapshot, markDocumentSaved, recordRecentProject]
+  );
 
-      applyDocumentSnapshot(openedSnapshot);
-      const lowerFile = file.name.toLowerCase();
-      const fmt: 'pcs' | 'json' | 'psd' | 'ase' | 'png' = lowerFile.endsWith('.pcs')
-        ? 'pcs'
-        : lowerFile.endsWith('.json')
-        ? 'json'
-        : lowerFile.endsWith('.psd')
-        ? 'psd'
-        : lowerFile.endsWith('.ase') || lowerFile.endsWith('.aseprite')
-        ? 'ase'
-        : 'png';
-      recordRecentProject({
-        name: nextName,
-        width: nextW,
-        height: nextH,
-        frames: nextFrames,
-        layerGroups: nextGroups,
-        category: `Documento .${fmt.toUpperCase()}`,
-        path: (file as any).webkitRelativePath || `Documentos/${file.name}`,
-        fileFormat: fmt,
-        snapshot: openedSnapshot,
+  const handleOpenSaveAsModal = useCallback(
+    (docId?: string, afterSaveAction: 'close_doc' | null = null) => {
+      const targetId = docId || activeDocumentIdRef.current;
+      const doc = openDocumentsRef.current.find((d) => d.id === targetId);
+      const nameToUse = doc ? doc.name : projectName;
+      const fmtToUse: SaveAsFormatId = doc?.savedFormat || 'pcs';
+      setSaveAsModalState({
+        docId: targetId,
+        initialName: nameToUse,
+        initialFormat: fmtToUse,
+        afterSaveAction,
       });
-      const isPcs = lowerFile.endsWith('.pcs');
-      setImportNotification(
-        isPcs
-          ? `Documento .PCS abierto${shouldCreateNewTab ? ' en nueva pestaña' : ''}: ${file.name} (${nextFrames.length} frames)`
-          : `Documento abierto${shouldCreateNewTab ? ' en nueva pestaña' : ''}: ${file.name} (${nextW}×${nextH}px)`
-      );
-      setTimeout(() => setImportNotification(null), 3800);
-    } catch (err: any) {
-      console.error('Error al abrir documento:', err);
-      setImportNotification(`Error al abrir "${file.name}": ${err?.message || 'formato inválido'}`);
-      setTimeout(() => setImportNotification(null), 5000);
+    },
+    [projectName]
+  );
+
+  // Smart Save (Ctrl+S): If document has no saved location yet, opens "Guardar como..." format dialog;
+  // otherwise saves directly in its saved format and clears the dirty indicator (*).
+  const handleSmartSave = useCallback(async () => {
+    const activeId = activeDocumentIdRef.current;
+    const doc = openDocumentsRef.current.find((d) => d.id === activeId);
+    if (!doc || !doc.hasSavedLocation) {
+      handleOpenSaveAsModal(activeId, null);
+      return;
     }
-  };
+    const fmt: SaveAsFormatId = doc.savedFormat || 'pcs';
+    if (fmt === 'pcs') {
+      await handleSaveProjectPcs();
+    } else {
+      await handleSaveDocumentInFormat(activeId, fmt);
+    }
+  }, [handleOpenSaveAsModal, handleSaveProjectPcs, handleSaveDocumentInFormat]);
+
+  const handleRequestCloseAllDocuments = useCallback(
+    (fromElectronExit: boolean = false) => {
+      const dirtyDocs = openDocumentsRef.current.filter((d) => d.isDirty);
+      if (dirtyDocs.length === 0) {
+        if (fromElectronExit) {
+          void getDesktopBridge()?.confirmAppClose?.();
+        } else {
+          const blankSnap = createFreshBlankDocumentSnapshot('Proyecto 1', 48, 48);
+          const freshId = `doc-blank-${Date.now()}`;
+          setOpenDocuments([
+            {
+              id: freshId,
+              name: blankSnap.name,
+              width: blankSnap.width,
+              height: blankSnap.height,
+              snapshot: null,
+              isDirty: false,
+              isNewUnsaved: true,
+              hasSavedLocation: false,
+            },
+          ]);
+          activeDocumentIdRef.current = freshId;
+          setActiveDocumentId(freshId);
+          applyDocumentSnapshot(blankSnap);
+          setImportNotification('Todos los documentos han sido cerrados.');
+          setTimeout(() => setImportNotification(null), 2600);
+        }
+        return;
+      }
+      setIsAppClosingFromElectron(fromElectronExit);
+      setUnsavedAppCloseModalOpen(true);
+    },
+    [applyDocumentSnapshot, createFreshBlankDocumentSnapshot]
+  );
+
+  const completeAllDocumentsClose = useCallback(() => {
+    setUnsavedAppCloseModalOpen(false);
+    if (isAppClosingFromElectron) {
+      setIsAppClosingFromElectron(false);
+      void getDesktopBridge()?.confirmAppClose?.();
+      return;
+    }
+    const blankSnap = createFreshBlankDocumentSnapshot('Proyecto 1', 48, 48);
+    const freshId = `doc-blank-${Date.now()}`;
+    setOpenDocuments([
+      {
+        id: freshId,
+        name: blankSnap.name,
+        width: blankSnap.width,
+        height: blankSnap.height,
+        snapshot: null,
+        isDirty: false,
+        isNewUnsaved: true,
+        hasSavedLocation: false,
+      },
+    ]);
+    activeDocumentIdRef.current = freshId;
+    setActiveDocumentId(freshId);
+    applyDocumentSnapshot(blankSnap);
+  }, [isAppClosingFromElectron, applyDocumentSnapshot, createFreshBlankDocumentSnapshot]);
+
+  const handleBatchSaveSelectedAndClose = useCallback(
+    async (selectedIds: string[]) => {
+      setIsBatchSavingDocs(true);
+      try {
+        for (const docId of selectedIds) {
+          const doc = openDocumentsRef.current.find((d) => d.id === docId);
+          if (!doc) continue;
+          await handleSaveDocumentInFormat(docId, doc.savedFormat || 'pcs', { silent: true });
+        }
+        setImportNotification(`${selectedIds.length} documento(s) guardados antes de cerrar.`);
+        setTimeout(() => setImportNotification(null), 3200);
+        completeAllDocumentsClose();
+      } finally {
+        setIsBatchSavingDocs(false);
+      }
+    },
+    [handleSaveDocumentInFormat, completeAllDocumentsClose]
+  );
+
+  // Sync unsaved dirty state to Electron window + browser beforeunload + desktop exit listener
+  const hasAnyDirtyDocument = useMemo(
+    () => openDocuments.some((d) => d.isDirty),
+    [openDocuments]
+  );
+
+  useEffect(() => {
+    void getDesktopBridge()?.setUnsavedState?.(hasAnyDirtyDocument);
+  }, [hasAnyDirtyDocument]);
+
+  useEffect(() => {
+    if (!hasAnyDirtyDocument) return;
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [hasAnyDirtyDocument]);
+
+  useEffect(() => {
+    const bridge = getDesktopBridge();
+    if (!bridge?.onRequestAppClose) return;
+    const unsub = bridge.onRequestAppClose(() => {
+      handleRequestCloseAllDocuments(true);
+    });
+    return () => {
+      if (typeof unsub === 'function') unsub();
+    };
+  }, [handleRequestCloseAllDocuments]);
 
   // =========================================================================
-  // IMPORTAR AL PROYECTO ACTUAL (Jamás reemplaza ni abre un documento nuevo)
+  // GLOBAL OS CLIPBOARD INTEGRATION (Transparent RGBA Paste, Auto-Checkerboard,
+  // Smart Paste Modal / Quick Paste, Paste as Reference, New from Clipboard)
+  // =========================================================================
+  const applyAutoCheckerboardIfTransparent = useCallback(
+    (pastedHasTransparency: boolean) => {
+      if (!pastedHasTransparency || stageType === 'checkerboard') return;
+      const curFrame = framesRef.current[currentFrameIndexRef.current];
+      if (!curFrame) return;
+      const composed = compositeFrame(
+        curFrame,
+        canvasWidth,
+        canvasHeight,
+        currentFrameIndexRef.current,
+        false,
+        layerGroupsRef.current
+      );
+      if (gridHasTransparency(composed, canvasWidth, canvasHeight)) {
+        setStageType('checkerboard');
+      }
+    },
+    [stageType, canvasWidth, canvasHeight]
+  );
+
+  const executeClipboardImagePaste = useCallback(
+    (
+      payload: ClipboardImagePayload,
+      destination: ClipboardPasteDestination,
+      fitMode: ClipboardFitMode
+    ) => {
+      const now = Date.now();
+      const labelBase = `Portapapeles ${payload.formatLabel}`;
+
+      if (destination === 'new_document') {
+        const w = payload.width;
+        const h = payload.height;
+        const exactGrid = rgbaBufferToPixelGrid(payload.rgba.data, w, h).grid;
+        const newSnap: OpenDocumentSnapshot = {
+          name: `Portapapeles ${w}×${h}`,
+          width: w,
+          height: h,
+          frames: [
+            {
+              id: `frame-clip-${now}`,
+              name: 'Frame 1',
+              durationTicks: 4,
+              durationMs: 83,
+              phase: 'neutral',
+              layers: [
+                {
+                  id: `layer-clip-${now}`,
+                  name: labelBase,
+                  visible: true,
+                  locked: false,
+                  opacity: 1,
+                  fillOpacity: 1,
+                  blendMode: 'normal',
+                  pixels: exactGrid,
+                },
+              ],
+              hitboxes: [],
+            },
+          ],
+          currentFrameIndex: 0,
+          currentLayerIndex: 0,
+          layerGroups: [],
+          globalPivot: { x: Math.floor(w / 2), y: Math.floor(h * 0.8) },
+          actionTags: [],
+          playbackMode: 'loop',
+          fps: 12,
+          references: [],
+          referenceGroups: [],
+          timelineMarkers: [],
+          cameraShake: { ...cameraShake },
+          cameraKeyframes: [],
+          activePaletteColors: [...activePaletteColors],
+          guides: [],
+          workMode: 'fighter',
+        };
+        hydrateOpenedDocumentSnapshot(newSnap, payload.formatLabel, {
+          isDirty: true,
+          isNewUnsaved: true,
+          hasSavedLocation: false,
+        });
+        if (payload.hasTransparency) {
+          setStageType('checkerboard');
+        }
+        setImportNotification(
+          `Nuevo documento creado desde portapapeles (${w}×${h} px${payload.hasTransparency ? ' · RGBA transparente' : ''}).`
+        );
+        setTimeout(() => setImportNotification(null), 3500);
+        return;
+      }
+
+      if (destination === 'reference_canvas' || destination === 'reference_panel') {
+        const anchorMode = destination === 'reference_panel' ? 'camera' : 'canvas';
+        const newRef: ReferenceItem = {
+          id: `ref-clip-${now}-${Math.random().toString(36).slice(2, 5)}`,
+          name: `${labelBase} (${payload.width}×${payload.height})`,
+          dataUrl: payload.dataUrl,
+          naturalWidth: payload.width,
+          naturalHeight: payload.height,
+          groupId: null,
+          visible: true,
+          locked: false,
+          opacity: destination === 'reference_panel' ? 1 : 0.78,
+          blendMode: 'normal',
+          scale: 1,
+          rotation: 0,
+          flipX: false,
+          flipY: false,
+          x: anchorMode === 'camera' ? 200 : 0,
+          y: anchorMode === 'camera' ? -20 : 0,
+          boardX: 30,
+          boardY: 28,
+          boardScale: 1,
+          boardRotation: 0,
+          anchor: anchorMode,
+          useAsAiGuide: false,
+        };
+        const nextRefs = [newRef, ...referencesRef.current];
+        referencesRef.current = nextRefs;
+        setReferences(nextRefs);
+        setActiveReferenceId(newRef.id);
+        pushHistorySnapshot({ references: nextRefs });
+        if (destination === 'reference_panel') {
+          handleFocusPanel('references');
+        }
+        setImportNotification(
+          destination === 'reference_panel'
+            ? `Imagen pegada en el Panel de Referencias (${payload.width}×${payload.height} px).`
+            : `Imagen pegada como Referencia sobre el lienzo (${payload.width}×${payload.height} px).`
+        );
+        setTimeout(() => setImportNotification(null), 3200);
+        return;
+      }
+
+      if (destination === 'asset_library') {
+        const assetGrid = rasterizeClipboardImageToGrid(payload, canvasWidth, canvasHeight, fitMode);
+        const newAsset: AssetLibraryItem = {
+          id: `asset-clip-${now}`,
+          name: `${labelBase} ${payload.width}×${payload.height}`,
+          category: 'character',
+          origin: 'user',
+          width: canvasWidth,
+          height: canvasHeight,
+          pixels: assetGrid,
+          createdAt: new Date().toISOString(),
+          folder: 'Mis Uploads',
+          tags: ['portapapeles'],
+          mediaDataUrl: payload.dataUrl,
+        };
+        const nextAssets = [newAsset, ...userLibraryItemsRef.current];
+        userLibraryItemsRef.current = nextAssets;
+        setUserLibraryItems(nextAssets);
+        pushHistorySnapshot({ userLibraryItems: nextAssets });
+        handleFocusPanel('library');
+        setImportNotification(`Imagen pegada como Asset en la librería (${payload.width}×${payload.height} px).`);
+        setTimeout(() => setImportNotification(null), 3200);
+        return;
+      }
+
+      // Layer-based destinations ('new_layer', 'selected_group', 'current_frame', 'all_frames')
+      // STRICT SAFETY: NEVER overwrite existing layers, strictly preserve alpha transparency.
+      const grid = rasterizeClipboardImageToGrid(payload, canvasWidth, canvasHeight, fitMode);
+      const curFIdx = currentFrameIndexRef.current;
+      const curLIdx = currentLayerIndexRef.current;
+      const activeFrame = framesRef.current[curFIdx];
+      const activeLayer = activeFrame?.layers[curLIdx];
+      const targetGroupId =
+        destination === 'selected_group'
+          ? activeLayer?.groupId ?? activeGroupId ?? null
+          : destination === 'new_layer'
+          ? null
+          : activeLayer?.groupId ?? activeGroupId ?? null;
+
+      applyAutoCheckerboardIfTransparent(payload.hasTransparency);
+
+      if (destination === 'all_frames') {
+        const updatedFrames = framesRef.current.map((fr, idx) => ({
+          ...fr,
+          layers: [
+            ...fr.layers,
+            {
+              id: `layer-clip-all-${now}-${idx}`,
+              name: `${labelBase}`,
+              visible: true,
+              locked: false,
+              opacity: 1,
+              fillOpacity: 1,
+              blendMode: 'normal' as const,
+              groupId: targetGroupId,
+              pixels: grid.map((r) => [...r]),
+            },
+          ],
+        }));
+        const nextLayerIdx = updatedFrames[curFIdx].layers.length - 1;
+        framesRef.current = updatedFrames;
+        setFrames(updatedFrames);
+        currentLayerIndexRef.current = nextLayerIdx;
+        setCurrentLayerIndex(nextLayerIdx);
+        setSelectedLayerIndices([nextLayerIdx]);
+        pushHistorySnapshot({ frames: updatedFrames, currentLayerIndex: nextLayerIdx });
+        setImportNotification(
+          `Imagen pegada en nueva capa en los ${updatedFrames.length} frames (${payload.width}×${payload.height} px).`
+        );
+        setTimeout(() => setImportNotification(null), 3200);
+        return;
+      }
+
+      // 'new_layer' | 'selected_group' | 'current_frame'
+      const insertAt = Math.min(
+        (activeFrame?.layers.length ?? 0),
+        curLIdx + 1
+      );
+      const updatedFrames = framesRef.current.map((fr, fIdx) => {
+        if (fIdx !== curFIdx) return fr;
+        const newLayer: Layer = {
+          id: `layer-clip-${now}`,
+          name: `${labelBase}`,
+          visible: true,
+          locked: false,
+          opacity: 1,
+          fillOpacity: 1,
+          blendMode: 'normal',
+          groupId: targetGroupId,
+          pixels: grid,
+        };
+        const nextLayers = [...fr.layers];
+        nextLayers.splice(insertAt, 0, newLayer);
+        return { ...fr, layers: nextLayers };
+      });
+      framesRef.current = updatedFrames;
+      setFrames(updatedFrames);
+      currentLayerIndexRef.current = insertAt;
+      setCurrentLayerIndex(insertAt);
+      setSelectedLayerIndices([insertAt]);
+      pushHistorySnapshot({ frames: updatedFrames, currentLayerIndex: insertAt });
+      const groupInfo = targetGroupId
+        ? ` en grupo "${layerGroupsRef.current.find((g) => g.id === targetGroupId)?.name || 'Carpeta'}"`
+        : '';
+      setImportNotification(
+        `Imagen pegada en nueva capa${groupInfo} (${payload.width}×${payload.height} px${payload.hasTransparency ? ' · RGBA' : ''}).`
+      );
+      setTimeout(() => setImportNotification(null), 3200);
+    },
+    [
+      canvasWidth,
+      canvasHeight,
+      activeGroupId,
+      cameraShake,
+      activePaletteColors,
+      hydrateOpenedDocumentSnapshot,
+      applyAutoCheckerboardIfTransparent,
+      pushHistorySnapshot,
+      handleFocusPanel,
+    ]
+  );
+
+  const handleIncomingClipboardImage = useCallback(
+    (payload: ClipboardImagePayload) => {
+      if (quickPasteMode) {
+        const autoFit: ClipboardFitMode =
+          payload.width <= canvasWidth && payload.height <= canvasHeight ? 'original' : 'fit';
+        executeClipboardImagePaste(payload, 'selected_group', autoFit);
+      } else {
+        setPendingClipboardImage(payload);
+      }
+    },
+    [quickPasteMode, canvasWidth, canvasHeight, executeClipboardImagePaste]
+  );
+
+  const handleSmartGlobalPaste = useCallback(
+    async (inPlace: boolean = false) => {
+      if (inPlace && clipboard) {
+        handlePasteClipboard(true, true);
+        return;
+      }
+      const osImage = await readImageFromGlobalClipboard();
+      if (osImage) {
+        const sig = computeRgbaQuickSignature(osImage.rgba.data, osImage.width, osImage.height);
+        if (clipboard && lastInternalCopySigRef.current && sig === lastInternalCopySigRef.current) {
+          handlePasteClipboard(inPlace, true);
+        } else {
+          handleIncomingClipboardImage(osImage);
+        }
+        return;
+      }
+      if (clipboard) {
+        handlePasteClipboard(inPlace, true);
+      } else {
+        setImportNotification('El portapapeles no contiene ninguna imagen ni capa copiada.');
+        setTimeout(() => setImportNotification(null), 2800);
+      }
+    },
+    [clipboard, handlePasteClipboard, handleIncomingClipboardImage]
+  );
+
+  const handlePasteAsReference = useCallback(async () => {
+    const osImage = await readImageFromGlobalClipboard();
+    if (osImage) {
+      executeClipboardImagePaste(osImage, 'reference_canvas', 'original');
+      return;
+    }
+    setImportNotification('No se detectó ninguna imagen en el portapapeles del sistema.');
+    setTimeout(() => setImportNotification(null), 2800);
+  }, [executeClipboardImagePaste]);
+
+  const handleNewDocumentFromClipboard = useCallback(async () => {
+    const osImage = await readImageFromGlobalClipboard();
+    if (osImage) {
+      executeClipboardImagePaste(osImage, 'new_document', 'original');
+      return;
+    }
+    setImportNotification('No se detectó ninguna imagen en el portapapeles del sistema.');
+    setTimeout(() => setImportNotification(null), 2800);
+  }, [executeClipboardImagePaste]);
+
+  // Global OS native 'paste' event listener (Ctrl+V from Chrome, Photoshop, Aseprite, Krita,
+  // File Explorer, Screenshots, Discord, WhatsApp, etc.)
+  useEffect(() => {
+    const onGlobalPaste = async (e: ClipboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+
+      const eventImage = await readImageFromClipboardEvent(e);
+      if (eventImage) {
+        e.preventDefault();
+        const sig = computeRgbaQuickSignature(eventImage.rgba.data, eventImage.width, eventImage.height);
+        if (clipboard && lastInternalCopySigRef.current && sig === lastInternalCopySigRef.current) {
+          handlePasteClipboard(false, true);
+        } else {
+          handleIncomingClipboardImage(eventImage);
+        }
+        return;
+      }
+
+      // If Electron native clipboard holds an image that Chromium didn't expose in ClipboardEvent
+      const electronImg = await readImageFromGlobalClipboard();
+      if (electronImg) {
+        e.preventDefault();
+        const sig = computeRgbaQuickSignature(electronImg.rgba.data, electronImg.width, electronImg.height);
+        if (clipboard && lastInternalCopySigRef.current && sig === lastInternalCopySigRef.current) {
+          handlePasteClipboard(false, true);
+        } else {
+          handleIncomingClipboardImage(electronImg);
+        }
+        return;
+      }
+
+      // Fallback to internal PixelClash layer/selection clipboard
+      if (clipboard) {
+        e.preventDefault();
+        handlePasteClipboard(false, true);
+      }
+    };
+
+    window.addEventListener('paste', onGlobalPaste);
+    return () => window.removeEventListener('paste', onGlobalPaste);
+  }, [clipboard, handlePasteClipboard, handleIncomingClipboardImage]);
+
+  // =========================================================================
+  // IMPORTAR AL PROYECTO ACTUAL (Sistema unificado de decodificación)
   // =========================================================================
   const executeImportIntoProject = useCallback(
     async (
@@ -7361,15 +9028,22 @@ export default function App() {
     ) => {
       if (!files || files.length === 0) return;
 
+      if (mode === 'spritesheet') {
+        await handleOpenDocumentFile(files[0], { forceSpritesheetSlicer: true });
+        return;
+      }
+
       if (mode === 'smart') {
-        const imageFiles = files.filter(
-          (f) => /\.(png|jpe?g|webp|gif)$/i.test(f.name) || f.type.startsWith('image/')
-        );
+        const imageFiles = files.filter((f) => isSupportedImageFile(f));
         if (imageFiles.length > 0) {
           setSmartImportFiles(imageFiles);
         } else {
-          setImportNotification('Selecciona imágenes (PNG, JPG, WEBP, GIF) para Importación Inteligente.');
-          setTimeout(() => setImportNotification(null), 3000);
+          reportFileLoadFailure(
+            files[0].name,
+            new Error(
+              'Selecciona imágenes compatibles (PNG, JPG, JPEG, WEBP, GIF, BMP, TIFF, TGA, ICO) para Importación Inteligente.'
+            )
+          );
         }
         return;
       }
@@ -7615,7 +9289,7 @@ export default function App() {
         if (mode === 'palette') {
           const file = files[0];
           let colors: string[] = [];
-          if (/\.(png|jpe?g|webp|gif)$/i.test(file.name) || file.type.startsWith('image/')) {
+          if (isSupportedImageFile(file)) {
             colors = await extractPaletteFromImageFile(file, 32);
           } else {
             const text = await file.text();
@@ -7664,27 +9338,11 @@ export default function App() {
 
         if (mode === 'external_project') {
           const file = files[0];
-          let extFrames: Frame[] = [];
-          let extW = canvasWidth;
-          let extH = canvasHeight;
-          let extName = file.name.replace(/\.[^.]+$/, '');
-
-          if (file.name.toLowerCase().endsWith('.json')) {
-            const json = JSON.parse(await file.text());
-            if (!json.width || !json.height || !Array.isArray(json.frames)) {
-              throw new Error('El JSON no contiene un proyecto válido.');
-            }
-            extW = json.width;
-            extH = json.height;
-            extFrames = json.frames;
-            extName = json.name || extName;
-          } else {
-            const res = await importGraphicFile(file);
-            extW = res.width;
-            extH = res.height;
-            extFrames = res.frames;
-            extName = res.name || extName;
-          }
+          const res = await importGraphicFile(file);
+          const extW = res.width;
+          const extH = res.height;
+          const extFrames = res.frames;
+          const extName = res.name || file.name.replace(/\.[^.]+$/, '');
 
           if (extFrames.length === 0) throw new Error('El proyecto externo no contiene fotogramas.');
           const normalizedFrames =
@@ -7741,9 +9399,7 @@ export default function App() {
           setTimeout(() => setImportNotification(null), 3800);
         }
       } catch (err: any) {
-        console.error('Error al importar al proyecto:', err);
-        setImportNotification(`Error al importar: ${err?.message || 'archivo no compatible'}`);
-        setTimeout(() => setImportNotification(null), 4500);
+        reportFileLoadFailure(files[0]?.name || 'Archivo', err, 'Importación');
       }
     },
     [
@@ -7756,6 +9412,8 @@ export default function App() {
       handleChangeBrushSettings,
       handleSelectTool,
       handleFocusPanel,
+      handleOpenDocumentFile,
+      reportFileLoadFailure,
       pushHistorySnapshot,
     ]
   );
@@ -7837,9 +9495,7 @@ export default function App() {
       e.preventDefault();
       setIsExternalFileDragOver(false);
       const dropped = Array.from(e.dataTransfer.files);
-      const images = dropped.filter(
-        (f) => /\.(png|jpe?g|webp|gif)$/i.test(f.name) || f.type.startsWith('image/')
-      );
+      const images = dropped.filter((f) => isSupportedImageFile(f));
       if (images.length > 0) {
         setSmartImportFiles(images);
         return;
@@ -7852,14 +9508,18 @@ export default function App() {
         executeImportIntoProject(dropped, 'config');
       } else if (lower.endsWith('.pcsbrush')) {
         executeImportIntoProject(dropped, 'brush');
-      } else if (/\.(pcs|ase|aseprite|psd)$/.test(lower)) {
-        handleOpenDocumentFile(first);
+      } else if (/\.(pcs|ase|aseprite|psd|json)$/.test(lower)) {
+        void handleOpenDocumentFile(first);
       } else {
-        setImportNotification(`Formato no reconocido para soltar: "${first.name}".`);
-        setTimeout(() => setImportNotification(null), 3000);
+        reportFileLoadFailure(
+          first.name,
+          new Error(
+            `Formato no reconocido al arrastrar "${first.name}". Usa PNG, JPG, JPEG, WEBP, GIF, BMP, TIFF, TGA, ICO, ASE, ASEPRITE, PSD, PCS o JSON.`
+          )
+        );
       }
     },
-    [executeImportIntoProject]
+    [executeImportIntoProject, handleOpenDocumentFile, reportFileLoadFailure]
   );
 
   // System 3: Unified Command Dispatcher & Macro Recorder / Runner
@@ -7888,10 +9548,10 @@ export default function App() {
           setShortcutsModalOpen(true);
           break;
         case 'cmd.save_pcs':
-          handleSaveProjectPcs();
+          void handleSmartSave();
           break;
         case 'cmd.open_file':
-          fileInputRef.current?.click();
+          void handleOpenFilePicker();
           break;
         case 'cmd.smart_import':
           handleTriggerImport('smart');
@@ -7966,7 +9626,7 @@ export default function App() {
           handleCutLayerOrSelection();
           break;
         case 'edit.paste':
-          handlePasteClipboard(false, true);
+          void handleSmartGlobalPaste(false);
           break;
         case 'edit.paste_in_place':
           handlePasteClipboard(true, true);
@@ -8140,12 +9800,14 @@ export default function App() {
     [
       isRecordingMacro,
       shortcutBindings,
-      handleSaveProjectPcs,
+      handleSmartSave,
+      handleOpenFilePicker,
       openLayoutModal,
       handleUndo,
       handleRedo,
       handleCopyLayerOrSelection,
       handleCutLayerOrSelection,
+      handleSmartGlobalPaste,
       handlePasteClipboard,
       handleSmartDelete,
       secondaryColor,
@@ -8270,6 +9932,16 @@ export default function App() {
         });
         return;
       }
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        handleOpenSaveAsModal();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'w') {
+        e.preventDefault();
+        handleRequestCloseDocumentTab(activeDocumentIdRef.current);
+        return;
+      }
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'i') {
         e.preventDefault();
         handleTriggerImport('smart');
@@ -8300,6 +9972,16 @@ export default function App() {
           matchesShortcutEvent(e, b.primary) ||
           (b.secondary && matchesShortcutEvent(e, b.secondary))
         ) {
+          // Let native Ctrl+V / Cmd+V reach window 'paste' event so browser delivers full OS ClipboardEvent
+          if (
+            b.id === 'edit.paste' &&
+            (e.ctrlKey || e.metaKey) &&
+            !e.shiftKey &&
+            !e.altKey &&
+            e.key.toLowerCase() === 'v'
+          ) {
+            return;
+          }
           e.preventDefault();
           setAltKeyHeld(false);
           executeCommandById(b.id);
@@ -8336,6 +10018,8 @@ export default function App() {
     handleRunMacro,
     shortcutBindings,
     executeCommandById,
+    handleOpenSaveAsModal,
+    handleRequestCloseDocumentTab,
   ]);
 
   const currentProjectState: ProjectState = {
@@ -8471,6 +10155,7 @@ export default function App() {
     <Timeline
       embeddedInDock
       dockZone={dockZone === 'floating' ? 'bottom' : dockZone}
+      performanceMode={performanceMode}
       frames={frames}
       currentFrameIndex={currentFrameIndex}
       onSelectFrame={setCurrentFrameIndex}
@@ -8631,15 +10316,17 @@ export default function App() {
       onDragLeave={handleRootExternalDragLeave}
       onDrop={handleRootExternalDrop}
     >
-      {/* Hidden Global File Input for ABRIR DOCUMENTO (.pcs, .ase, .aseprite, .psd, .png, .jpg, .webp, .json) */}
+      {/* Hidden Global File Input for ABRIR DOCUMENTO (todos los formatos compatibles) */}
       <input
         ref={fileInputRef}
         type="file"
-        accept=".pcs,.ase,.aseprite,.psd,.png,.jpg,.jpeg,.webp,.json"
+        accept={SUPPORTED_OPEN_ACCEPT}
         onChange={(e) => {
           const file = e.target.files?.[0];
+          const replaceId = relocatingRecentIdRef.current || undefined;
+          relocatingRecentIdRef.current = null;
           if (file) {
-            handleOpenDocumentFile(file);
+            void handleOpenDocumentFile(file, { replaceRecentId: replaceId });
             e.target.value = '';
           }
         }}
@@ -8664,7 +10351,7 @@ export default function App() {
           const files = e.target.files ? Array.from(e.target.files) : [];
           const mode = pendingImportMode || 'smart';
           if (files.length > 0) {
-            executeImportIntoProject(files, mode);
+            void executeImportIntoProject(files, mode);
           }
           e.target.value = '';
         }}
@@ -8686,9 +10373,9 @@ export default function App() {
             }}
           >
             <Upload className="w-8 h-8" style={{ color: 'var(--studio-accent)' }} />
-            <div className="text-sm font-bold">Suelta archivos aquí para Importación Inteligente</div>
+            <div className="text-sm font-bold">Suelta archivos aquí para Abrir o Importar</div>
             <div className="text-[11px]" style={{ color: 'var(--studio-text-muted)' }}>
-              Imágenes → elegir destino dentro del proyecto · Paletas (.hex/.gpl) · Layouts (.pcslayout) · Proyectos (.pcs/.psd)
+              Imágenes (PNG, JPG, WEBP, GIF, BMP, TIFF, TGA, ICO) · Animación (ASE, ASEPRITE, Spritesheets) · Proyectos (PCS, PSD, JSON)
             </div>
           </div>
         </div>
@@ -8706,12 +10393,16 @@ export default function App() {
       {/* Classic Menu Bar (Archivo, Edición, Imagen, Capa, Animación, Ver, Interfaz, Ayuda) */}
       <MenuBar
         onNewProject={() => setNewProjectModalOpen(true)}
-        onOpenFilePicker={() => fileInputRef.current?.click()}
+        onNewDocumentFromClipboard={() => void handleNewDocumentFromClipboard()}
+        onOpenFilePicker={() => void handleOpenFilePicker()}
         onImportAction={handleTriggerImport}
-        onSaveProjectPcs={handleSaveProjectPcs}
+        onSaveProjectPcs={() => void handleSmartSave()}
+        onOpenSaveAsModal={() => handleOpenSaveAsModal()}
         onSaveProjectJson={handleSaveProjectJson}
         onSaveProjectAse={handleSaveProjectAse}
         onSaveProjectPsd={handleSaveProjectPsd}
+        onCloseActiveDocument={() => handleRequestCloseDocumentTab(activeDocumentIdRef.current)}
+        onRequestCloseAllDocuments={() => handleRequestCloseAllDocuments(false)}
         onRestoreAutosave={handleRestoreAutosave}
         hasAutosave={hasAutosave}
         onOpenCanvasSizeModal={() => setCanvasSizeModalOpen(true)}
@@ -8792,8 +10483,22 @@ export default function App() {
         hasClipboard={Boolean(clipboard)}
         onCopy={handleCopyLayerOrSelection}
         onCut={handleCutLayerOrSelection}
-        onPaste={() => handlePasteClipboard(false, false)}
+        onPaste={() => void handleSmartGlobalPaste(false)}
         onPasteInPlace={() => handlePasteClipboard(true, true)}
+        onPasteAsReference={() => void handlePasteAsReference()}
+        quickPasteMode={quickPasteMode}
+        onToggleQuickPasteMode={() => {
+          setQuickPasteMode((prev) => {
+            const next = !prev;
+            setImportNotification(
+              next
+                ? 'Pegado rápido activado: las imágenes se pegan en nueva capa del grupo seleccionado.'
+                : 'Pegado inteligente activado: se mostrará el selector de destino al pegar.'
+            );
+            setTimeout(() => setImportNotification(null), 3000);
+            return next;
+          });
+        }}
         onAddAdjustmentLayer={() => handleCreateAdjustmentLayer(DEFAULT_ADJUSTMENT_CONFIG, 'Ajuste Color')}
         onFocusPanel={handleFocusPanel}
         onTransformAction={handleTransformAction}
@@ -8852,6 +10557,18 @@ export default function App() {
             setTimeout(() => setImportNotification(null), 2800);
             return next;
           });
+        }}
+        performanceMode={performanceMode}
+        onChangePerformanceMode={(mode) => {
+          setPerformanceMode(mode);
+          const label =
+            mode === 'quality'
+              ? 'Calidad máxima'
+              : mode === 'performance'
+              ? 'Rendimiento (prioriza FPS)'
+              : 'Equilibrado';
+          setImportNotification(`Modo de rendimiento: ${label}`);
+          setTimeout(() => setImportNotification(null), 2600);
         }}
         workMode={workMode}
         onChangeWorkMode={handleChangeWorkMode}
@@ -8988,62 +10705,89 @@ export default function App() {
         }}
       />
 
-      {/* Multi-Document Tabs Strip (shown cleanly whenever 2+ documents are open) */}
-      {openDocuments.length > 1 && (
-        <div
-          className="h-[26px] border-b flex items-center gap-1 px-2 overflow-x-auto shrink-0 select-none text-[11px]"
-          style={{
-            backgroundColor: 'var(--studio-bg-bar)',
-            borderColor: 'var(--studio-border)',
-          }}
-        >
-          {openDocuments.map((doc) => {
-            const isActive = doc.id === activeDocumentId;
-            return (
-              <div
-                key={doc.id}
-                onClick={() => handleSwitchDocumentTab(doc.id)}
-                className="flex items-center gap-1.5 px-2.5 h-[22px] rounded-t border cursor-pointer transition-colors shrink-0"
-                style={{
-                  backgroundColor: isActive ? 'var(--studio-bg-panel)' : 'transparent',
-                  borderColor: isActive ? 'var(--studio-accent)' : 'var(--studio-border)',
-                  borderBottomColor: isActive ? 'var(--studio-bg-panel)' : 'var(--studio-border)',
-                  color: isActive ? 'var(--studio-text)' : 'var(--studio-text-muted)',
-                }}
-              >
-                <FileText className="w-3 h-3 shrink-0" style={{ color: isActive ? 'var(--studio-accent)' : undefined }} />
-                <span className="font-medium truncate max-w-[140px]">{doc.name}</span>
-                <span className="text-[9px] font-mono tabular-nums opacity-60">
-                  {doc.width}×{doc.height}
-                </span>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleCloseDocumentTab(doc.id);
-                  }}
-                  title="Cerrar documento"
-                  className="p-0.5 rounded hover:bg-rose-500/20 hover:text-rose-400 transition-colors"
+      {/* Always-Visible Document Tabs Strip (visible even with 1 document open, shows dirty * and safe close) */}
+      <div
+        className="h-[28px] border-b flex items-center gap-1 px-2 overflow-x-auto shrink-0 select-none text-[11px]"
+        style={{
+          backgroundColor: 'var(--studio-bg-bar)',
+          borderColor: 'var(--studio-border)',
+        }}
+      >
+        {openDocuments.map((doc) => {
+          const isActive = doc.id === activeDocumentId;
+          return (
+            <div
+              key={doc.id}
+              draggable={openDocuments.length > 1}
+              onDragStart={() => setDraggedDocTabId(doc.id)}
+              onDragOver={(e) => {
+                if (draggedDocTabId && draggedDocTabId !== doc.id) {
+                  e.preventDefault();
+                }
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                if (draggedDocTabId && draggedDocTabId !== doc.id) {
+                  handleReorderDocumentTabs(draggedDocTabId, doc.id);
+                }
+                setDraggedDocTabId(null);
+              }}
+              onDragEnd={() => setDraggedDocTabId(null)}
+              onClick={() => handleSwitchDocumentTab(doc.id)}
+              title={`${doc.name}${doc.isDirty ? ' · Cambios sin guardar' : ' · Guardado'} (${doc.width}×${doc.height} px)`}
+              className="flex items-center gap-1.5 px-2.5 h-[23px] rounded-t border cursor-pointer transition-colors shrink-0 whitespace-nowrap"
+              style={{
+                backgroundColor: isActive ? 'var(--studio-bg-panel)' : 'transparent',
+                borderColor: isActive ? 'var(--studio-accent)' : 'var(--studio-border)',
+                borderBottomColor: isActive ? 'var(--studio-bg-panel)' : 'var(--studio-border)',
+                color: isActive ? 'var(--studio-text)' : 'var(--studio-text-muted)',
+                opacity: draggedDocTabId === doc.id ? 0.5 : 1,
+              }}
+            >
+              <FileText
+                className="w-3 h-3 shrink-0"
+                style={{ color: isActive ? 'var(--studio-accent)' : undefined }}
+              />
+              <span className="font-medium truncate max-w-[150px]">{doc.name}</span>
+              {doc.isDirty && (
+                <span
+                  className="text-amber-400 font-bold text-xs leading-none shrink-0"
+                  title="Cambios sin guardar"
                 >
-                  <X className="w-2.5 h-2.5" />
-                </button>
-              </div>
-            );
-          })}
-          <button
-            type="button"
-            onClick={() => setNewProjectModalOpen(true)}
-            title="Nuevo documento"
-            className="p-1 rounded hover:bg-white/10 transition-colors ml-0.5 shrink-0"
-            style={{ color: 'var(--studio-text-muted)' }}
-          >
-            <Plus className="w-3 h-3" />
-          </button>
-        </div>
-      )}
+                  *
+                </span>
+              )}
+              <span className="text-[9px] font-mono tabular-nums opacity-60 shrink-0">
+                {doc.width}×{doc.height}
+              </span>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleRequestCloseDocumentTab(doc.id);
+                }}
+                title={doc.isDirty ? 'Cerrar documento (hay cambios sin guardar)' : 'Cerrar documento'}
+                className="p-0.5 rounded hover:bg-rose-500/20 hover:text-rose-400 transition-colors shrink-0"
+              >
+                <X className="w-2.5 h-2.5" />
+              </button>
+            </div>
+          );
+        })}
+        <button
+          type="button"
+          onClick={() => setNewProjectModalOpen(true)}
+          title="Nuevo documento (Ctrl+N)"
+          className="p-1 rounded hover:bg-white/10 transition-colors ml-0.5 shrink-0"
+          style={{ color: 'var(--studio-text-muted)' }}
+        >
+          <Plus className="w-3.5 h-3.5" />
+        </button>
+      </div>
 
       {/* Main 6-Zone Modular Dock Workspace Area */}
       <RightSidebar
+        performanceMode={performanceMode}
         primaryColor={primaryColor}
         primaryAlpha={primaryAlpha}
         secondaryColor={secondaryColor}
@@ -9644,6 +11388,7 @@ export default function App() {
             workMode={workMode}
             stageParallaxConfig={stageParallaxConfig}
             tilesetConfig={tilesetConfig}
+            performanceMode={performanceMode}
           />
         }
       />
@@ -9672,6 +11417,7 @@ export default function App() {
           activePaletteColors={activePaletteColors}
           activeCanvasGrid={currentFrame?.layers[currentLayerIndex]?.pixels || null}
           activeCanvasLayerName={currentFrame?.layers[currentLayerIndex]?.name}
+          performanceMode={performanceMode}
           onInjectResult={handleInjectFxStudioResult}
           onShowToast={(msg) => setImportNotification(msg)}
         />
@@ -9703,10 +11449,196 @@ export default function App() {
           onConfirm={(destination: SmartImportDestination, fitMode: SmartImportFitMode) => {
             const filesToImport = [...smartImportFiles];
             setSmartImportFiles([]);
-            executeImportIntoProject(filesToImport, destination, fitMode);
+            void executeImportIntoProject(filesToImport, destination, fitMode);
+          }}
+          onOpenAsNewDocument={(file: File) => {
+            setSmartImportFiles([]);
+            void handleOpenDocumentFile(file);
           }}
           onCancel={() => setSmartImportFiles([])}
         />
+      </StudioTopLayerPortal>
+
+      {/* Missing Recent File Recovery Modal ("El archivo no se encuentra en su ubicación original.") */}
+      <StudioTopLayerPortal isOpen={missingRecentEntry !== null} tier="modal" autoFocus ariaRole="alertdialog">
+        <MissingRecentFileModal
+          isOpen={missingRecentEntry !== null}
+          entry={missingRecentEntry}
+          onLocateFile={(entry) => {
+            setMissingRecentEntry(null);
+            void handleOpenFilePicker(entry.id);
+          }}
+          onRemoveFromRecents={(entry) => {
+            handleRemoveRecentProject(entry.id);
+            setMissingRecentEntry(null);
+            setImportNotification(`"${entry.name}" eliminado de archivos recientes.`);
+            setTimeout(() => setImportNotification(null), 2600);
+          }}
+          onCancel={() => setMissingRecentEntry(null)}
+        />
+      </StudioTopLayerPortal>
+
+      {/* Descriptive File Load & Post-Validation Error Modal (never creates empty canvas) */}
+      <StudioTopLayerPortal isOpen={fileLoadError !== null} tier="modal" autoFocus ariaRole="alertdialog">
+        <FileLoadErrorModal
+          isOpen={fileLoadError !== null}
+          error={fileLoadError}
+          onRetryPickFile={() => {
+            setFileLoadError(null);
+            void handleOpenFilePicker();
+          }}
+          onClose={() => setFileLoadError(null)}
+        />
+      </StudioTopLayerPortal>
+
+      {/* Interactive Spritesheet Slicer Modal */}
+      <StudioTopLayerPortal isOpen={pendingSpritesheetOpen !== null} tier="modal" autoFocus ariaRole="dialog">
+        <SpritesheetSlicerModal
+          isOpen={pendingSpritesheetOpen !== null}
+          fileName={pendingSpritesheetOpen?.fileName || ''}
+          rawRaster={pendingSpritesheetOpen?.rawRaster || null}
+          candidate={pendingSpritesheetOpen?.candidate || null}
+          allowOpenAsSingleImage={pendingSpritesheetOpen?.allowOpenAsSingleImage !== false}
+          onConfirmSlice={handleConfirmSpritesheetSlice}
+          onOpenAsSingleImage={handleOpenSpritesheetAsSingleImage}
+          onCancel={() => setPendingSpritesheetOpen(null)}
+        />
+      </StudioTopLayerPortal>
+
+      {/* Global OS Clipboard Smart Paste Destination Modal */}
+      <StudioTopLayerPortal isOpen={pendingClipboardImage !== null} tier="modal" autoFocus ariaRole="dialog">
+        <SmartPasteModal
+          isOpen={pendingClipboardImage !== null}
+          payload={pendingClipboardImage}
+          canvasWidth={canvasWidth}
+          canvasHeight={canvasHeight}
+          activeGroupName={
+            layerGroups.find(
+              (g) => g.id === (currentFrame.layers[currentLayerIndex]?.groupId || activeGroupId)
+            )?.name || null
+          }
+          initialDontAskAgain={quickPasteMode}
+          onConfirm={({ destination, fitMode, dontAskAgain }) => {
+            const payload = pendingClipboardImage;
+            setPendingClipboardImage(null);
+            if (dontAskAgain !== quickPasteMode) {
+              setQuickPasteMode(dontAskAgain);
+            }
+            if (payload) {
+              executeClipboardImagePaste(payload, destination, fitMode);
+            }
+          }}
+          onCancel={() => setPendingClipboardImage(null)}
+        />
+      </StudioTopLayerPortal>
+
+      {/* Single Modified Document Close Protection Dialog */}
+      {(() => {
+        const pendingDoc = pendingCloseDocId
+          ? openDocuments.find((d) => d.id === pendingCloseDocId) || null
+          : null;
+        return (
+          <StudioTopLayerPortal isOpen={pendingDoc !== null} tier="critical" autoFocus ariaRole="alertdialog">
+            <UnsavedDocumentCloseModal
+              isOpen={pendingDoc !== null}
+              documentName={pendingDoc?.name || ''}
+              width={pendingDoc?.width || canvasWidth}
+              height={pendingDoc?.height || canvasHeight}
+              isNewUnsaved={Boolean(pendingDoc?.isNewUnsaved)}
+              onSave={async () => {
+                if (!pendingDoc) return;
+                const docId = pendingDoc.id;
+                setPendingCloseDocId(null);
+                if (!pendingDoc.hasSavedLocation) {
+                  handleOpenSaveAsModal(docId, 'close_doc');
+                } else {
+                  const ok = await handleSaveDocumentInFormat(
+                    docId,
+                    pendingDoc.savedFormat || 'pcs'
+                  );
+                  if (ok) forceCloseDocumentTab(docId);
+                }
+              }}
+              onDiscard={() => {
+                if (!pendingDoc) return;
+                const docId = pendingDoc.id;
+                setPendingCloseDocId(null);
+                forceCloseDocumentTab(docId);
+              }}
+              onCancel={() => setPendingCloseDocId(null)}
+            />
+          </StudioTopLayerPortal>
+        );
+      })()}
+
+      {/* Multi-Document Safe Close / Application Exit Checklist Dialog */}
+      <StudioTopLayerPortal isOpen={unsavedAppCloseModalOpen} tier="critical" autoFocus ariaRole="alertdialog">
+        <UnsavedAppCloseModal
+          isOpen={unsavedAppCloseModalOpen}
+          modifiedDocuments={openDocuments
+            .filter((d) => d.isDirty)
+            .map(
+              (d): ModifiedDocumentSummary => ({
+                id: d.id,
+                name: d.name,
+                width: d.width,
+                height: d.height,
+                isNewUnsaved: d.isNewUnsaved,
+              })
+            )}
+          isProcessing={isBatchSavingDocs}
+          onSaveSelected={(ids) => void handleBatchSaveSelectedAndClose(ids)}
+          onDiscardAll={completeAllDocumentsClose}
+          onCancel={() => {
+            setUnsavedAppCloseModalOpen(false);
+            setIsAppClosingFromElectron(false);
+          }}
+        />
+      </StudioTopLayerPortal>
+
+      {/* "Guardar como..." Format Selector Dialog (.pcs, PNG, JPG, WEBP, GIF, Spritesheet, ASE, PSD, JSON) */}
+      <StudioTopLayerPortal isOpen={saveAsModalState !== null} tier="modal" autoFocus ariaRole="dialog">
+        {(() => {
+          const targetDoc = saveAsModalState
+            ? openDocuments.find((d) => d.id === saveAsModalState.docId) || null
+            : null;
+          const isLiveDoc = !targetDoc || targetDoc.id === activeDocumentId || !targetDoc.snapshot;
+          const targetW = isLiveDoc ? canvasWidth : targetDoc.snapshot!.width;
+          const targetH = isLiveDoc ? canvasHeight : targetDoc.snapshot!.height;
+          const targetFramesCount = isLiveDoc ? frames.length : targetDoc.snapshot!.frames.length;
+          return (
+            <SaveAsFormatModal
+              isOpen={saveAsModalState !== null}
+              initialName={saveAsModalState?.initialName || projectName}
+              initialFormat={saveAsModalState?.initialFormat || 'pcs'}
+              width={targetW}
+              height={targetH}
+              framesCount={targetFramesCount}
+              isSaving={isSavingAs}
+              onConfirm={async ({ fileName, format, scale, jpgBackgroundColor }) => {
+                if (!saveAsModalState) return;
+                const { docId, afterSaveAction } = saveAsModalState;
+                setIsSavingAs(true);
+                try {
+                  const ok = await handleSaveDocumentInFormat(docId, format, {
+                    fileName,
+                    scale,
+                    jpgBackgroundColor,
+                  });
+                  if (ok) {
+                    setSaveAsModalState(null);
+                    if (afterSaveAction === 'close_doc') {
+                      forceCloseDocumentTab(docId);
+                    }
+                  }
+                } finally {
+                  setIsSavingAs(false);
+                }
+              }}
+              onCancel={() => setSaveAsModalState(null)}
+            />
+          );
+        })()}
       </StudioTopLayerPortal>
 
       {/* Canvas Size Modal */}
@@ -10209,11 +12141,11 @@ export default function App() {
           {
             id: 'file:open_document',
             title: 'Abrir Documento Independiente (Ctrl+O)',
-            subtitle: 'Archivo > Abrir Documento... (.pcs, .psd, .ase, .png)',
+            subtitle: 'Archivo > Abrir Documento... (PNG, JPG, WEBP, GIF, BMP, TIFF, TGA, ICO, ASE, PSD, PCS, JSON)',
             category: 'Ajustes',
             shortcut: 'Ctrl+O',
-            keywords: 'abrir documento archivo nuevo proyecto pestana png psd ase pcs',
-            onExecute: () => fileInputRef.current?.click(),
+            keywords: 'abrir documento archivo nuevo proyecto pestana png jpg webp gif bmp tiff tga ico psd ase pcs spritesheet',
+            onExecute: () => void handleOpenFilePicker(),
           },
           {
             id: 'file:smart_import',
