@@ -66,6 +66,24 @@ const PolygonIcon: React.FC<{ className?: string }> = ({ className }) => (
   </svg>
 );
 
+// Official Editar Lienzo icon: crop frame with manipulable corner handles
+const CanvasEditFrameIcon: React.FC<{ className?: string }> = ({ className }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    {/* Dashed inner/original frame guide */}
+    <rect x="6" y="6" width="12" height="12" strokeDasharray="2.5 2" opacity="0.65" />
+    {/* Corner L-brackets */}
+    <path d="M4 9V4h5" />
+    <path d="M20 9V4h-5" />
+    <path d="M4 15v5h5" />
+    <path d="M20 15v5h-5" />
+    {/* Manipulable corner squares */}
+    <rect x="2.5" y="2.5" width="3.2" height="3.2" fill="currentColor" stroke="none" />
+    <rect x="18.3" y="2.5" width="3.2" height="3.2" fill="currentColor" stroke="none" />
+    <rect x="2.5" y="18.3" width="3.2" height="3.2" fill="currentColor" stroke="none" />
+    <rect x="18.3" y="18.3" width="3.2" height="3.2" fill="currentColor" stroke="none" />
+  </svg>
+);
+
 type FlyoutGroupId = 'move' | 'select' | 'lasso' | 'bucket' | 'shape';
 
 interface ToolbarProps {
@@ -135,6 +153,7 @@ const TOOLS: {
   { id: 'select', label: 'Selección (General / Objetos / Capas / Referencias / Vectores / Nodos)', icon: Scan, hotkey: 'M', flyoutGroup: 'select' },
   { id: 'lasso', label: 'Lazo (Libre / Poligonal / Magnético)', icon: Lasso, hotkey: 'Q', flyoutGroup: 'lasso' },
   { id: 'magic_wand', label: 'Varita Mágica de Selección', icon: Wand2, hotkey: 'W' },
+  { id: 'canvas_edit', label: 'Editar Lienzo (Ampliar / Recortar / Spritesheet Visual)', icon: CanvasEditFrameIcon, hotkey: 'Shift+C' },
   { id: 'pencil', label: 'Lápiz / Pincel Universal (Dithering · Smear · Cel Shade en Pinceles)', icon: Pencil, hotkey: 'B' },
   { id: 'eraser', label: 'Borrador Pixel', icon: Eraser, hotkey: 'E' },
   { id: 'bucket', label: 'Bote de Pintura (Relleno / Degradado / Degradado con Dithering)', icon: PaintBucket, hotkey: 'G', flyoutGroup: 'bucket' },

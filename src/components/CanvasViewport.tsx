@@ -1,6 +1,7 @@
 import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { STUDIO_Z, StudioTopLayerPortal } from './StudioTopLayer';
+import { CanvasEditOverlay } from './CanvasEditOverlay';
 import { 
   ZoomIn, 
   ZoomOut, 
@@ -36,6 +37,8 @@ import {
   BucketToolOptions,
   CameraKeyframe,
   CameraShakeConfig,
+  CanvasEditConfig,
+  CanvasEditRect,
   CanvasGuide,
   CombatFxConfig,
   DitherConfig,
@@ -203,6 +206,13 @@ import {
   getCachedOnionSkinCanvas,
   getCachedPixelGridCanvas,
 } from '../utils/renderCache';
+import {
+  TiledLayerStore,
+  getTiledStore,
+  isFrameTiled,
+  isLayerTiled,
+  registerTiledStore,
+} from '../utils/tiledImageEngine';
 
 interface CanvasViewportProps {
   width: number;
@@ -259,6 +269,7 @@ interface CanvasViewportProps {
   primaryAlpha: number;
   secondaryColor: string;
   onUpdateLayerPixels: (pixels: (string | null)[][], offCanvasPixels?: Record<string, string>) => void;
+  onCommitTiledLayerEdit?: (layerId: string, newTiledStoreId: string) => void;
   onUpdateHitboxes: (hitboxes: Hitbox[]) => void;
   onPickColor: (color: string) => void;
   allFrames: Frame[];
@@ -368,6 +379,14 @@ interface CanvasViewportProps {
   stageParallaxConfig?: StageParallaxConfig;
   tilesetConfig?: TilesetWorkspaceConfig;
   performanceMode?: PerformanceMode;
+  // Visual Canvas Edit Tool (Editar Lienzo)
+  canvasEditRect?: CanvasEditRect;
+  canvasEditConfig?: CanvasEditConfig;
+  hasOffCanvasContent?: boolean;
+  onChangeCanvasEditRect?: (next: CanvasEditRect) => void;
+  onApplyCanvasEdit?: () => void;
+  onResetCanvasEdit?: () => void;
+  onCancelCanvasEdit?: () => void;
 }
 
 const HITBOX_RENDER_STYLES: Record<HitboxType, { stroke: string; fill: string; label: string }> = {
@@ -522,17 +541,118 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   stageParallaxConfig,
   tilesetConfig,
   performanceMode = 'balanced',
+  onCommitTiledLayerEdit,
+  canvasEditRect,
+  canvasEditConfig,
+  hasOffCanvasContent = false,
+  onChangeCanvasEditRect,
+  onApplyCanvasEdit,
+  onResetCanvasEdit,
+  onCancelCanvasEdit,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const canvasBoxRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement>(null);
   const loupeCanvasRef = useRef<HTMLCanvasElement>(null);
+  const draftTiledStoreRef = useRef<TiledLayerStore | null>(null);
+
+  // Viewport size observer for virtualized large-canvas backing buffer & dynamic fit
+  const [viewportSize, setViewportSize] = useState<{ w: number; h: number }>({ w: 1280, h: 800 });
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const syncSize = () => {
+      const r = el.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) {
+        setViewportSize((prev) =>
+          Math.abs(prev.w - r.width) > 2 || Math.abs(prev.h - r.height) > 2
+            ? { w: Math.round(r.width), h: Math.round(r.height) }
+            : prev
+        );
+      }
+    };
+    syncSize();
+    if (typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(syncSize);
+      ro.observe(el);
+      return () => ro.disconnect();
+    }
+    window.addEventListener('resize', syncSize);
+    return () => window.removeEventListener('resize', syncSize);
+  }, []);
 
   // Viewport pan & zoom
   const [zoom, setZoom] = useState<number>(12);
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState<boolean>(false);
   const [panStart, setPanStart] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+
+  // Dynamic minimum zoom: allows zooming far out on giant 4000px / 10000px / 32000px canvases
+  const minZoom = useMemo(() => {
+    const maxDim = Math.max(width, height, 1);
+    if (maxDim <= 1024) return 1;
+    const fitAll = Math.min((viewportSize.w - 64) / maxDim, (viewportSize.h - 64) / maxDim);
+    return Math.max(0.01, Math.min(1, Number((fitAll * 0.5).toFixed(4))));
+  }, [width, height, viewportSize.w, viewportSize.h]);
+
+  // Virtualized backing canvas rectangle (capped at 4096x4096 GPU-safe buffer)
+  const isVirtualViewportMode =
+    width * zoom > 3840 || height * zoom > 3840 || isFrameTiled(currentFrame);
+
+  const virtualRect = useMemo(() => {
+    const fullW = Math.max(1, Math.round(width * zoom));
+    const fullH = Math.max(1, Math.round(height * zoom));
+    if (!isVirtualViewportMode) {
+      return {
+        left: 0,
+        top: 0,
+        width: fullW,
+        height: fullH,
+        minWorldX: 0,
+        minWorldY: 0,
+        maxWorldX: width,
+        maxWorldY: height,
+      };
+    }
+
+    const MARGIN = 160;
+    const MAX_BACKING = 4096;
+    const visLeft = Math.floor(-pan.x - MARGIN);
+    const visTop = Math.floor(-pan.y - MARGIN);
+    const visRight = Math.ceil(-pan.x + viewportSize.w + MARGIN);
+    const visBottom = Math.ceil(-pan.y + viewportSize.h + MARGIN);
+
+    let left = Math.max(0, Math.min(fullW - 1, visLeft));
+    let top = Math.max(0, Math.min(fullH - 1, visTop));
+    let right = Math.max(left + 1, Math.min(fullW, visRight));
+    let bottom = Math.max(top + 1, Math.min(fullH, visBottom));
+
+    if (right - left > MAX_BACKING) {
+      const midX = Math.round((left + right) / 2);
+      left = Math.max(0, Math.min(fullW - MAX_BACKING, midX - Math.floor(MAX_BACKING / 2)));
+      right = Math.min(fullW, left + MAX_BACKING);
+    }
+    if (bottom - top > MAX_BACKING) {
+      const midY = Math.round((top + bottom) / 2);
+      top = Math.max(0, Math.min(fullH - MAX_BACKING, midY - Math.floor(MAX_BACKING / 2)));
+      bottom = Math.min(fullH, top + MAX_BACKING);
+    }
+
+    const vW = Math.max(1, right - left);
+    const vH = Math.max(1, bottom - top);
+
+    return {
+      left,
+      top,
+      width: vW,
+      height: vH,
+      minWorldX: Math.max(0, Math.floor(left / Math.max(0.0001, zoom))),
+      minWorldY: Math.max(0, Math.floor(top / Math.max(0.0001, zoom))),
+      maxWorldX: Math.min(width, Math.ceil((left + vW) / Math.max(0.0001, zoom))),
+      maxWorldY: Math.min(height, Math.ceil((top + vH) / Math.max(0.0001, zoom))),
+    };
+  }, [isVirtualViewportMode, width, height, zoom, pan.x, pan.y, viewportSize.w, viewportSize.h]);
   const panStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   panStartRef.current = panStart;
 
@@ -1241,18 +1361,34 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     };
   }, [combatTestActive, onExitCombatTest]);
 
-  // Center once on load
+  // Center once on load & auto-fit cleanly whenever document dimensions change to a large canvas
   const initializedRef = useRef<boolean>(false);
+  const lastDimsRef = useRef<{ w: number; h: number }>({ w: width, h: height });
   useEffect(() => {
-    if (!initializedRef.current && containerRef.current) {
-      const rect = containerRef.current.getBoundingClientRect();
-      const safeZoom = 12;
+    const el = containerRef.current;
+    if (!el) return;
+    const dimsChanged = lastDimsRef.current.w !== width || lastDimsRef.current.h !== height;
+    if (!initializedRef.current || (dimsChanged && (width > 256 || height > 256 || lastDimsRef.current.w > 256 || lastDimsRef.current.h > 256))) {
+      const rect = el.getBoundingClientRect();
+      const rawFit = Math.min(
+        Math.max(120, rect.width - 96) / Math.max(1, width),
+        Math.max(120, rect.height - 96) / Math.max(1, height)
+      );
+      const safeZoom =
+        width <= 96 && height <= 96
+          ? Math.max(1, Math.min(12, Math.floor(rawFit)))
+          : rawFit >= 1
+          ? Math.max(1, Math.min(12, Math.floor(rawFit)))
+          : Math.max(0.01, Number(rawFit.toFixed(4)));
       setZoom(safeZoom);
       setPan({
-        x: Math.max(40, (rect.width - width * safeZoom) / 2),
-        y: Math.max(40, (rect.height - height * safeZoom) / 2),
+        x: Math.round((rect.width - width * safeZoom) / 2),
+        y: Math.round((rect.height - height * safeZoom) / 2),
       });
       initializedRef.current = true;
+      lastDimsRef.current = { w: width, h: height };
+    } else if (dimsChanged) {
+      lastDimsRef.current = { w: width, h: height };
     }
   }, [width, height]);
 
@@ -1503,7 +1639,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
   const zoomAtClientPoint = useCallback(
     (targetZoom: number, clientX?: number, clientY?: number) => {
-      const clampedZoom = Math.max(1, Math.min(96, Number(targetZoom.toFixed(2))));
+      const clampedZoom = Math.max(minZoom, Math.min(96, Number(targetZoom.toFixed(4))));
       const container = containerRef.current;
       if (!container) {
         setZoom(clampedZoom);
@@ -1513,8 +1649,8 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       const cx = clientX !== undefined ? clientX - rect.left : rect.width / 2;
       const cy = clientY !== undefined ? clientY - rect.top : rect.height / 2;
       setZoom((prevZoom) => {
-        if (Math.abs(prevZoom - clampedZoom) < 0.01) return prevZoom;
-        const ratio = clampedZoom / Math.max(0.5, prevZoom);
+        if (Math.abs(prevZoom - clampedZoom) < 0.0005) return prevZoom;
+        const ratio = clampedZoom / Math.max(0.005, prevZoom);
         setPan((prevPan) => ({
           x: cx - (cx - prevPan.x) * ratio,
           y: cy - (cy - prevPan.y) * ratio,
@@ -1522,26 +1658,27 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         return clampedZoom;
       });
     },
-    []
+    [minZoom]
   );
 
   const handleFitToWindow = useCallback(() => {
     const container = containerRef.current;
     if (!container) return;
     const rect = container.getBoundingClientRect();
-    const fitZoom = Math.max(
-      1,
-      Math.min(
-        96,
-        Math.floor(Math.min((rect.width - 96) / Math.max(1, width), (rect.height - 96) / Math.max(1, height)))
-      )
+    const rawFit = Math.min(
+      Math.max(80, rect.width - 96) / Math.max(1, width),
+      Math.max(80, rect.height - 96) / Math.max(1, height)
     );
+    const fitZoom =
+      rawFit >= 1
+        ? Math.max(1, Math.min(96, Math.floor(rawFit)))
+        : Math.max(minZoom, Number(rawFit.toFixed(4)));
     setZoom(fitZoom);
     setPan({
       x: (rect.width - width * fitZoom) / 2,
       y: (rect.height - height * fitZoom) / 2,
     });
-  }, [width, height]);
+  }, [width, height, minZoom]);
 
   const handleCenterView = useCallback(() => {
     if (containerRef.current) {
@@ -1561,19 +1698,19 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     if (zoomCommand.type === 'fit') {
       handleFitToWindow();
     } else if (zoomCommand.type === 'percent') {
-      const pct = Math.max(10, Math.min(800, zoomCommand.percent || 100));
-      zoomAtClientPoint((pct / 100) * 12);
+      const pct = Math.max(1, Math.min(800, zoomCommand.percent || 100));
+      zoomAtClientPoint(pct === 100 && (width > 512 || height > 512) ? 1 : (pct / 100) * 12);
     } else if (zoomCommand.type === 'in') {
-      zoomAtClientPoint(zoom < 12 ? zoom + 2 : Math.round(zoom * 1.25));
+      zoomAtClientPoint(zoom < 1 ? zoom * 1.4 : zoom < 12 ? zoom + 2 : Math.round(zoom * 1.25));
     } else if (zoomCommand.type === 'out') {
-      zoomAtClientPoint(zoom <= 12 ? zoom - 2 : Math.round(zoom / 1.25));
+      zoomAtClientPoint(zoom <= 2 ? zoom / 1.4 : zoom <= 12 ? zoom - 2 : Math.round(zoom / 1.25));
     }
-  }, [zoomCommand, zoom, zoomAtClientPoint, handleFitToWindow]);
+  }, [zoomCommand, zoom, width, height, zoomAtClientPoint, handleFitToWindow]);
 
   const getGridCoords = useCallback((e: React.MouseEvent<HTMLCanvasElement> | React.PointerEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return null;
-    const rect = canvas.getBoundingClientRect();
+    const targetEl = canvasBoxRef.current || canvasRef.current;
+    if (!targetEl) return null;
+    const rect = targetEl.getBoundingClientRect();
     const clientX = e.clientX - rect.left;
     const clientY = e.clientY - rect.top;
 
@@ -1587,9 +1724,9 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   }, [zoom, width, height]);
 
   const getUnclampedGridCoords = useCallback((e: React.MouseEvent<HTMLCanvasElement> | React.PointerEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return null;
-    const rect = canvas.getBoundingClientRect();
+    const targetEl = canvasBoxRef.current || canvasRef.current;
+    if (!targetEl) return null;
+    const rect = targetEl.getBoundingClientRect();
     const clientX = e.clientX - rect.left;
     const clientY = e.clientY - rect.top;
     return {
@@ -1607,8 +1744,13 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       wheelDeltaAccumulator.current += e.deltaY;
       if (Math.abs(wheelDeltaAccumulator.current) >= 20) {
         const zoomingIn = wheelDeltaAccumulator.current < 0;
-        const step = zoom >= 24 ? Math.max(2, Math.round(zoom * 0.16)) : 1;
-        const nextZoom = zoomingIn ? zoom + step : zoom - step;
+        let nextZoom: number;
+        if (zoom < 1.5) {
+          nextZoom = zoomingIn ? zoom * 1.25 : zoom / 1.25;
+        } else {
+          const step = zoom >= 24 ? Math.max(2, Math.round(zoom * 0.16)) : 1;
+          nextZoom = zoomingIn ? zoom + step : zoom - step;
+        }
         zoomAtClientPoint(nextZoom, e.clientX, e.clientY);
         wheelDeltaAccumulator.current = 0;
       }
@@ -1640,6 +1782,10 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
     ctx.imageSmoothingEnabled = false;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.save();
+    if (virtualRect.left !== 0 || virtualRect.top !== 0) {
+      ctx.translate(-virtualRect.left, -virtualRect.top);
+    }
 
     // 1. Render Retro Fighting Stage Background & Ground Line
     renderStageBackground(
@@ -1836,11 +1982,33 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       for (let step = 1; step <= prevCount; step++) {
         const pIdx = curIdx - step;
         if (pIdx >= 0 && allFrames[pIdx]) {
-          const prevComposited = compositeFrame(allFrames[pIdx], width, height, pIdx, false, layerGroups);
-          const onionCanvas = getCachedOnionSkinCanvas(prevComposited, width, height, '#00d2ff');
-          ctx.globalAlpha = Math.max(0.08, onionSkinOpacity * (1 - (step - 1) * 0.25));
-          ctx.imageSmoothingEnabled = false;
-          ctx.drawImage(onionCanvas, 0, 0, width * zoom, height * zoom);
+          const prevF = allFrames[pIdx];
+          if (isFrameTiled(prevF)) {
+            const alpha = Math.max(0.08, onionSkinOpacity * (1 - (step - 1) * 0.25));
+            for (const lyr of prevF.layers) {
+              if (!lyr.visible || !lyr.tiledStoreId) continue;
+              const store = getTiledStore(lyr.tiledStoreId);
+              if (store) {
+                store.renderVisibleViewport(
+                  ctx,
+                  virtualRect.minWorldX,
+                  virtualRect.minWorldY,
+                  virtualRect.maxWorldX,
+                  virtualRect.maxWorldY,
+                  zoom,
+                  0,
+                  0,
+                  alpha * (lyr.opacity ?? 1)
+                );
+              }
+            }
+          } else {
+            const prevComposited = compositeFrame(prevF, width, height, pIdx, false, layerGroups);
+            const onionCanvas = getCachedOnionSkinCanvas(prevComposited, width, height, '#00d2ff');
+            ctx.globalAlpha = Math.max(0.08, onionSkinOpacity * (1 - (step - 1) * 0.25));
+            ctx.imageSmoothingEnabled = false;
+            ctx.drawImage(onionCanvas, 0, 0, width * zoom, height * zoom);
+          }
         }
       }
       ctx.globalAlpha = 1.0;
@@ -1860,19 +2028,42 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       for (let step = 1; step <= nextCount; step++) {
         const nIdx = curIdx + step;
         if (nIdx < allFrames.length && allFrames[nIdx]) {
-          const nextComposited = compositeFrame(allFrames[nIdx], width, height, nIdx, false, layerGroups);
-          const onionCanvas = getCachedOnionSkinCanvas(nextComposited, width, height, '#ff9900');
-          ctx.globalAlpha = Math.max(0.08, onionSkinOpacity * 0.85 * (1 - (step - 1) * 0.25));
-          ctx.imageSmoothingEnabled = false;
-          ctx.drawImage(onionCanvas, 0, 0, width * zoom, height * zoom);
+          const nextF = allFrames[nIdx];
+          if (isFrameTiled(nextF)) {
+            const alpha = Math.max(0.08, onionSkinOpacity * 0.85 * (1 - (step - 1) * 0.25));
+            for (const lyr of nextF.layers) {
+              if (!lyr.visible || !lyr.tiledStoreId) continue;
+              const store = getTiledStore(lyr.tiledStoreId);
+              if (store) {
+                store.renderVisibleViewport(
+                  ctx,
+                  virtualRect.minWorldX,
+                  virtualRect.minWorldY,
+                  virtualRect.maxWorldX,
+                  virtualRect.maxWorldY,
+                  zoom,
+                  0,
+                  0,
+                  alpha * (lyr.opacity ?? 1)
+                );
+              }
+            }
+          } else {
+            const nextComposited = compositeFrame(nextF, width, height, nIdx, false, layerGroups);
+            const onionCanvas = getCachedOnionSkinCanvas(nextComposited, width, height, '#ff9900');
+            ctx.globalAlpha = Math.max(0.08, onionSkinOpacity * 0.85 * (1 - (step - 1) * 0.25));
+            ctx.imageSmoothingEnabled = false;
+            ctx.drawImage(onionCanvas, 0, 0, width * zoom, height * zoom);
+          }
         }
       }
       ctx.globalAlpha = 1.0;
     }
 
     // 5. Render Layers of Active Frame
-    // FAST PATH: When no live transient draft/transform/preview/parallax is active,
-    // reuse WeakMap-cached composited frame canvas -> ONE ctx.drawImage call!
+    // FAST PATH:
+    //   A) Tiled 256×256 Large-Canvas / Spritesheet Engine: renders ONLY tiles intersecting virtualRect
+    //   B) Standard Cached Frame Engine: WeakMap-cached single ctx.drawImage call
     const hasLiveTransientEdit =
       !isPlaying &&
       !combatTestActive &&
@@ -1890,8 +2081,55 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       Boolean(stageParallaxConfig?.enabled) &&
       Math.abs(stageParallaxConfig?.scrollOffset || 0) > 0.01;
 
-    let composedGrid: (string | null)[][];
-    if (!hasLiveTransientEdit && !parallaxActive) {
+    let composedGrid: (string | null)[][] = [];
+    if (isFrameTiled(activeFrame)) {
+      for (const layer of activeFrame.layers) {
+        if (!layer.visible) continue;
+        const groupState = resolveGroupVisibilityAndOpacity(layer.groupId, layerGroups);
+        if (!groupState.visible) continue;
+        const kf = evaluateLayerKeyframeTransform(layer, curRenderFrameIdx);
+        const fillOp = layer.fillOpacity ?? 1;
+        const effectiveOpacity = Math.max(
+          0,
+          Math.min(1, (layer.opacity ?? 1) * fillOp * kf.opacityMultiplier * groupState.opacity)
+        );
+        if (effectiveOpacity <= 0.001) continue;
+
+        const isEditingTiled =
+          !isPlaying &&
+          !combatTestActive &&
+          isDrawing &&
+          layer.id === currentLayer.id &&
+          draftTiledStoreRef.current !== null;
+        const store = isEditingTiled
+          ? draftTiledStoreRef.current
+          : layer.tiledStoreId
+          ? getTiledStore(layer.tiledStoreId)
+          : undefined;
+
+        if (store) {
+          store.renderVisibleViewport(
+            ctx,
+            virtualRect.minWorldX,
+            virtualRect.minWorldY,
+            virtualRect.maxWorldX,
+            virtualRect.maxWorldY,
+            zoom,
+            p1ShiftX,
+            p1ShiftY,
+            effectiveOpacity
+          );
+        } else if (layer.pixels && layer.pixels.length > 0) {
+          const cachedLayer = getCachedPixelGridCanvas(layer.pixels, width, height);
+          ctx.save();
+          ctx.globalAlpha = effectiveOpacity;
+          ctx.imageSmoothingEnabled = false;
+          ctx.drawImage(cachedLayer, p1ShiftX * zoom, p1ShiftY * zoom, width * zoom, height * zoom);
+          ctx.restore();
+        }
+      }
+      ctx.globalAlpha = 1.0;
+    } else if (!hasLiveTransientEdit && !parallaxActive) {
       composedGrid = compositeFrame(
         activeFrame,
         width,
@@ -2403,18 +2641,22 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       }
     }
 
-    // 7. Pixel Grid
+    // 7. Pixel Grid (clipped strictly to visible virtualRect bounds for O(visible) giant canvas speed)
     if (showGrid && zoom >= 5) {
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
       ctx.lineWidth = 1;
       ctx.beginPath();
-      for (let x = 0; x <= width; x++) {
-        ctx.moveTo(x * zoom - 0.5, 0);
-        ctx.lineTo(x * zoom - 0.5, height * zoom);
+      const gx0 = Math.max(0, virtualRect.minWorldX);
+      const gx1 = Math.min(width, virtualRect.maxWorldX);
+      const gy0 = Math.max(0, virtualRect.minWorldY);
+      const gy1 = Math.min(height, virtualRect.maxWorldY);
+      for (let x = gx0; x <= gx1; x++) {
+        ctx.moveTo(x * zoom - 0.5, gy0 * zoom);
+        ctx.lineTo(x * zoom - 0.5, gy1 * zoom);
       }
-      for (let y = 0; y <= height; y++) {
-        ctx.moveTo(0, y * zoom - 0.5);
-        ctx.lineTo(width * zoom, y * zoom - 0.5);
+      for (let y = gy0; y <= gy1; y++) {
+        ctx.moveTo(gx0 * zoom, y * zoom - 0.5);
+        ctx.lineTo(gx1 * zoom, y * zoom - 0.5);
       }
       ctx.stroke();
     }
@@ -3418,7 +3660,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         ctx.setLineDash([]);
       }
 
-      if (tilesetConfig.showSeamChecker) {
+      if (tilesetConfig.showSeamChecker && composedGrid.length > 0) {
         const report = analyzeTilesetSeams(composedGrid, width, height);
         ctx.fillStyle = 'rgba(244, 63, 94, 0.7)';
         for (const pt of report.mismatchedEdgePixels) {
@@ -3551,10 +3793,20 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         }
       }
     }
+
+    ctx.restore();
   }, [
     zoom,
     width,
     height,
+    virtualRect.left,
+    virtualRect.top,
+    virtualRect.width,
+    virtualRect.height,
+    virtualRect.minWorldX,
+    virtualRect.minWorldY,
+    virtualRect.maxWorldX,
+    virtualRect.maxWorldY,
     currentFrame,
     currentLayer,
     previousFrame,
@@ -4071,6 +4323,10 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     }
 
     if (e.button !== 0) return;
+
+    if (activeTool === 'canvas_edit') {
+      return;
+    }
 
     if (isPlaying) {
       onTogglePlay();
@@ -5029,7 +5285,15 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     isPaintingMaskRef.current = canEditMaskNow;
     if (canEditMaskNow && currentLayer.mask) {
       draftMaskRef.current = currentLayer.mask.pixels.map((r) => [...r]);
+      draftTiledStoreRef.current = null;
+    } else if (isLayerTiled(currentLayer)) {
+      const existingStore = getTiledStore(currentLayer.tiledStoreId);
+      draftTiledStoreRef.current = existingStore
+        ? existingStore.clone()
+        : new TiledLayerStore(width, height);
+      draftPixelsRef.current = [];
     } else {
+      draftTiledStoreRef.current = null;
       draftPixelsRef.current = currentLayer.pixels.map((r) => [...r]);
     }
 
@@ -5062,9 +5326,37 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       }
     };
 
-    // Pro Eyedropper with Sampling Scope & Smart Palette
+    // Pro Eyedropper with Sampling Scope & Smart Palette (O(1) fast path for Tiled large canvases)
     if (activeTool === 'eyedropper') {
       isPaintingMaskRef.current = false;
+      draftTiledStoreRef.current = null;
+      if (isFrameTiled(currentFrame)) {
+        let sampledHex: string | null = null;
+        if (effEyedropperConfig.layerScope === 'current') {
+          sampledHex =
+            getTiledStore(currentLayer.tiledStoreId)?.getPixel(coords.x, coords.y) ??
+            currentLayer.pixels[coords.y]?.[coords.x] ??
+            null;
+        } else {
+          for (let li = currentFrame.layers.length - 1; li >= 0; li--) {
+            const lyr = currentFrame.layers[li];
+            if (!lyr.visible) continue;
+            const col = lyr.tiledStoreId
+              ? getTiledStore(lyr.tiledStoreId)?.getPixel(coords.x, coords.y) ?? null
+              : lyr.pixels[coords.y]?.[coords.x] ?? null;
+            if (col) {
+              sampledHex = col;
+              break;
+            }
+          }
+        }
+        if (sampledHex) {
+          onPickColor(sampledHex);
+        }
+        setIsDrawing(false);
+        return;
+      }
+
       const grid = buildSamplingGridForEyedropper(
         currentFrame,
         currentLayer,
@@ -5465,6 +5757,15 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       setLivePressureInfo({ pressure: rawPressure, pointerType, size: effectiveSize });
       if (canEditMaskNow) {
         stampMaskPoint(coords.x, coords.y, getMaskBrushVal(), effectiveSize);
+      } else if (draftTiledStoreRef.current) {
+        const tiledColor = activeTool === 'eraser' ? null : primaryColor;
+        const targets =
+          effSymmetry.enabled && effSymmetry.mode !== 'none'
+            ? computeSymmetricPoints(coords.x, coords.y, width, height, effSymmetry, true)
+            : [coords];
+        for (const pt of targets) {
+          draftTiledStoreRef.current.drawBrushStamp(pt.x, pt.y, tiledColor, effectiveSize);
+        }
       } else {
         applyPointDraw(coords.x, coords.y, draftPixelsRef.current, effectiveSize, totalOpacity);
       }
@@ -6312,32 +6613,76 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
-    // Pro Eyedropper Live Hover Loupe + Delta Preview
+    // Pro Eyedropper Live Hover Loupe + Delta Preview (O(1) tiled fast path for giant canvases)
     if (activeTool === 'eyedropper' && coords && containerRef.current) {
       const cRect = containerRef.current.getBoundingClientRect();
       setEyedropperScreenPos({
         x: e.clientX - cRect.left,
         y: e.clientY - cRect.top,
       });
-      const grid = buildSamplingGridForEyedropper(
-        currentFrame,
-        currentLayer,
-        width,
-        height,
-        effEyedropperConfig,
-        layerGroups
-      );
-      const sample = sampleEyedropperAt(
-        grid,
-        coords.x,
-        coords.y,
-        width,
-        height,
-        effEyedropperConfig,
-        activePaletteColors
-      );
-      setHoveredSample(sample);
-      onSampledColorUpdate?.(sample);
+
+      const isTiledEyedropper = isFrameTiled(currentFrame);
+      const readTiledAt = (gx: number, gy: number): string | null => {
+        if (gx < 0 || gx >= width || gy < 0 || gy >= height) return null;
+        if (effEyedropperConfig.layerScope === 'current') {
+          return (
+            getTiledStore(currentLayer.tiledStoreId)?.getPixel(gx, gy) ??
+            currentLayer.pixels[gy]?.[gx] ??
+            null
+          );
+        }
+        for (let li = currentFrame.layers.length - 1; li >= 0; li--) {
+          const lyr = currentFrame.layers[li];
+          if (!lyr.visible) continue;
+          const c = lyr.tiledStoreId
+            ? getTiledStore(lyr.tiledStoreId)?.getPixel(gx, gy) ?? null
+            : lyr.pixels[gy]?.[gx] ?? null;
+          if (c) return c;
+        }
+        return null;
+      };
+
+      const grid = isTiledEyedropper
+        ? null
+        : buildSamplingGridForEyedropper(
+            currentFrame,
+            currentLayer,
+            width,
+            height,
+            effEyedropperConfig,
+            layerGroups
+          );
+
+      if (grid) {
+        const sample = sampleEyedropperAt(
+          grid,
+          coords.x,
+          coords.y,
+          width,
+          height,
+          effEyedropperConfig,
+          activePaletteColors
+        );
+        setHoveredSample(sample);
+        onSampledColorUpdate?.(sample);
+      } else {
+        const hex = readTiledAt(coords.x, coords.y);
+        if (hex) {
+          const sample = sampleEyedropperAt(
+            [[hex]],
+            0,
+            0,
+            1,
+            1,
+            effEyedropperConfig,
+            activePaletteColors
+          );
+          setHoveredSample(sample);
+          onSampledColorUpdate?.(sample);
+        } else {
+          setHoveredSample(null);
+        }
+      }
 
       const lCanvas = loupeCanvasRef.current;
       if (lCanvas) {
@@ -6354,7 +6699,11 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
               const gy = coords.y + dy;
               const px = (dx + half) * z;
               const py = (dy + half) * z;
-              const col = gx >= 0 && gx < width && gy >= 0 && gy < height ? grid[gy]?.[gx] : null;
+              const col = grid
+                ? gx >= 0 && gx < width && gy >= 0 && gy < height
+                  ? grid[gy]?.[gx]
+                  : null
+                : readTiledAt(gx, gy);
               if (col) {
                 lctx.fillStyle = col;
                 lctx.fillRect(px, py, z, z);
@@ -6854,6 +7203,26 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       }
 
       const colorToApply = effTool === 'eraser' ? null : primaryColor;
+      if (draftTiledStoreRef.current) {
+        const strokeSegs =
+          effSymmetry.enabled && effSymmetry.mode !== 'none'
+            ? computeSymmetricSegments(lastDrawnPoint.x, lastDrawnPoint.y, coords.x, coords.y, effSymmetry)
+            : [{ x0: lastDrawnPoint.x, y0: lastDrawnPoint.y, x1: coords.x, y1: coords.y }];
+        for (const seg of strokeSegs) {
+          draftTiledStoreRef.current.drawLine(
+            seg.x0,
+            seg.y0,
+            seg.x1,
+            seg.y1,
+            colorToApply,
+            effectiveSize
+          );
+        }
+        setLastDrawnPoint(coords);
+        renderCanvas();
+        return;
+      }
+
       const usePixelByPixelModifiers =
         effTool === 'dither' ||
         (effTool === 'pencil' &&
@@ -7229,6 +7598,15 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     }
     isPaintingMaskRef.current = false;
 
+    if (draftTiledStoreRef.current) {
+      const committedId = registerTiledStore(draftTiledStoreRef.current);
+      draftTiledStoreRef.current = null;
+      onCommitTiledLayerEdit?.(currentLayer.id, committedId);
+      setLastDrawnPoint(null);
+      setDragStartPoint(null);
+      return;
+    }
+
     if (
       ((effTool === 'pencil' && (pixelPerfect || brushSettings.pixelPerfect)) ||
         (effTool === 'eraser' && eraserOptions.pixelPerfect)) &&
@@ -7380,7 +7758,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       {/* Dynamic Rulers (Top & Left) + Interactive Draggable Guides */}
       <ViewportRulersAndGuides
         containerRef={containerRef}
-        canvasRef={canvasRef}
+        canvasRef={canvasBoxRef}
         width={width}
         height={height}
         zoom={zoom}
@@ -7433,11 +7811,12 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         onDrop={(e) => {
           setIsAssetDragOver(false);
           const raw = e.dataTransfer.getData('application/x-pixelclash-asset');
-          if (!raw || !onDropLibraryAssetAt || !canvasRef.current) return;
+          const dropTarget = canvasBoxRef.current || canvasRef.current;
+          if (!raw || !onDropLibraryAssetAt || !dropTarget) return;
           e.preventDefault();
           try {
             const asset = JSON.parse(raw) as AssetLibraryItem;
-            const rect = canvasRef.current.getBoundingClientRect();
+            const rect = dropTarget.getBoundingClientRect();
             const gx = Math.max(0, Math.min(width - 1, Math.floor((e.clientX - rect.left) / zoom)));
             const gy = Math.max(0, Math.min(height - 1, Math.floor((e.clientY - rect.top) / zoom)));
             onDropLibraryAssetAt(asset, gx, gy);
@@ -7446,19 +7825,20 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           }
         }}
       >
-        <div 
-          className={`canvas-checkerboard relative shadow-2xl border rounded-xs ${
+        <div
+          ref={canvasBoxRef}
+          className={`canvas-checkerboard relative shadow-2xl border rounded-xs overflow-hidden ${
             isAssetDragOver ? 'border-amber-400 ring-2 ring-amber-400/50' : 'border-[#2b3347]'
           }`}
           style={{
-            width: width * zoom,
-            height: height * zoom,
+            width: Math.max(1, Math.round(width * zoom)),
+            height: Math.max(1, Math.round(height * zoom)),
           }}
         >
           <canvas
             ref={canvasRef}
-            width={width * zoom}
-            height={height * zoom}
+            width={virtualRect.width}
+            height={virtualRect.height}
             onPointerDown={handleMouseDown}
             onPointerMove={handleMouseMove}
             onPointerUp={handleMouseUp}
@@ -7469,8 +7849,14 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
               if (symHandleDragRef.current) symHandleDragRef.current = null;
               if (isDrawing) handleMouseUp();
             }}
-            className="pixel-canvas block w-full h-full touch-none"
-            style={{ cursor: isTransformRotateCursor ? rotateSvgCursor : undefined }}
+            className="pixel-canvas block touch-none absolute"
+            style={{
+              left: virtualRect.left,
+              top: virtualRect.top,
+              width: virtualRect.width,
+              height: virtualRect.height,
+              cursor: isTransformRotateCursor ? rotateSvgCursor : undefined,
+            }}
           />
 
           {/* Interactive 2.5D Volumetric Pose Dummie SVG Overlay directly over Sprite */}
@@ -7673,6 +8059,30 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
               );
             })()}
         </div>
+
+        {/* Visual Canvas Edit Tool Overlay (Sibling of canvasBoxRef so expansion outside bounds is NEVER clipped) */}
+        {activeTool === 'canvas_edit' &&
+          !isPlaying &&
+          !combatTestActive &&
+          canvasEditRect &&
+          canvasEditConfig &&
+          onChangeCanvasEditRect &&
+          onApplyCanvasEdit &&
+          onResetCanvasEdit &&
+          onCancelCanvasEdit && (
+            <CanvasEditOverlay
+              origWidth={width}
+              origHeight={height}
+              zoom={zoom}
+              rect={canvasEditRect}
+              config={canvasEditConfig}
+              hasOffCanvasContent={hasOffCanvasContent}
+              onChangeRect={onChangeCanvasEditRect}
+              onApply={onApplyCanvasEdit}
+              onReset={onResetCanvasEdit}
+              onCancel={onCancelCanvasEdit}
+            />
+          )}
       </div>
 
       {/* PureRef Viewport Interaction Layer (blocks accidental canvas painting when PureRef Mode is active) */}
@@ -8176,7 +8586,11 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       {/* Bottom Left Viewport Zoom & Pan Controls */}
       <div className="absolute bottom-3 left-3 bg-[#131620]/90 backdrop-blur-md border border-[#242b3d] rounded-lg p-1 flex items-center gap-1 shadow-lg z-10">
         <button
-          onClick={() => zoomAtClientPoint(zoom <= 12 ? Math.max(1, zoom - 2) : Math.round(zoom / 1.25))}
+          onClick={() =>
+            zoomAtClientPoint(
+              zoom <= 2 ? zoom / 1.35 : zoom <= 12 ? Math.max(minZoom, zoom - 2) : Math.round(zoom / 1.25)
+            )
+          }
           title="Alejar zoom (Ctrl+-)"
           className="p-1.5 rounded text-slate-400 hover:text-white hover:bg-[#202738] transition-colors"
         >
@@ -8195,10 +8609,14 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           title="Centrar vista"
           className="px-1.5 py-1 rounded text-[11px] font-mono text-slate-400 hover:text-white hover:bg-[#202738] transition-colors tabular-nums"
         >
-          {Math.round((zoom / 12) * 100)}%
+          {zoom < 1 ? `${Math.max(1, Math.round(zoom * 100))}%` : `${Math.round((zoom / 12) * 100)}%`}
         </button>
         <button
-          onClick={() => zoomAtClientPoint(zoom < 12 ? zoom + 2 : Math.min(96, Math.round(zoom * 1.25)))}
+          onClick={() =>
+            zoomAtClientPoint(
+              zoom < 1 ? zoom * 1.35 : zoom < 12 ? zoom + 2 : Math.min(96, Math.round(zoom * 1.25))
+            )
+          }
           title="Acercar zoom (Ctrl++)"
           className="p-1.5 rounded text-slate-400 hover:text-white hover:bg-[#202738] transition-colors"
         >

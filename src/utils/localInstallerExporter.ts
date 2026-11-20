@@ -1,5 +1,9 @@
 import JSZip from 'jszip';
 import { ProjectState } from '../types';
+import {
+  OFFICIAL_ICON_SIZES,
+  renderOfficialPixelClashIconToCanvas,
+} from '../components/PixelClashLogoIcon';
 
 export type WindowsInstallerEngine = 'nsis_electron' | 'msi_wix' | 'inno_setup';
 
@@ -32,64 +36,7 @@ export const DEFAULT_WINDOWS_INSTALLER_CONFIG: WindowsInstallerConfig = {
 };
 
 function renderIconToCanvas(size: number): HTMLCanvasElement {
-  const canvas = document.createElement('canvas');
-  canvas.width = size;
-  canvas.height = size;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return canvas;
-
-  const r = Math.max(2, Math.round(size * 0.2));
-
-  // Outer gradient border frame
-  const grad = ctx.createLinearGradient(0, 0, size, size);
-  grad.addColorStop(0, '#f59e0b');
-  grad.addColorStop(0.55, '#e11d48');
-  grad.addColorStop(1, '#4f46e5');
-
-  ctx.beginPath();
-  ctx.roundRect(0, 0, size, size, r);
-  ctx.fillStyle = grad;
-  ctx.fill();
-
-  // Inner dark studio surface
-  const pad = Math.max(1, Math.round(size * 0.08));
-  ctx.beginPath();
-  ctx.roundRect(pad, pad, size - pad * 2, size - pad * 2, Math.max(1, r - pad));
-  ctx.fillStyle = '#0f131f';
-  ctx.fill();
-
-  // Subtle inner pixel grid sheen for >= 48px
-  if (size >= 48) {
-    ctx.strokeStyle = 'rgba(245, 158, 11, 0.14)';
-    ctx.lineWidth = Math.max(1, size / 64);
-    const step = size / 8;
-    for (let x = pad + step; x < size - pad; x += step) {
-      ctx.beginPath();
-      ctx.moveTo(x, pad);
-      ctx.lineTo(x, size - pad);
-      ctx.stroke();
-    }
-    for (let y = pad + step; y < size - pad; y += step) {
-      ctx.beginPath();
-      ctx.moveTo(pad, y);
-      ctx.lineTo(size - pad, y);
-      ctx.stroke();
-    }
-  }
-
-  // Crisp KO pixel emblem
-  ctx.fillStyle = '#fbbf24';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.font = `900 ${Math.round(size * 0.44)}px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace`;
-  ctx.fillText('KO', size / 2, size / 2 + size * 0.03);
-
-  // Small pixel highlight corner
-  const px = Math.max(2, Math.round(size * 0.1));
-  ctx.fillStyle = '#38bdf8';
-  ctx.fillRect(size - pad - px - Math.round(size * 0.06), pad + Math.round(size * 0.06), px, px);
-
-  return canvas;
+  return renderOfficialPixelClashIconToCanvas(size);
 }
 
 async function canvasToPngBytes(canvas: HTMLCanvasElement): Promise<Uint8Array> {
@@ -105,10 +52,11 @@ async function canvasToPngBytes(canvas: HTMLCanvasElement): Promise<Uint8Array> 
 }
 
 /**
- * Generates a valid multi-resolution binary Windows .ICO file (16, 32, 48, 256px PNG-in-ICO).
+ * Generates a valid multi-resolution binary Windows .ICO file
+ * containing all 6 standard sizes: 16, 32, 48, 64, 128, 256px (PNG-in-ICO).
  */
 export async function generatePixelClashIcoBytes(): Promise<Uint8Array> {
-  const sizes = [16, 32, 48, 256];
+  const sizes = [...OFFICIAL_ICON_SIZES];
   const pngFrames: { size: number; bytes: Uint8Array }[] = [];
 
   for (const size of sizes) {
@@ -148,8 +96,8 @@ export async function generatePixelClashIcoBytes(): Promise<Uint8Array> {
   return output;
 }
 
-export function generatePixelClashIconPreviewDataUrl(): string {
-  return renderIconToCanvas(128).toDataURL('image/png');
+export function generatePixelClashIconPreviewDataUrl(size: number = 128): string {
+  return renderIconToCanvas(size).toDataURL('image/png');
 }
 
 function normalizeVersion4(version: string): string {

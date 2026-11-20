@@ -27,6 +27,7 @@ import {
   WindowsInstallerConfig,
 } from '../utils/localInstallerExporter';
 import { downloadBlob } from '../utils/zipExporter';
+import { OFFICIAL_ICON_SIZES, PixelClashLogoIcon } from './PixelClashLogoIcon';
 
 interface LocalInstallerModalProps {
   isOpen: boolean;
@@ -145,18 +146,11 @@ export const LocalInstallerModal: React.FC<LocalInstallerModalProps> = ({
           }}
         >
           <div className="flex items-center gap-3 min-w-0">
-            {iconPreviewUrl ? (
-              <img
-                src={iconPreviewUrl}
-                alt="Icono PixelClash Studio"
-                className="w-9 h-9 rounded-lg border shrink-0"
-                style={{ borderColor: 'var(--studio-border-strong)' }}
-              />
-            ) : (
-              <div className="w-9 h-9 rounded-lg bg-amber-400/15 text-amber-400 flex items-center justify-center shrink-0">
-                <Monitor className="w-5 h-5" />
-              </div>
-            )}
+            <PixelClashLogoIcon
+              size={36}
+              className="shrink-0 shadow-md"
+              title="Icono oficial de PixelClash Studio"
+            />
             <div className="min-w-0">
               <h3 className="text-sm font-bold tracking-tight truncate">
                 Instalador Profesional para Windows (.EXE / .MSI)
@@ -558,20 +552,32 @@ export const LocalInstallerModal: React.FC<LocalInstallerModalProps> = ({
                 {/* Left Brand Sidebar */}
                 <div className="w-36 bg-gradient-to-b from-[#161d2f] via-[#111626] to-[#0c101b] border-r border-slate-800 p-4 flex flex-col justify-between shrink-0">
                   <div className="flex flex-col items-center text-center gap-2">
-                    {iconPreviewUrl && (
-                      <img
-                        src={iconPreviewUrl}
-                        alt=""
-                        className="w-14 h-14 rounded-xl border border-amber-400/40 shadow-lg"
-                      />
-                    )}
+                    <PixelClashLogoIcon
+                      size={56}
+                      className="shadow-xl"
+                      title="Icono oficial PixelClash Studio (.ICO multi-resolución)"
+                    />
                     <div className="text-[11px] font-bold text-slate-100 leading-tight">
                       {config.appName}
                     </div>
                     <div className="text-[10px] font-mono text-amber-400">v{config.version}</div>
                   </div>
-                  <div className="text-[9px] font-mono text-slate-500 text-center">
-                    Windows 10 / 11 · x64
+                  <div className="flex flex-col items-center gap-1.5">
+                    <div className="flex items-end justify-center gap-1">
+                      {OFFICIAL_ICON_SIZES.slice(0, 4).map((sz) => (
+                        <PixelClashLogoIcon
+                          key={sz}
+                          size={Math.min(20, Math.max(10, Math.round(sz / 3)))}
+                          title={`${sz}×${sz} px`}
+                        />
+                      ))}
+                    </div>
+                    <div className="text-[8.5px] font-mono text-slate-400 text-center tabular-nums">
+                      .ICO: 16 · 32 · 48 · 64 · 128 · 256
+                    </div>
+                    <div className="text-[9px] font-mono text-slate-500 text-center">
+                      Windows 10 / 11 · x64
+                    </div>
                   </div>
                 </div>
 

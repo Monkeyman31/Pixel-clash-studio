@@ -306,12 +306,12 @@ export const ImageToPixelPanel: React.FC<ImageToPixelPanelProps> = ({
                 label="Resolución personalizada"
                 value={customResolution}
                 min={12}
-                max={512}
+                max={2048}
                 step={2}
                 unit=" px"
                 defaultValue={48}
                 allowManualOverflow
-                hardMax={1024}
+                hardMax={65536}
                 accentColor="#38bdf8"
                 onChange={setCustomResolution}
               />

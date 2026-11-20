@@ -16,6 +16,7 @@ import {
   VanishingPoint,
 } from '../types';
 import { compositeFrame } from './pixelMath';
+import { isFrameTiled, renderTiledFrameThumbnailDataUrl } from './tiledImageEngine';
 
 export const GUIDES_CONFIG_STORAGE_KEY = 'pixelclash_guides_config_v2';
 export const LEGACY_GUIDES_CONFIG_STORAGE_KEY = 'pixelclash_guides_config_v1';
@@ -1900,6 +1901,9 @@ export function renderProjectThumbnailDataUrl(
   try {
     const f0 = frames[0];
     if (!f0) return undefined;
+    if (isFrameTiled(f0)) {
+      return renderTiledFrameThumbnailDataUrl(f0, width, height, layerGroups, 64);
+    }
     const grid = compositeFrame(f0, width, height, 0, true, layerGroups);
     const thumbSize = 48;
     const canvas = document.createElement('canvas');

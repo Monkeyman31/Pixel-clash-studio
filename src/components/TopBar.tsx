@@ -6,6 +6,7 @@ import {
   Search,
   Maximize2,
 } from 'lucide-react';
+import { PixelClashLogoIcon } from './PixelClashLogoIcon';
 
 interface TopBarProps {
   projectName?: string;
@@ -49,14 +50,7 @@ export const TopBar: React.FC<TopBarProps> = ({
     >
       {/* Zone 1: Brand + Active Document Name + Dimension Trigger */}
       <div className="flex items-center gap-2.5 shrink-0 min-w-0">
-        <div className="w-7 h-7 rounded bg-gradient-to-br from-amber-500 via-rose-600 to-indigo-600 p-[1px] flex items-center justify-center shadow-sm shrink-0">
-          <div
-            className="w-full h-full rounded flex items-center justify-center text-[11px] font-bold font-mono"
-            style={{ backgroundColor: 'var(--studio-bg-panel)', color: 'var(--studio-accent)' }}
-          >
-            KO
-          </div>
-        </div>
+        <PixelClashLogoIcon size={28} className="shadow-sm" />
         <span
           className="text-sm font-bold tracking-tight whitespace-nowrap"
           style={{ color: 'var(--studio-text)' }}

@@ -30,7 +30,7 @@ export const RULER_THICKNESS = 22;
 
 interface ViewportRulersAndGuidesProps {
   containerRef: React.RefObject<HTMLDivElement | null>;
-  canvasRef: React.RefObject<HTMLCanvasElement | null>;
+  canvasRef: React.RefObject<HTMLElement | null>;
   width: number;
   height: number;
   zoom: number;
@@ -121,7 +121,7 @@ export const ViewportRulersAndGuides: React.FC<ViewportRulersAndGuidesProps> = (
     const canvasEl = canvasRef.current;
     let originX = pan.x + cameraTransform.camX * zoom;
     let originY = pan.y + cameraTransform.camY * zoom;
-    let effZoom = Math.max(0.25, zoom * (cameraTransform.camZoom || 1));
+    let effZoom = Math.max(0.01, zoom * (cameraTransform.camZoom || 1));
 
     if (canvasEl) {
       const r = canvasEl.getBoundingClientRect();

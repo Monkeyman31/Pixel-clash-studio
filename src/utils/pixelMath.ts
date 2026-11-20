@@ -9,6 +9,7 @@ import {
   getOrComputeCompositeFrame,
   parseColorToRgbaTupleFast,
 } from './renderCache';
+import { getTiledStore, isFrameTiled } from './tiledImageEngine';
 
 export function createEmptyGrid(width: number, height: number): (string | null)[][] {
   const grid: (string | null)[][] = [];
@@ -998,6 +999,10 @@ export function compositeFrame(
   excludeTempLayers: boolean = false,
   layerGroups: LayerGroup[] = []
 ): (string | null)[][] {
+  // Never allocate massive dense JS pixel matrices for tiled ultra-high-res documents
+  if (isFrameTiled(frame) && width * height > 2_000_000) {
+    return [];
+  }
   return getOrComputeCompositeFrame(
     frame,
     width,
@@ -1162,6 +1167,51 @@ export function frameToCanvas(
   excludeTempLayers: boolean = false,
   layerGroups: LayerGroup[] = []
 ): HTMLCanvasElement {
+  // Tiled fast-path: composite tiled layers directly onto an HTMLCanvas without dense JS grids
+  if (isFrameTiled(frame)) {
+    const rawOutW = Math.max(1, Math.round(width * scale));
+    const rawOutH = Math.max(1, Math.round(height * scale));
+    const maxSafeDim = 16384;
+    const clampRatio = Math.min(1, maxSafeDim / Math.max(rawOutW, rawOutH));
+    const outW = Math.max(1, Math.round(rawOutW * clampRatio));
+    const outH = Math.max(1, Math.round(rawOutH * clampRatio));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = outW;
+    canvas.height = outH;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return canvas;
+
+    ctx.imageSmoothingEnabled = false;
+    for (let li = 0; li < frame.layers.length; li++) {
+      const layer = frame.layers[li];
+      if (!layer.visible) continue;
+      if (excludeTempLayers && layer.layerType === 'temp') continue;
+      const groupState = resolveGroupVisibilityAndOpacity(layer.groupId, layerGroups);
+      if (!groupState.visible) continue;
+      const effectiveOpacity = Math.max(
+        0,
+        Math.min(1, (layer.opacity ?? 1) * (layer.fillOpacity ?? 1) * groupState.opacity)
+      );
+      if (effectiveOpacity <= 0.001) continue;
+
+      ctx.save();
+      ctx.globalAlpha = effectiveOpacity;
+      ctx.imageSmoothingEnabled = false;
+      if (layer.tiledStoreId) {
+        const store = getTiledStore(layer.tiledStoreId);
+        if (store) {
+          store.renderScaledPreviewToContext(ctx, outW, outH, 0);
+        }
+      } else if (layer.pixels && layer.pixels.length > 0) {
+        const layerCanvas = getCachedPixelGridCanvas(layer.pixels, width, height);
+        ctx.drawImage(layerCanvas, 0, 0, outW, outH);
+      }
+      ctx.restore();
+    }
+    return canvas;
+  }
+
   const composited = compositeFrame(frame, width, height, -1, excludeTempLayers, layerGroups);
   const baseCanvas = getCachedPixelGridCanvas(composited, width, height);
 

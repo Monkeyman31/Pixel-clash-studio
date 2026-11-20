@@ -44,6 +44,7 @@ export const DEFAULT_SHORTCUT_BINDINGS: ShortcutBinding[] = [
   { id: 'prefs.selection_display', label: 'Preferencias de Visualización de Selecciones', category: 'Selección', location: 'Interfaz > Preferencias de Selecciones', primary: '' },
 
   // Transformación
+  { id: 'tool.canvas_edit', label: 'Editar Lienzo (Recorte, Expansión y Spritesheet Visual)', category: 'Transformación', location: 'Barra Herramientas > Editar Lienzo / Imagen > Editar Lienzo', primary: 'Shift+C' },
   { id: 'transform.free', label: 'Transformación Libre', category: 'Transformación', location: 'Edición > Transformar > Libre', primary: 'Ctrl+T' },
   { id: 'transform.flip_h', label: 'Voltear Horizontal', category: 'Transformación', location: 'Edición > Transformar', primary: 'Shift+H' },
   { id: 'transform.flip_v', label: 'Voltear Vertical', category: 'Transformación', location: 'Edición > Transformar', primary: 'Shift+V' },

@@ -70,6 +70,10 @@ import {
   BrushTextureType,
   BucketSubTool,
   BucketToolOptions,
+  CanvasEditAnchor,
+  CanvasEditConfig,
+  CanvasEditOverflowMode,
+  CanvasEditRect,
   CustomShapePresetId,
   DitherConfig,
   EllipseArcType,
@@ -103,6 +107,7 @@ import {
   ZoomToolMode,
 } from '../types';
 import { CUSTOM_SHAPE_PRESETS, SHAPE_KIND_LABELS } from '../utils/parametricShapeEngine';
+import { computeAnchoredCanvasRect } from '../utils/imageTransforms';
 import { StudioSlider } from './StudioSlider';
 
 // Extensible registry so any future tool automatically registers its primary contextual options
@@ -218,6 +223,16 @@ export interface ToolOptionsBarProps {
   onChangeQuickAiOptions: (next: QuickAiBarOptions) => void;
   onGenerateQuickAi: () => void;
   isGeneratingQuickAi?: boolean;
+  // Visual Canvas Edit Tool (Editar Lienzo)
+  canvasEditRect?: CanvasEditRect;
+  canvasEditConfig?: CanvasEditConfig;
+  hasOffCanvasContent?: boolean;
+  onChangeCanvasEditRect?: (next: CanvasEditRect) => void;
+  onChangeCanvasEditConfig?: (next: CanvasEditConfig) => void;
+  onApplyCanvasEdit?: () => void;
+  onResetCanvasEdit?: () => void;
+  onCancelCanvasEdit?: () => void;
+  onFitCanvasEditToContent?: () => void;
 }
 
 interface OptionsBarDisplayCtxValue {
@@ -576,6 +591,15 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
   onChangeQuickAiOptions,
   onGenerateQuickAi,
   isGeneratingQuickAi = false,
+  canvasEditRect,
+  canvasEditConfig,
+  hasOffCanvasContent = false,
+  onChangeCanvasEditRect,
+  onChangeCanvasEditConfig,
+  onApplyCanvasEdit,
+  onResetCanvasEdit,
+  onCancelCanvasEdit,
+  onFitCanvasEditToContent,
 }) => {
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [searchFocused, setSearchFocused] = useState<boolean>(false);
@@ -673,6 +697,8 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
         return { label: 'Hitboxes', icon: ShieldAlert };
       case 'hand':
         return { label: 'Mano', icon: Hand };
+      case 'canvas_edit':
+        return { label: 'Editar Lienzo', icon: Expand };
       default: {
         const custom = CUSTOM_TOOL_OPTIONS_REGISTRY.get(activeContextMode);
         return { label: custom?.label || 'Herramienta', icon: SlidersHorizontal };
@@ -2565,6 +2591,412 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               icon={ShieldAlert}
             />
           ))}
+        </>
+      );
+    }
+
+    // 18.5. EDITAR LIENZO (VISUAL CANVAS EDIT TOOL)
+    if (
+      activeContextMode === 'canvas_edit' &&
+      canvasEditRect &&
+      canvasEditConfig &&
+      onChangeCanvasEditRect &&
+      onChangeCanvasEditConfig
+    ) {
+      const origW = Math.max(1, canvasWidth || 64);
+      const origH = Math.max(1, canvasHeight || 64);
+      const cellW = Math.max(1, Math.round(canvasEditConfig.cellWidth || 32));
+      const cellH = Math.max(1, Math.round(canvasEditConfig.cellHeight || 32));
+
+      const applyNumericDimension = (nextW: number, nextH: number) => {
+        const safeW = Math.max(1, Math.min(32768, Math.round(nextW)));
+        const safeH = Math.max(1, Math.min(32768, Math.round(nextH)));
+        const anchored = computeAnchoredCanvasRect(origW, origH, safeW, safeH, canvasEditConfig.anchor);
+        onChangeCanvasEditRect(anchored);
+      };
+
+      const handleAnchorChange = (anchor: CanvasEditAnchor) => {
+        onChangeCanvasEditConfig({ ...canvasEditConfig, anchor });
+        const anchored = computeAnchoredCanvasRect(origW, origH, canvasEditRect.width, canvasEditRect.height, anchor);
+        onChangeCanvasEditRect(anchored);
+      };
+
+      const stepSpritesheet = (dCols: number, dRows: number) => {
+        const curCols = Math.max(1, Math.round(canvasEditRect.width / cellW));
+        const curRows = Math.max(1, Math.round(canvasEditRect.height / cellH));
+        const targetW = Math.max(cellW, (curCols + dCols) * cellW);
+        const targetH = Math.max(cellH, (curRows + dRows) * cellH);
+        const anchored = computeAnchoredCanvasRect(origW, origH, targetW, targetH, canvasEditConfig.anchor);
+        onChangeCanvasEditRect(anchored);
+      };
+
+      const anchorCells: { id: CanvasEditAnchor; title: string }[] = [
+        { id: 'top-left', title: 'Esquina Superior Izquierda' },
+        { id: 'top', title: 'Superior' },
+        { id: 'top-right', title: 'Esquina Superior Derecha' },
+        { id: 'left', title: 'Izquierda' },
+        { id: 'center', title: 'Centro' },
+        { id: 'right', title: 'Derecha' },
+        { id: 'bottom-left', title: 'Esquina Inferior Izquierda' },
+        { id: 'bottom', title: 'Inferior' },
+        { id: 'bottom-right', title: 'Esquina Inferior Derecha' },
+      ];
+
+      return (
+        <>
+          {/* Numeric Width × Height + Aspect Lock */}
+          {matchesFilter('ancho alto dimensiones tamaño relacion bloqueada') && (
+            <div className="flex items-center gap-1 shrink-0">
+              <label className="flex items-center gap-0.5 text-[10px]">
+                <span className="opacity-70 font-semibold">W</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={32768}
+                  value={canvasEditRect.width}
+                  onChange={(e) => {
+                    const nw = Math.max(1, parseInt(e.target.value, 10) || 1);
+                    const nh = canvasEditConfig.lockAspectRatio
+                      ? Math.max(1, Math.round((nw * canvasEditRect.height) / Math.max(1, canvasEditRect.width)))
+                      : canvasEditRect.height;
+                    applyNumericDimension(nw, nh);
+                  }}
+                  className="w-14 h-6 px-1.5 rounded border text-[10px] font-mono tabular-nums text-center outline-none"
+                  style={{
+                    backgroundColor: 'var(--studio-bg-elevated)',
+                    borderColor: 'var(--studio-border-strong)',
+                    color: 'var(--studio-text)',
+                  }}
+                  title="Nueva anchura del lienzo (px)"
+                />
+              </label>
+
+              <button
+                type="button"
+                onClick={() =>
+                  onChangeCanvasEditConfig({
+                    ...canvasEditConfig,
+                    lockAspectRatio: !canvasEditConfig.lockAspectRatio,
+                  })
+                }
+                title="Relación de aspecto bloqueada (Shift al arrastrar)"
+                className="h-6 w-6 rounded border flex items-center justify-center transition-colors shrink-0"
+                style={{
+                  backgroundColor: canvasEditConfig.lockAspectRatio
+                    ? 'var(--studio-accent)'
+                    : 'var(--studio-bg-elevated)',
+                  color: canvasEditConfig.lockAspectRatio
+                    ? 'var(--studio-accent-text)'
+                    : 'var(--studio-text-muted)',
+                  borderColor: canvasEditConfig.lockAspectRatio
+                    ? 'var(--studio-accent)'
+                    : 'var(--studio-border)',
+                }}
+              >
+                {canvasEditConfig.lockAspectRatio ? (
+                  <Link2 className="w-3 h-3" />
+                ) : (
+                  <Unlink2 className="w-3 h-3" />
+                )}
+              </button>
+
+              <label className="flex items-center gap-0.5 text-[10px]">
+                <span className="opacity-70 font-semibold">H</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={32768}
+                  value={canvasEditRect.height}
+                  onChange={(e) => {
+                    const nh = Math.max(1, parseInt(e.target.value, 10) || 1);
+                    const nw = canvasEditConfig.lockAspectRatio
+                      ? Math.max(1, Math.round((nh * canvasEditRect.width) / Math.max(1, canvasEditRect.height)))
+                      : canvasEditRect.width;
+                    applyNumericDimension(nw, nh);
+                  }}
+                  className="w-14 h-6 px-1.5 rounded border text-[10px] font-mono tabular-nums text-center outline-none"
+                  style={{
+                    backgroundColor: 'var(--studio-bg-elevated)',
+                    borderColor: 'var(--studio-border-strong)',
+                    color: 'var(--studio-text)',
+                  }}
+                  title="Nueva altura del lienzo (px)"
+                />
+              </label>
+            </div>
+          )}
+
+          {/* Compact 3×3 Visual Anchor Selector */}
+          {matchesFilter('anclaje centro superior inferior izquierda derecha esquina') && (
+            <div
+              className="flex items-center gap-1.5 pl-1.5 border-l shrink-0"
+              style={{ borderColor: 'var(--studio-border)' }}
+              title="Anclaje del lienzo: Centro, Superior, Inferior, Izquierda, Derecha o Esquina personalizada"
+            >
+              <span className="text-[9px] font-semibold opacity-70 whitespace-nowrap">Anclaje</span>
+              <div className="grid grid-cols-3 gap-[2px] p-[2px] rounded border border-slate-700 bg-slate-900/90">
+                {anchorCells.map((cell) => {
+                  const active = canvasEditConfig.anchor === cell.id;
+                  return (
+                    <button
+                      key={cell.id}
+                      type="button"
+                      onClick={() => handleAnchorChange(cell.id)}
+                      title={`Anclaje: ${cell.title}`}
+                      className="w-2 h-2 rounded-[1px] transition-colors"
+                      style={{
+                        backgroundColor: active ? '#FACC15' : 'rgba(148,163,184,0.35)',
+                      }}
+                    />
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Off-Canvas Content Handling Mode */}
+          {matchesFilter('contenido fuera lienzo mantener recortar expandir automaticamente') && (
+            <div
+              className="flex items-center gap-1 pl-1.5 border-l shrink-0"
+              style={{ borderColor: 'var(--studio-border)' }}
+            >
+              <select
+                value={canvasEditConfig.overflowMode}
+                onChange={(e) =>
+                  onChangeCanvasEditConfig({
+                    ...canvasEditConfig,
+                    overflowMode: e.target.value as CanvasEditOverflowMode,
+                  })
+                }
+                className="h-6 px-1.5 rounded border text-[10px] font-medium outline-none"
+                style={{
+                  backgroundColor: 'var(--studio-bg-elevated)',
+                  borderColor: 'var(--studio-border-strong)',
+                  color: 'var(--studio-text)',
+                }}
+                title="Comportamiento con el contenido fuera del lienzo"
+              >
+                <option value="keep">Mantener contenido</option>
+                <option value="crop">Recortar contenido</option>
+                <option value="auto_expand">Expandir automáticamente</option>
+              </select>
+
+              {onFitCanvasEditToContent && (
+                <ActionBtn
+                  onClick={onFitCanvasEditToContent}
+                  label={hasOffCanvasContent ? 'Recuperar Todo' : 'Ajustar Contenido'}
+                  keywords="ajustar contenido auto expandir recuperar"
+                  icon={Maximize2}
+                  title="Ajusta automáticamente los límites para abarcar todo el contenido (incluyendo píxeles fuera del lienzo)"
+                />
+              )}
+            </div>
+          )}
+
+          {/* Advanced Snap & Symmetry Options */}
+          <div
+            className="flex items-center gap-1 pl-1.5 border-l shrink-0"
+            style={{ borderColor: 'var(--studio-border)' }}
+          >
+            <ToggleBtn
+              active={canvasEditConfig.snapToGrid}
+              onClick={() =>
+                onChangeCanvasEditConfig({
+                  ...canvasEditConfig,
+                  snapToGrid: !canvasEditConfig.snapToGrid,
+                })
+              }
+              label={`Rejilla ${canvasEditConfig.snapGridStep}px`}
+              keywords="ajuste cuadricula rejilla snap grid"
+              icon={Grid}
+              title="Ajuste a cuadrícula al arrastrar tiradores"
+            />
+            {canvasEditConfig.snapToGrid && (
+              <input
+                type="number"
+                min={2}
+                max={256}
+                value={canvasEditConfig.snapGridStep}
+                onChange={(e) =>
+                  onChangeCanvasEditConfig({
+                    ...canvasEditConfig,
+                    snapGridStep: Math.max(2, Math.min(256, parseInt(e.target.value, 10) || 8)),
+                  })
+                }
+                className="w-10 h-6 px-1 rounded border text-[10px] font-mono tabular-nums text-center outline-none"
+                style={{
+                  backgroundColor: 'var(--studio-bg-elevated)',
+                  borderColor: 'var(--studio-border-strong)',
+                  color: 'var(--studio-text)',
+                }}
+                title="Paso de cuadrícula (px)"
+              />
+            )}
+            <ToggleBtn
+              active={canvasEditConfig.snapToPixels}
+              onClick={() =>
+                onChangeCanvasEditConfig({
+                  ...canvasEditConfig,
+                  snapToPixels: !canvasEditConfig.snapToPixels,
+                })
+              }
+              label="Píxeles"
+              keywords="ajuste por pixeles enteros"
+              icon={Crosshair}
+              title="Ajuste exacto por píxeles enteros (sin subpíxeles)"
+            />
+            <ToggleBtn
+              active={canvasEditConfig.symmetricGrowth}
+              onClick={() =>
+                onChangeCanvasEditConfig({
+                  ...canvasEditConfig,
+                  symmetricGrowth: !canvasEditConfig.symmetricGrowth,
+                })
+              }
+              label="Simétrico"
+              keywords="crecimiento simetrico alt"
+              icon={FlipHorizontal2}
+              tone="emerald"
+              title="Crecimiento / recorte simétrico desde el centro (o mantén Alt)"
+            />
+          </div>
+
+          {/* Spritesheet Mode Controls */}
+          <div
+            className="flex items-center gap-1 pl-1.5 border-l shrink-0"
+            style={{ borderColor: 'var(--studio-border)' }}
+          >
+            <ToggleBtn
+              active={canvasEditConfig.spritesheetMode}
+              onClick={() =>
+                onChangeCanvasEditConfig({
+                  ...canvasEditConfig,
+                  spritesheetMode: !canvasEditConfig.spritesheetMode,
+                })
+              }
+              label="Spritesheet"
+              keywords="spritesheet filas columnas celdas grid"
+              icon={Columns2}
+              tone="amber"
+              title="Activa guías de celdas y expansión por filas, columnas y celdas"
+            />
+            {canvasEditConfig.spritesheetMode && (
+              <>
+                <input
+                  type="number"
+                  min={4}
+                  max={2048}
+                  value={cellW}
+                  onChange={(e) =>
+                    onChangeCanvasEditConfig({
+                      ...canvasEditConfig,
+                      cellWidth: Math.max(4, parseInt(e.target.value, 10) || 32),
+                    })
+                  }
+                  className="w-11 h-6 px-1 rounded border text-[10px] font-mono tabular-nums text-center outline-none"
+                  style={{
+                    backgroundColor: 'var(--studio-bg-elevated)',
+                    borderColor: 'var(--studio-border-strong)',
+                    color: 'var(--studio-text)',
+                  }}
+                  title="Ancho de celda (px)"
+                />
+                <span className="text-[10px] opacity-60">×</span>
+                <input
+                  type="number"
+                  min={4}
+                  max={2048}
+                  value={cellH}
+                  onChange={(e) =>
+                    onChangeCanvasEditConfig({
+                      ...canvasEditConfig,
+                      cellHeight: Math.max(4, parseInt(e.target.value, 10) || 32),
+                    })
+                  }
+                  className="w-11 h-6 px-1 rounded border text-[10px] font-mono tabular-nums text-center outline-none"
+                  style={{
+                    backgroundColor: 'var(--studio-bg-elevated)',
+                    borderColor: 'var(--studio-border-strong)',
+                    color: 'var(--studio-text)',
+                  }}
+                  title="Alto de celda (px)"
+                />
+                <ActionBtn
+                  onClick={() => stepSpritesheet(1, 0)}
+                  label="+Col"
+                  keywords="añadir columna spritesheet"
+                  icon={Plus}
+                  title={`Añadir 1 columna (+${cellW}px)`}
+                />
+                <ActionBtn
+                  onClick={() => stepSpritesheet(-1, 0)}
+                  label="-Col"
+                  keywords="quitar columna spritesheet"
+                  icon={Minus}
+                  disabled={canvasEditRect.width <= cellW}
+                  title={`Quitar 1 columna (-${cellW}px)`}
+                />
+                <ActionBtn
+                  onClick={() => stepSpritesheet(0, 1)}
+                  label="+Fila"
+                  keywords="añadir fila spritesheet"
+                  icon={Plus}
+                  title={`Añadir 1 fila (+${cellH}px)`}
+                />
+                <ActionBtn
+                  onClick={() => stepSpritesheet(0, -1)}
+                  label="-Fila"
+                  keywords="quitar fila spritesheet"
+                  icon={Minus}
+                  disabled={canvasEditRect.height <= cellH}
+                  title={`Quitar 1 fila (-${cellH}px)`}
+                />
+                <ActionBtn
+                  onClick={() => stepSpritesheet(1, 1)}
+                  label="+Celda"
+                  keywords="añadir celda fila columna spritesheet"
+                  icon={Expand}
+                  title={`Añadir 1 columna y 1 fila (+${cellW}×${cellH}px)`}
+                />
+              </>
+            )}
+          </div>
+
+          {/* Apply / Reset / Cancel */}
+          <div
+            className="flex items-center gap-1 pl-1.5 border-l shrink-0"
+            style={{ borderColor: 'var(--studio-border)' }}
+          >
+            {onApplyCanvasEdit && (
+              <ActionBtn
+                onClick={onApplyCanvasEdit}
+                label="Aplicar"
+                keywords="aplicar confirmar enter"
+                icon={Check}
+                variant="primary"
+                title="Aplicar nuevo tamaño de lienzo (Enter)"
+              />
+            )}
+            {onResetCanvasEdit && (
+              <ActionBtn
+                onClick={onResetCanvasEdit}
+                label="Restablecer"
+                keywords="restablecer reset original"
+                icon={RotateCcw}
+                title="Restablecer al tamaño actual del lienzo"
+              />
+            )}
+            {onCancelCanvasEdit && (
+              <ActionBtn
+                onClick={onCancelCanvasEdit}
+                label="Cancelar"
+                keywords="cancelar salir esc"
+                icon={X}
+                variant="danger"
+                title="Cancelar edición de lienzo (Esc)"
+              />
+            )}
+          </div>
         </>
       );
     }

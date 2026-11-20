@@ -306,6 +306,7 @@ export const DEFAULT_TOOL_ORDER: ToolType[] = [
   'select',
   'lasso',
   'magic_wand',
+  'canvas_edit',
   'pencil',
   'eraser',
   'bucket',

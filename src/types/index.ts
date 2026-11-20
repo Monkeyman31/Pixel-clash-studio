@@ -14,11 +14,49 @@ export type ToolType =
   | 'lasso'
   | 'magic_wand'
   | 'move'
+  | 'canvas_edit'
   | 'smear'
   | 'hitbox'
   | 'hand'
   | 'zoom'
   | 'shading';
+
+export type CanvasEditAnchor =
+  | 'center'
+  | 'top'
+  | 'bottom'
+  | 'left'
+  | 'right'
+  | 'top-left'
+  | 'top-right'
+  | 'bottom-left'
+  | 'bottom-right';
+
+export type CanvasEditOverflowMode = 'keep' | 'crop' | 'auto_expand';
+
+export interface CanvasEditRect {
+  /** Left offset in original canvas pixel coordinates (negative = expand left) */
+  left: number;
+  /** Top offset in original canvas pixel coordinates (negative = expand top) */
+  top: number;
+  /** Proposed canvas width in pixels (>= 1) */
+  width: number;
+  /** Proposed canvas height in pixels (>= 1) */
+  height: number;
+}
+
+export interface CanvasEditConfig {
+  anchor: CanvasEditAnchor;
+  overflowMode: CanvasEditOverflowMode;
+  snapToGrid: boolean;
+  snapGridStep: number;
+  snapToPixels: boolean;
+  lockAspectRatio: boolean;
+  symmetricGrowth: boolean;
+  spritesheetMode: boolean;
+  cellWidth: number;
+  cellHeight: number;
+}
 
 export type MoveSubTool =
   | 'move_object'
@@ -620,6 +658,10 @@ export interface Layer {
   parallaxSpeed?: number; // Stage work-mode horizontal parallax scroll multiplier (e.g. 0.2, 0.5, 1.0, 1.35)
   stagePlane?: string; // Semantic plane tag for Stage mode (e.g. 'sky', 'far', 'mid', 'near', 'ground', 'fg', 'fx')
   fxRecipe?: EditableFxRecipe | null; // Editable FX metadata so generated FX layers can be reopened and regenerated
+  /** ID referencing an on-demand 256×256 sparse RGBA TiledLayerStore for large canvases/spritesheets */
+  tiledStoreId?: string;
+  /** Lightweight bump counter so React re-renders tiled viewport canvases without deep-cloning giant grids */
+  tiledRevision?: number;
 }
 
 export interface ClipboardData {
@@ -966,6 +1008,7 @@ export interface ProjectState {
   name: string;
   width: number;
   height: number;
+  dpi?: number;
   frames: Frame[];
   layerGroups?: LayerGroup[];
   activeGroupId?: string | null;
@@ -1318,6 +1361,7 @@ export interface NewProjectConfig {
   name: string;
   width: number;
   height: number;
+  dpi?: number;
   pixelScale?: number;
   category?: string;
   templateId?: string;
@@ -2128,3 +2172,28 @@ export type ClipboardPasteDestination =
   | 'new_document';
 
 export type ClipboardFitMode = 'original' | 'fit' | 'fill';
+
+// =========================================================
+// SYSTEM 11: PIXEL-EXACT IMPORT, INTERPOLATION & STARTUP FLOW
+// =========================================================
+export type InterpolationMode = 'nearest' | 'bilinear' | 'bicubic';
+
+export type ResolutionMismatchAction =
+  | 'original_size'
+  | 'fit_canvas'
+  | 'center_no_resize'
+  | 'new_document';
+
+export type StartupMascotMode = 'builtin' | 'custom_gif_webp' | 'custom_spritesheet';
+
+export interface StartupPreferences {
+  showHomeScreen: boolean;
+  showSplashAnimation: boolean;
+  showSplashTips: boolean;
+  splashMinDurationMs: number;
+  mascotMode: StartupMascotMode;
+  mascotCustomName?: string;
+  mascotSheetCols?: number;
+  mascotSheetRows?: number;
+  mascotSheetFps?: number;
+}

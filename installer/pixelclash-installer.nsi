@@ -38,19 +38,25 @@ Section "PixelClash Studio (Principal)" SecCore
   File /r "..\release\win-unpacked\*.*"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PixelClashStudio" "DisplayName" "PixelClash Studio 2.0.0"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PixelClashStudio" "DisplayIcon" "$INSTDIR\PixelClashStudio.exe,0"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PixelClashStudio" "UninstallString" '"$INSTDIR\Uninstall.exe"'
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PixelClashStudio" "Publisher" "PixelClash Studio"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PixelClashStudio" "DisplayVersion" "2.0.0"
+  ; Asociacion oficial de archivos .pcs con el icono de PixelClash Studio
+  WriteRegStr HKCR ".pcs" "" "PixelClashStudio.Project"
+  WriteRegStr HKCR "PixelClashStudio.Project" "" "Proyecto PixelClash Studio"
+  WriteRegStr HKCR "PixelClashStudio.Project\DefaultIcon" "" "$INSTDIR\PixelClashStudio.exe,0"
+  WriteRegStr HKCR "PixelClashStudio.Project\shell\open\command" "" '"$INSTDIR\PixelClashStudio.exe" "%1"'
 SectionEnd
 
 Section "Acceso directo en Escritorio" SecDesktop
-  CreateShortcut "$DESKTOP\PixelClash Studio.lnk" "$INSTDIR\PixelClashStudio.exe"
+  CreateShortcut "$DESKTOP\PixelClash Studio.lnk" "$INSTDIR\PixelClashStudio.exe" "" "$INSTDIR\PixelClashStudio.exe" 0
 SectionEnd
 
 Section "Acceso directo en Menu Inicio" SecStartMenu
   CreateDirectory "$SMPROGRAMS\PixelClash Studio"
-  CreateShortcut "$SMPROGRAMS\PixelClash Studio\PixelClash Studio.lnk" "$INSTDIR\PixelClashStudio.exe"
-  CreateShortcut "$SMPROGRAMS\PixelClash Studio\Desinstalar PixelClash Studio.lnk" "$INSTDIR\Uninstall.exe"
+  CreateShortcut "$SMPROGRAMS\PixelClash Studio\PixelClash Studio.lnk" "$INSTDIR\PixelClashStudio.exe" "" "$INSTDIR\PixelClashStudio.exe" 0
+  CreateShortcut "$SMPROGRAMS\PixelClash Studio\Desinstalar PixelClash Studio.lnk" "$INSTDIR\Uninstall.exe" "" "$INSTDIR\Uninstall.exe" 0
 SectionEnd
 
 Section "Uninstall"
@@ -58,4 +64,5 @@ Section "Uninstall"
   RMDir /r "$SMPROGRAMS\PixelClash Studio"
   RMDir /r "$INSTDIR"
   DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PixelClashStudio"
+  DeleteRegKey HKCR "PixelClashStudio.Project"
 SectionEnd

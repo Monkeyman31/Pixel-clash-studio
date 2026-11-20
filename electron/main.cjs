@@ -102,6 +102,17 @@ function registerDesktopFileIpc() {
 }
 
 function createWindow() {
+  const icoCandidate = path.join(__dirname, '..', 'assets', 'pixelclash.ico');
+  const pngCandidate = path.join(__dirname, '..', 'assets', 'pixelclash.png');
+  const resolvedIcon =
+    process.platform === 'win32'
+      ? fs.existsSync(icoCandidate)
+        ? icoCandidate
+        : pngCandidate
+      : fs.existsSync(pngCandidate)
+      ? pngCandidate
+      : icoCandidate;
+
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -109,7 +120,7 @@ function createWindow() {
     minHeight: 680,
     title: 'PixelClash Studio',
     backgroundColor: '#0d0f14',
-    icon: path.join(__dirname, '..', 'assets', 'pixelclash.ico'),
+    icon: resolvedIcon,
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
@@ -130,6 +141,10 @@ function createWindow() {
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
+}
+
+if (process.platform === 'win32') {
+  app.setAppUserModelId('com.pixelclash.studio');
 }
 
 app.whenReady().then(() => {

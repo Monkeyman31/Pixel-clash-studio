@@ -11,7 +11,7 @@ import { RightSidebar } from './components/RightSidebar';
 import { ExportModal, ExportModalTab } from './components/ExportModal';
 import { CanvasSizeModal } from './components/CanvasSizeModal';
 import { ImageSizeModal } from './components/ImageSizeModal';
-import { NewProjectModal } from './components/NewProjectModal';
+import { NewProjectModal, NewProjectTemplateCategory } from './components/NewProjectModal';
 import { ShortcutsModal } from './components/ShortcutsModal';
 import { ToolGuideModal } from './components/ToolGuideModal';
 import { WhatIsThisOverlay } from './components/WhatIsThisOverlay';
@@ -30,7 +30,9 @@ import { FxInjectionPayload, FxStudioModal } from './components/FxStudioModal';
 import {
   FileLoadErrorModal,
   FileLoadErrorPayload,
+  ImportResolutionMismatchModal,
   MissingRecentFileModal,
+  SpritesheetDetectedPromptModal,
   SpritesheetSlicerModal,
 } from './components/FileRecoveryAndSheetModals';
 import { SmartPasteModal } from './components/SmartPasteModal';
@@ -46,6 +48,8 @@ import {
   StudioTopLayerPortal,
   classifyNotificationSeverity,
 } from './components/StudioTopLayer';
+import { HomeScreen, HomeScreenSection } from './components/HomeScreen';
+import { SplashLoadingScreen } from './components/SplashLoadingScreen';
 import { DEFAULT_BRUSH_SETTINGS } from './components/BrushSettingsPanel';
 import { createDefaultFighterFrames } from './constants/defaultFighter';
 import { FIGHTING_GAME_PALETTES } from './constants/palettes';
@@ -87,6 +91,8 @@ import {
   BucketToolOptions,
   CameraKeyframe,
   CameraShakeConfig,
+  CanvasEditConfig,
+  CanvasEditRect,
   CanvasGuide,
   ClipboardData,
   ClipboardFitMode,
@@ -108,6 +114,7 @@ import {
   GuidesModalTab,
   Hitbox, 
   HitboxType, 
+  InterpolationMode,
   LassoMode,
   Layer, 
   LayerAdjustmentConfig,
@@ -134,6 +141,7 @@ import {
   RecordedMacro,
   ReferenceGroup,
   ReferenceItem,
+  ResolutionMismatchAction,
   RulerUnit,
   SampledColorInfo,
   SaveAsFormatId,
@@ -149,6 +157,7 @@ import {
   SmartDeleteCandidate,
   StageParallaxConfig,
   StageType,
+  StartupPreferences,
   SymmetryConfig,
   TilesetWorkspaceConfig,
   TimelineMarker,
@@ -276,6 +285,7 @@ import {
   SpritesheetCandidateInfo,
   SpritesheetSliceOptions,
   decodeAnyRasterFileToRgba,
+  decodeFilePreviewDataUrl,
   detectSpritesheetCandidate,
   importGraphicFile,
   isSupportedImageFile,
@@ -310,6 +320,8 @@ import {
 } from './utils/systemClipboard';
 import { 
   AnchorPosition, 
+  applyCanvasRectTransform,
+  computeAllFramesContentBounds,
   flipCanvasHorizontal, 
   flipCanvasVertical, 
   rescaleSpriteGrid, 
@@ -323,6 +335,17 @@ import {
   saveCustomBrushPresets,
 } from './utils/customBrushStorage';
 import { parseAnyLospecText } from './utils/lospecImporter';
+import {
+  TiledLayerStore,
+  isLayerTiled,
+  registerTiledStore,
+  shouldUseTiledStorage,
+} from './utils/tiledImageEngine';
+import {
+  loadStartupPreferences,
+  saveStartupPreferences,
+} from './utils/startupPreferences';
+import { detectHardwareCapabilities } from './utils/canvasMemoryEstimator';
 
 interface OpenDocumentSnapshot {
   name: string;
@@ -413,6 +436,16 @@ interface PendingSpritesheetOpenState {
   fileHandle?: FileSystemFileHandle;
   replaceRecentId?: string;
   allowOpenAsSingleImage: boolean;
+}
+
+interface PendingResolutionMismatchState {
+  files: File[];
+  mode: ImportMenuMode;
+  fileName: string;
+  sourceWidth: number;
+  sourceHeight: number;
+  sourceDpi: number;
+  previewDataUrl: string | null;
 }
 
 const RECENT_SNAPSHOTS_STORAGE_KEY = 'pixelclash_recent_snapshots_v1';
@@ -511,14 +544,17 @@ async function rasterizeImageFileToGrid(
   file: File,
   targetW: number,
   targetH: number,
-  fitMode: SmartImportFitMode = 'fit'
+  fitMode: SmartImportFitMode = 'original',
+  interpolation: InterpolationMode = 'nearest'
 ): Promise<{
   grid: (string | null)[][];
+  tiledStoreId?: string;
   naturalWidth: number;
   naturalHeight: number;
+  dpi: number;
   dataUrl: string;
 }> {
-  return rasterizeImageFileToTargetGrid(file, targetW, targetH, fitMode);
+  return rasterizeImageFileToTargetGrid(file, targetW, targetH, fitMode, interpolation);
 }
 
 async function extractPaletteFromImageFile(file: File, maxColors: number = 32): Promise<string[]> {
@@ -710,9 +746,44 @@ export default function App() {
     );
   }, []);
 
+  const previousToolBeforeCanvasEditRef = useRef<ToolType>('pencil');
+  const [canvasEditRect, setCanvasEditRect] = useState<CanvasEditRect>({
+    left: 0,
+    top: 0,
+    width: 64,
+    height: 64,
+  });
+  const [canvasEditConfig, setCanvasEditConfig] = useState<CanvasEditConfig>({
+    anchor: 'center',
+    overflowMode: 'keep',
+    snapToGrid: false,
+    snapGridStep: 8,
+    snapToPixels: true,
+    lockAspectRatio: false,
+    symmetricGrowth: false,
+    spritesheetMode: false,
+    cellWidth: 32,
+    cellHeight: 32,
+  });
+
+  useEffect(() => {
+    setCanvasEditRect({ left: 0, top: 0, width: canvasWidth, height: canvasHeight });
+  }, [canvasWidth, canvasHeight]);
+
   const handleSelectTool = useCallback((tool: ToolType) => {
     setSymmetryBarActive(false);
     setAiBarActive(false);
+    if (tool === 'canvas_edit') {
+      setActiveTool((curr) => {
+        if (curr !== 'canvas_edit') {
+          previousToolBeforeCanvasEditRef.current = curr;
+        }
+        return 'canvas_edit';
+      });
+      setCanvasEditRect({ left: 0, top: 0, width: canvasWidth, height: canvasHeight });
+      setSelectedParametricShapeId(null);
+      return;
+    }
     if (tool === 'vector_select' || tool === 'direct_select') {
       setMoveSubTool('direct_select');
       setActiveTool('move');
@@ -763,7 +834,7 @@ export default function App() {
       setSelectedParametricShapeId(null);
     }
     setActiveTool(tool);
-  }, []);
+  }, [canvasWidth, canvasHeight]);
   const handleActivateMoveReferenceTool = useCallback(() => {
     setActiveTool('move');
     setMoveSubTool('move_reference');
@@ -974,6 +1045,22 @@ export default function App() {
   const [canvasSizeModalOpen, setCanvasSizeModalOpen] = useState<boolean>(false);
   const [imageSizeModalOpen, setImageSizeModalOpen] = useState<boolean>(false);
   const [newProjectModalOpen, setNewProjectModalOpen] = useState<boolean>(false);
+  const [newProjectInitialCategory, setNewProjectInitialCategory] =
+    useState<NewProjectTemplateCategory>('Todas');
+  const [documentDpi, setDocumentDpi] = useState<number>(72);
+  const [startupPreferences, setStartupPreferences] = useState<StartupPreferences>(() =>
+    loadStartupPreferences()
+  );
+  const [splashOpen, setSplashOpen] = useState<boolean>(() => {
+    const prefs = loadStartupPreferences();
+    return prefs.showSplashAnimation;
+  });
+  const [splashTestMode, setSplashTestMode] = useState<boolean>(false);
+  const [homeScreenOpen, setHomeScreenOpen] = useState<boolean>(() => {
+    const prefs = loadStartupPreferences();
+    return prefs.showHomeScreen;
+  });
+  const [homeScreenSection, setHomeScreenSection] = useState<HomeScreenSection>('inicio');
   const [shortcutsModalOpen, setShortcutsModalOpen] = useState<boolean>(false);
   const [toolGuideModalOpen, setToolGuideModalOpen] = useState<boolean>(false);
   const [helpInitialFocusId, setHelpInitialFocusId] = useState<string | null>(null);
@@ -1163,12 +1250,46 @@ export default function App() {
   const [smartImportFiles, setSmartImportFiles] = useState<File[]>([]);
   const [isExternalFileDragOver, setIsExternalFileDragOver] = useState<boolean>(false);
 
-  // Unified File Recovery, Load Validation Error & Spritesheet Slicer Modals
+  // Unified File Recovery, Load Validation Error, Spritesheet Detection & Resolution Mismatch Modals
   const [missingRecentEntry, setMissingRecentEntry] = useState<RecentProjectEntry | null>(null);
   const [fileLoadError, setFileLoadError] = useState<FileLoadErrorPayload | null>(null);
+  const [pendingSpritesheetPrompt, setPendingSpritesheetPrompt] =
+    useState<PendingSpritesheetOpenState | null>(null);
   const [pendingSpritesheetOpen, setPendingSpritesheetOpen] =
     useState<PendingSpritesheetOpenState | null>(null);
+  const [pendingResolutionMismatch, setPendingResolutionMismatch] =
+    useState<PendingResolutionMismatchState | null>(null);
   const relocatingRecentIdRef = useRef<string | null>(null);
+
+  const handleUpdateStartupPreferences = useCallback((next: StartupPreferences) => {
+    setStartupPreferences(next);
+    saveStartupPreferences(next);
+  }, []);
+
+  const handleSplashInitTask = useCallback(async () => {
+    detectHardwareCapabilities();
+  }, []);
+
+  const handleSplashComplete = useCallback(() => {
+    setSplashOpen(false);
+    if (splashTestMode) {
+      setSplashTestMode(false);
+      return;
+    }
+    if (startupPreferences.showHomeScreen) {
+      setHomeScreenOpen(true);
+    }
+  }, [splashTestMode, startupPreferences.showHomeScreen]);
+
+  const handleOpenHomeScreen = useCallback((section: HomeScreenSection = 'inicio') => {
+    setHomeScreenSection(section);
+    setHomeScreenOpen(true);
+  }, []);
+
+  const handleTestSplashAnimation = useCallback(() => {
+    setSplashTestMode(true);
+    setSplashOpen(true);
+  }, []);
 
   // References System State
   const [references, setReferences] = useState<ReferenceItem[]>(() => {
@@ -1683,8 +1804,14 @@ export default function App() {
     currentLayerIndex: number;
     selectedVectorPathId: string | null;
     selectedVectorNodeIds: string[];
+    canvasWidth?: number;
+    canvasHeight?: number;
   };
 
+  const canvasWidthRef = useRef<number>(canvasWidth);
+  canvasWidthRef.current = canvasWidth;
+  const canvasHeightRef = useRef<number>(canvasHeight);
+  canvasHeightRef.current = canvasHeight;
   const framesRef = useRef<Frame[]>(frames);
   framesRef.current = frames;
   const layerGroupsRef = useRef<LayerGroup[]>(layerGroups);
@@ -1753,6 +1880,8 @@ export default function App() {
         override?.selectedVectorNodeIds !== undefined
           ? [...override.selectedVectorNodeIds]
           : [...selectedVectorNodeIdsRef.current],
+      canvasWidth: override?.canvasWidth ?? canvasWidthRef.current,
+      canvasHeight: override?.canvasHeight ?? canvasHeightRef.current,
     };
     const nextHistory = historyRef.current.slice(0, historyIndexRef.current + 1);
     nextHistory.push(snap);
@@ -1847,6 +1976,14 @@ export default function App() {
     selectedVectorPathIdRef.current = snap.selectedVectorPathId || null;
     selectedVectorNodeIdsRef.current = [...(snap.selectedVectorNodeIds || [])];
 
+    if (typeof snap.canvasWidth === 'number' && snap.canvasWidth > 0) {
+      canvasWidthRef.current = snap.canvasWidth;
+      setCanvasWidth(snap.canvasWidth);
+    }
+    if (typeof snap.canvasHeight === 'number' && snap.canvasHeight > 0) {
+      canvasHeightRef.current = snap.canvasHeight;
+      setCanvasHeight(snap.canvasHeight);
+    }
     setFrames(restoredFrames);
     setLayerGroups(restoredGroups);
     setReferences(restoredRefs);
@@ -1984,6 +2121,36 @@ export default function App() {
     [currentFrameIndex, currentLayerIndex, clipOutsideCanvas, pushHistorySnapshot, syncGlobalLayerAcrossFrames]
   );
 
+  // Commit tiled high-resolution layer edit (O(1) sparse tile update, zero dense arrays)
+  const handleCommitTiledLayerEdit = useCallback(
+    (layerId: string, newTiledStoreId: string) => {
+      const prevFrames = framesRef.current;
+      let editedLayer: Layer | null = null;
+      let updated = prevFrames.map((f, fIdx) => {
+        if (fIdx !== currentFrameIndex) return f;
+        return {
+          ...f,
+          layers: f.layers.map((l) => {
+            if (l.id !== layerId) return l;
+            editedLayer = {
+              ...l,
+              tiledStoreId: newTiledStoreId,
+              tiledRevision: (l.tiledRevision || 0) + 1,
+            };
+            return editedLayer;
+          }),
+        };
+      });
+      if (editedLayer && (editedLayer as Layer).isGlobal) {
+        updated = syncGlobalLayerAcrossFrames(updated, editedLayer);
+      }
+      framesRef.current = updated;
+      setFrames(updated);
+      pushHistorySnapshot({ frames: updated });
+    },
+    [currentFrameIndex, pushHistorySnapshot, syncGlobalLayerAcrossFrames]
+  );
+
   // Update hitboxes of current frame
   const handleUpdateHitboxes = useCallback(
     (newHitboxes: Hitbox[]) => {
@@ -2039,30 +2206,191 @@ export default function App() {
     [currentFrameIndex, currentLayerIndex, canvasWidth, canvasHeight, clipOutsideCanvas, pushHistorySnapshot]
   );
 
-  // Clear current frame
+  // Clear current frame (handles both dense grids and massive tiled layers)
   const handleClearFrame = () => {
+    const activeLayer = framesRef.current[currentFrameIndex]?.layers[currentLayerIndex];
+    if (activeLayer && isLayerTiled(activeLayer)) {
+      const emptyStore = new TiledLayerStore(canvasWidth, canvasHeight);
+      const newStoreId = registerTiledStore(emptyStore);
+      handleCommitTiledLayerEdit(activeLayer.id, newStoreId);
+      return;
+    }
     const emptyGrid = createEmptyGrid(canvasWidth, canvasHeight);
     handleUpdateLayerPixels(emptyGrid);
   };
 
-  // Canvas Size with Anchor
+  // Canvas Size with Anchor (unlimited dimensions & tiled-aware)
   const handleApplyCanvasSize = (newW: number, newH: number, anchor: AnchorPosition) => {
     const resized = resizeCanvasGrid(frames, canvasWidth, canvasHeight, newW, newH, anchor);
+    canvasWidthRef.current = newW;
+    canvasHeightRef.current = newH;
     setCanvasWidth(newW);
     setCanvasHeight(newH);
+    framesRef.current = resized;
     setFrames(resized);
     setGlobalPivot({ x: Math.floor(newW / 2), y: Math.floor(newH * 0.8) });
-    pushHistory(resized);
+    pushHistorySnapshot({ frames: resized, canvasWidth: newW, canvasHeight: newH });
   };
 
-  // Image Size / Rescale (Nearest Neighbor Pixel Art)
-  const handleApplyImageSize = (newW: number, newH: number) => {
-    const rescaled = rescaleSpriteGrid(frames, canvasWidth, canvasHeight, newW, newH);
+  // Visual Canvas Edit Tool (Editar Lienzo) helpers & commit
+  const hasOffCanvasContent = useMemo(() => {
+    for (const f of frames) {
+      for (const l of f.layers) {
+        if (l.offCanvasPixels && Object.keys(l.offCanvasPixels).length > 0) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }, [frames]);
+
+  const handleResetCanvasEdit = useCallback(() => {
+    setCanvasEditRect({ left: 0, top: 0, width: canvasWidth, height: canvasHeight });
+  }, [canvasWidth, canvasHeight]);
+
+  const handleCancelCanvasEdit = useCallback(() => {
+    setCanvasEditRect({ left: 0, top: 0, width: canvasWidth, height: canvasHeight });
+    const prevTool = previousToolBeforeCanvasEditRef.current;
+    setActiveTool(prevTool && prevTool !== 'canvas_edit' ? prevTool : 'pencil');
+  }, [canvasWidth, canvasHeight]);
+
+  const handleFitCanvasEditToContent = useCallback(() => {
+    const bounds = computeAllFramesContentBounds(framesRef.current, canvasWidth, canvasHeight);
+    if (!bounds.hasContent) {
+      setImportNotification('El lienzo no contiene píxeles para ajustar');
+      setTimeout(() => setImportNotification(null), 2200);
+      return;
+    }
+    const nextRect: CanvasEditRect = {
+      left: bounds.minX,
+      top: bounds.minY,
+      width: Math.max(1, bounds.maxX - bounds.minX + 1),
+      height: Math.max(1, bounds.maxY - bounds.minY + 1),
+    };
+    setCanvasEditRect(nextRect);
+    setImportNotification(
+      `Límites ajustados al contenido: ${nextRect.width}×${nextRect.height} px`
+    );
+    setTimeout(() => setImportNotification(null), 2400);
+  }, [canvasWidth, canvasHeight]);
+
+  const handleApplyCanvasEdit = useCallback(() => {
+    const isNoop =
+      canvasEditRect.left === 0 &&
+      canvasEditRect.top === 0 &&
+      canvasEditRect.width === canvasWidth &&
+      canvasEditRect.height === canvasHeight &&
+      canvasEditConfig.overflowMode !== 'auto_expand';
+
+    if (isNoop) {
+      handleCancelCanvasEdit();
+      return;
+    }
+
+    const oldW = canvasWidth;
+    const oldH = canvasHeight;
+    const result = applyCanvasRectTransform(
+      framesRef.current,
+      oldW,
+      oldH,
+      canvasEditRect,
+      canvasEditConfig.overflowMode
+    );
+
+    const nextGuides =
+      result.offsetX !== 0 || result.offsetY !== 0
+        ? guidesRef.current.map((g) => ({
+            ...g,
+            position:
+              g.orientation === 'vertical'
+                ? g.position + result.offsetX
+                : g.position + result.offsetY,
+          }))
+        : guidesRef.current;
+
+    const nextSym =
+      result.offsetX !== 0 || result.offsetY !== 0
+        ? {
+            ...symmetryConfigRef.current,
+            axisX: symmetryConfigRef.current.axisX + result.offsetX,
+            axisY: symmetryConfigRef.current.axisY + result.offsetY,
+            lineP1: {
+              x: symmetryConfigRef.current.lineP1.x + result.offsetX,
+              y: symmetryConfigRef.current.lineP1.y + result.offsetY,
+            },
+            lineP2: {
+              x: symmetryConfigRef.current.lineP2.x + result.offsetX,
+              y: symmetryConfigRef.current.lineP2.y + result.offsetY,
+            },
+          }
+        : symmetryConfigRef.current;
+
+    canvasWidthRef.current = result.width;
+    canvasHeightRef.current = result.height;
+    setCanvasWidth(result.width);
+    setCanvasHeight(result.height);
+    framesRef.current = result.frames;
+    setFrames(result.frames);
+    setGlobalPivot((prev) => ({
+      x: Math.max(0, Math.min(result.width, prev.x + result.offsetX)),
+      y: Math.max(0, Math.min(result.height, prev.y + result.offsetY)),
+    }));
+    if (result.offsetX !== 0 || result.offsetY !== 0) {
+      guidesRef.current = nextGuides;
+      setGuides(nextGuides);
+      symmetryConfigRef.current = nextSym;
+      setSymmetryConfig(nextSym);
+    }
+    setCanvasEditRect({ left: 0, top: 0, width: result.width, height: result.height });
+    pushHistorySnapshot({
+      frames: result.frames,
+      canvasWidth: result.width,
+      canvasHeight: result.height,
+      guides: nextGuides,
+      symmetryConfig: nextSym,
+    });
+
+    const modeLabel =
+      canvasEditConfig.overflowMode === 'keep'
+        ? 'contenido fuera conservado'
+        : canvasEditConfig.overflowMode === 'crop'
+        ? 'recorte limpio'
+        : 'auto-expandido al contenido';
+    setImportNotification(
+      `Lienzo actualizado: ${oldW}×${oldH} → ${result.width}×${result.height} px (${modeLabel})`
+    );
+    setTimeout(() => setImportNotification(null), 3000);
+  }, [
+    canvasEditRect,
+    canvasEditConfig.overflowMode,
+    canvasWidth,
+    canvasHeight,
+    handleCancelCanvasEdit,
+    pushHistorySnapshot,
+  ]);
+
+  // Image Size / Rescale (Nearest Neighbor default; Bilinear/Bicubic only if explicitly chosen)
+  const handleApplyImageSize = (
+    newW: number,
+    newH: number,
+    interpolation: InterpolationMode = 'nearest'
+  ) => {
+    const rescaled = rescaleSpriteGrid(
+      frames,
+      canvasWidth,
+      canvasHeight,
+      newW,
+      newH,
+      interpolation
+    );
+    canvasWidthRef.current = newW;
+    canvasHeightRef.current = newH;
     setCanvasWidth(newW);
     setCanvasHeight(newH);
+    framesRef.current = rescaled;
     setFrames(rescaled);
     setGlobalPivot({ x: Math.floor(newW / 2), y: Math.floor(newH * 0.8) });
-    pushHistory(rescaled);
+    pushHistorySnapshot({ frames: rescaled, canvasWidth: newW, canvasHeight: newH });
   };
 
   // Flip Horizontal
@@ -2841,12 +3169,13 @@ export default function App() {
     [currentLayer, selectedVectorPathId, selectedVectorNodeIds, handleUpdateLayerVectorPaths]
   );
 
-  // Create New Project (legacy signature + enhanced config)
+  // Create New Project (unlimited canvas resolution + sparse TiledLayerStore for huge canvases)
   const handleCreateProjectConfig = useCallback(
     (cfg: NewProjectConfig) => {
-      const scale = Math.max(1, Math.min(4, Math.round(cfg.pixelScale || 1)));
-      const newW = Math.max(8, Math.min(512, Math.round(cfg.width * scale)));
-      const newH = Math.max(8, Math.min(512, Math.round(cfg.height * scale)));
+      const scale = Math.max(1, Math.round(cfg.pixelScale || 1));
+      const newW = Math.max(1, Math.round(cfg.width * scale));
+      const newH = Math.max(1, Math.round(cfg.height * scale));
+      const nextDpi = Math.max(1, Math.round(cfg.dpi || 72));
       const finalName = (cfg.name || '').trim() || 'Nuevo Proyecto';
 
       if (cfg.initialPaletteId) {
@@ -2858,11 +3187,21 @@ export default function App() {
         }
       }
 
-      const initialPixels = createEmptyGrid(newW, newH);
-      if (cfg.backgroundMode === 'solid' && cfg.backgroundColor) {
-        for (let y = 0; y < newH; y++) {
-          for (let x = 0; x < newW; x++) {
-            initialPixels[y][x] = cfg.backgroundColor;
+      const useTiled = shouldUseTiledStorage(newW, newH);
+      let initialPixels: (string | null)[][] = [];
+      let initialTiledStoreId: string | undefined;
+
+      if (useTiled) {
+        const bgFill = cfg.backgroundMode === 'solid' && cfg.backgroundColor ? cfg.backgroundColor : null;
+        const store = new TiledLayerStore(newW, newH, undefined, bgFill);
+        initialTiledStoreId = registerTiledStore(store);
+      } else {
+        initialPixels = createEmptyGrid(newW, newH);
+        if (cfg.backgroundMode === 'solid' && cfg.backgroundColor) {
+          for (let y = 0; y < newH; y++) {
+            for (let x = 0; x < newW; x++) {
+              initialPixels[y][x] = cfg.backgroundColor;
+            }
           }
         }
       }
@@ -2893,6 +3232,8 @@ export default function App() {
               locked: false,
               opacity: 1,
               pixels: initialPixels,
+              tiledStoreId: initialTiledStoreId,
+              tiledRevision: initialTiledStoreId ? 1 : undefined,
               groupId: cfg.createInitialGroup ? 'group-main' : undefined,
             },
           ]
@@ -2903,7 +3244,9 @@ export default function App() {
               visible: true,
               locked: false,
               opacity: 1,
-              pixels: createEmptyGrid(newW, newH),
+              pixels: useTiled ? [] : createEmptyGrid(newW, newH),
+              tiledStoreId: useTiled ? registerTiledStore(new TiledLayerStore(newW, newH)) : undefined,
+              tiledRevision: useTiled ? 1 : undefined,
             },
           ];
 
@@ -2926,6 +3269,7 @@ export default function App() {
         openDocumentsRef.current.length === 1 &&
         curDocFrames.length === 1 &&
         curDocFrames[0]?.layers.length === 1 &&
+        !curDocFrames[0].layers[0].tiledStoreId &&
         curDocFrames[0].layers[0].pixels.every((row) => row.every((cell) => !cell));
 
       if (!curTabIsBlank) {
@@ -2998,6 +3342,9 @@ export default function App() {
       setProjectName(finalName);
       setCanvasWidth(newW);
       setCanvasHeight(newH);
+      setDocumentDpi(nextDpi);
+      setHomeScreenOpen(false);
+      setNewProjectModalOpen(false);
       layerGroupsRef.current = nextGroups;
       setLayerGroups(nextGroups);
       framesRef.current = newFrames;
@@ -3111,8 +3458,10 @@ export default function App() {
         return finalList;
       });
 
-      setImportNotification(`¡Proyecto "${finalName}" (${newW}×${newH}px) creado!`);
-      setTimeout(() => setImportNotification(null), 3000);
+      setImportNotification(
+        `¡Proyecto "${finalName}" (${newW}×${newH} px · ${nextDpi} DPI${useTiled ? ' · Motor por Bloques' : ''}) creado!`
+      );
+      setTimeout(() => setImportNotification(null), 3200);
     },
     [
       pushHistorySnapshot,
@@ -7660,6 +8009,7 @@ export default function App() {
     if (curFrames.length > 1) return false;
     const f0 = curFrames[0];
     if (!f0 || f0.layers.length > 1) return false;
+    if (f0.layers[0]?.tiledStoreId) return false;
     const grid = f0.layers[0]?.pixels;
     if (!grid) return true;
     for (const row of grid) {
@@ -7867,9 +8217,10 @@ export default function App() {
       });
 
       setNewProjectModalOpen(false);
-      const scaleNote = res.stats.wasDownscaled
-        ? ` · ajustado desde ${res.stats.originalWidth}×${res.stats.originalHeight}`
-        : '';
+      setHomeScreenOpen(false);
+      setDocumentDpi(res.dpi || 72);
+      const dpiNote = res.dpi ? ` · ${res.dpi} DPI` : '';
+      const tiledNote = res.stats.usesTiledEngine ? ' · Bloques 1:1' : '';
       const frameNote =
         res.frames.length > 1
           ? ` · ${res.frames.length} fotogramas`
@@ -7877,7 +8228,7 @@ export default function App() {
           ? ` · ${res.stats.layerCount} capas`
           : '';
       setImportNotification(
-        `${res.stats.formatLabel} abierto${openedInNewTab ? ' en nueva pestaña' : ''}: ${file.name} (${res.width}×${res.height} px${frameNote}${scaleNote})`
+        `${res.stats.formatLabel} abierto${openedInNewTab ? ' en nueva pestaña' : ''}: ${file.name} (${res.width}×${res.height} px${dpiNote}${frameNote}${tiledNote} · 1:1 exacto)`
       );
       setTimeout(() => setImportNotification(null), 4000);
     },
@@ -7921,14 +8272,16 @@ export default function App() {
 
         const res = await importGraphicFile(file);
 
-        // Offer Spritesheet Slicer automatically when a spritesheet strip/grid is detected
+        // Ask user explicitly before treating a detected image as a spritesheet!
+        // "Se ha detectado una posible hoja de sprites. ¿Desea abrirla como spritesheet?"
+        // Sí -> interactive Slicer | No -> open intact 1:1 without any resize
         if (
           res.spritesheetCandidate?.isCandidate &&
           res.rawRaster &&
           !opts?.skipSpritesheetPrompt
         ) {
           setImportNotification(null);
-          setPendingSpritesheetOpen({
+          setPendingSpritesheetPrompt({
             file,
             fileName: file.name,
             rawRaster: res.rawRaster,
@@ -7949,6 +8302,29 @@ export default function App() {
     },
     [hydrateImportResultAsDocument, reportFileLoadFailure]
   );
+
+  const handleConfirmSpritesheetDetectedYes = useCallback(() => {
+    if (!pendingSpritesheetPrompt) return;
+    const pending = pendingSpritesheetPrompt;
+    setPendingSpritesheetPrompt(null);
+    setPendingSpritesheetOpen(pending);
+  }, [pendingSpritesheetPrompt]);
+
+  const handleConfirmSpritesheetDetectedNo = useCallback(async () => {
+    if (!pendingSpritesheetPrompt) return;
+    const pending = pendingSpritesheetPrompt;
+    setPendingSpritesheetPrompt(null);
+    try {
+      const res = pending.fallbackSingleResult || (await importGraphicFile(pending.file));
+      hydrateImportResultAsDocument(res, pending.file, {
+        diskPath: pending.diskPath,
+        fileHandle: pending.fileHandle,
+        replaceRecentId: pending.replaceRecentId,
+      });
+    } catch (err) {
+      reportFileLoadFailure(pending.fileName, err);
+    }
+  }, [pendingSpritesheetPrompt, hydrateImportResultAsDocument, reportFileLoadFailure]);
 
   const handleConfirmSpritesheetSlice = useCallback(
     (options: SpritesheetSliceOptions) => {
@@ -8166,6 +8542,7 @@ export default function App() {
             replaceRecentId: entry.id,
           });
           setNewProjectModalOpen(false);
+          setHomeScreenOpen(false);
           setImportNotification(
             `Proyecto reciente abierto${openedInNewTab ? ' en nueva pestaña' : ''}: "${payload.snapshot.name}" (${payload.snapshot.width}×${payload.snapshot.height} px · ${payload.snapshot.frames.length} fotograma(s))`
           );
@@ -8212,6 +8589,7 @@ export default function App() {
             replaceRecentId: entry.id,
           });
           setNewProjectModalOpen(false);
+          setHomeScreenOpen(false);
           setImportNotification(
             `Proyecto reciente restaurado${openedInNewTab ? ' en nueva pestaña' : ''}: "${legacySnap.name}" (${legacySnap.width}×${legacySnap.height} px)`
           );
@@ -9018,13 +9396,16 @@ export default function App() {
   }, [clipboard, handlePasteClipboard, handleIncomingClipboardImage]);
 
   // =========================================================================
-  // IMPORTAR AL PROYECTO ACTUAL (Sistema unificado de decodificación)
+  // IMPORTAR AL PROYECTO ACTUAL (1:1 exacto + control de resolución distinta)
   // =========================================================================
   const executeImportIntoProject = useCallback(
     async (
       files: File[],
       mode: ImportMenuMode,
-      fitMode: SmartImportFitMode = 'fit'
+      fitMode: SmartImportFitMode = 'original',
+      interpolation: InterpolationMode = 'nearest',
+      skipMismatchPrompt: boolean = false,
+      overrideTargetSize?: { width: number; height: number }
     ) => {
       if (!files || files.length === 0) return;
 
@@ -9046,6 +9427,40 @@ export default function App() {
           );
         }
         return;
+      }
+
+      const targetW = overrideTargetSize?.width ?? canvasWidth;
+      const targetH = overrideTargetSize?.height ?? canvasHeight;
+
+      // Resolution mismatch control: never silently resize an imported image!
+      if (
+        !skipMismatchPrompt &&
+        (mode === 'new_layer' ||
+          mode === 'selected_group' ||
+          mode === 'current_frame' ||
+          mode === 'all_frames')
+      ) {
+        try {
+          const probe = await decodeFilePreviewDataUrl(files[0]);
+          if (
+            probe.width > 0 &&
+            probe.height > 0 &&
+            (probe.width !== targetW || probe.height !== targetH)
+          ) {
+            setPendingResolutionMismatch({
+              files,
+              mode,
+              fileName: files[0].name,
+              sourceWidth: probe.width,
+              sourceHeight: probe.height,
+              sourceDpi: probe.dpi || 72,
+              previewDataUrl: probe.dataUrl || null,
+            });
+            return;
+          }
+        } catch {
+          // Proceed normally; downstream decoder reports descriptive errors if corrupted
+        }
       }
 
       try {
@@ -9078,7 +9493,13 @@ export default function App() {
 
           const createdLayers: Layer[] = [];
           for (const file of files) {
-            const { grid } = await rasterizeImageFileToGrid(file, canvasWidth, canvasHeight, fitMode);
+            const { grid, tiledStoreId } = await rasterizeImageFileToGrid(
+              file,
+              targetW,
+              targetH,
+              fitMode,
+              interpolation
+            );
             createdLayers.push({
               id: `layer-imp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
               name: file.name.replace(/\.[^.]+$/, ''),
@@ -9090,6 +9511,8 @@ export default function App() {
               layerType: 'raster',
               groupId: targetGroupId,
               pixels: grid,
+              tiledStoreId,
+              tiledRevision: tiledStoreId ? 1 : undefined,
             });
           }
           if (createdLayers.length === 0) return;
@@ -9114,10 +9537,21 @@ export default function App() {
         }
 
         if (mode === 'current_frame') {
-          const { grid } = await rasterizeImageFileToGrid(files[0], canvasWidth, canvasHeight, fitMode);
+          const { grid, tiledStoreId } = await rasterizeImageFileToGrid(
+            files[0],
+            targetW,
+            targetH,
+            fitMode,
+            interpolation
+          );
           const targetFrame = framesRef.current[currentFrameIndex];
           const targetLayer = targetFrame?.layers[currentLayerIndex];
-          const canComposite = targetLayer && !targetLayer.locked && targetLayer.layerType !== 'adjustment';
+          const canComposite =
+            !tiledStoreId &&
+            targetLayer &&
+            !isLayerTiled(targetLayer) &&
+            !targetLayer.locked &&
+            targetLayer.layerType !== 'adjustment';
 
           const updatedFrames = framesRef.current.map((f, idx) => {
             if (idx !== currentFrameIndex) return f;
@@ -9147,6 +9581,8 @@ export default function App() {
                   blendMode: 'normal' as const,
                   layerType: 'raster' as const,
                   pixels: grid,
+                  tiledStoreId,
+                  tiledRevision: tiledStoreId ? 1 : undefined,
                 },
               ],
             };
@@ -9160,7 +9596,13 @@ export default function App() {
         }
 
         if (mode === 'all_frames') {
-          const { grid } = await rasterizeImageFileToGrid(files[0], canvasWidth, canvasHeight, fitMode);
+          const { grid, tiledStoreId } = await rasterizeImageFileToGrid(
+            files[0],
+            targetW,
+            targetH,
+            fitMode,
+            interpolation
+          );
           const baseName = files[0].name.replace(/\.[^.]+$/, '');
           const updatedFrames = framesRef.current.map((f, idx) => ({
             ...f,
@@ -9175,7 +9617,9 @@ export default function App() {
                 fillOpacity: 1,
                 blendMode: 'normal' as const,
                 layerType: 'raster' as const,
-                pixels: grid.map((row) => [...row]),
+                pixels: tiledStoreId ? [] : grid.map((row) => [...row]),
+                tiledStoreId,
+                tiledRevision: tiledStoreId ? 1 : undefined,
               },
             ],
           }));
@@ -9911,6 +10355,11 @@ export default function App() {
           setTransformSession(null);
           return;
         }
+        if (activeTool === 'canvas_edit') {
+          e.preventDefault();
+          handleCancelCanvasEdit();
+          return;
+        }
       }
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'r') {
         e.preventDefault();
@@ -9950,6 +10399,11 @@ export default function App() {
       if (e.key === 'Enter' && transformSession) {
         e.preventDefault();
         handleCommitTransform();
+        return;
+      }
+      if (e.key === 'Enter' && activeTool === 'canvas_edit') {
+        e.preventDefault();
+        handleApplyCanvasEdit();
         return;
       }
       if (e.key === ' ') {
@@ -10020,6 +10474,8 @@ export default function App() {
     executeCommandById,
     handleOpenSaveAsModal,
     handleRequestCloseDocumentTab,
+    handleApplyCanvasEdit,
+    handleCancelCanvasEdit,
   ]);
 
   const currentProjectState: ProjectState = {
@@ -10575,6 +11031,9 @@ export default function App() {
         onOpenFxStudio={(tab) => handleOpenFxStudio(tab || 'generator')}
         onCreateSuggestedModeLayers={handleCreateSuggestedModeLayers}
         onApplyModeGuides={handleApplyModeGuides}
+        onOpenHomeScreen={handleOpenHomeScreen}
+        onTestSplashAnimation={handleTestSplashAnimation}
+        onActivateCanvasEditTool={() => handleSelectTool('canvas_edit')}
       />
 
       {/* Contextual Tool Options Bar (Photoshop / Clip Studio / Aseprite / Krita style) */}
@@ -10703,6 +11162,15 @@ export default function App() {
             setIsGeneratingQuickAi(false);
           }, 60);
         }}
+        canvasEditRect={canvasEditRect}
+        canvasEditConfig={canvasEditConfig}
+        hasOffCanvasContent={hasOffCanvasContent}
+        onChangeCanvasEditRect={setCanvasEditRect}
+        onChangeCanvasEditConfig={setCanvasEditConfig}
+        onApplyCanvasEdit={handleApplyCanvasEdit}
+        onResetCanvasEdit={handleResetCanvasEdit}
+        onCancelCanvasEdit={handleCancelCanvasEdit}
+        onFitCanvasEditToContent={handleFitCanvasEditToContent}
       />
 
       {/* Always-Visible Document Tabs Strip (visible even with 1 document open, shows dirty * and safe close) */}
@@ -11292,6 +11760,7 @@ export default function App() {
             primaryAlpha={primaryAlpha}
             secondaryColor={secondaryColor}
             onUpdateLayerPixels={handleUpdateLayerPixels}
+            onCommitTiledLayerEdit={handleCommitTiledLayerEdit}
             onUpdateHitboxes={handleUpdateHitboxes}
             onPickColor={handlePickColorWithHistory}
             allFrames={frames}
@@ -11389,6 +11858,13 @@ export default function App() {
             stageParallaxConfig={stageParallaxConfig}
             tilesetConfig={tilesetConfig}
             performanceMode={performanceMode}
+            canvasEditRect={canvasEditRect}
+            canvasEditConfig={canvasEditConfig}
+            hasOffCanvasContent={hasOffCanvasContent}
+            onChangeCanvasEditRect={setCanvasEditRect}
+            onApplyCanvasEdit={handleApplyCanvasEdit}
+            onResetCanvasEdit={handleResetCanvasEdit}
+            onCancelCanvasEdit={handleCancelCanvasEdit}
           />
         }
       />
@@ -11446,10 +11922,14 @@ export default function App() {
           }
           activeFrameName={currentFrame.name || `Frame ${currentFrameIndex + 1}`}
           totalFrames={frames.length}
-          onConfirm={(destination: SmartImportDestination, fitMode: SmartImportFitMode) => {
+          onConfirm={(
+            destination: SmartImportDestination,
+            fitMode: SmartImportFitMode,
+            interpolation: InterpolationMode = 'nearest'
+          ) => {
             const filesToImport = [...smartImportFiles];
             setSmartImportFiles([]);
-            void executeImportIntoProject(filesToImport, destination, fitMode);
+            void executeImportIntoProject(filesToImport, destination, fitMode, interpolation, true);
           }}
           onOpenAsNewDocument={(file: File) => {
             setSmartImportFiles([]);
@@ -11488,6 +11968,89 @@ export default function App() {
             void handleOpenFilePicker();
           }}
           onClose={() => setFileLoadError(null)}
+        />
+      </StudioTopLayerPortal>
+
+      {/* Optional Spritesheet Detection Prompt ("Se ha detectado una posible hoja de sprites. ¿Desea abrirla como spritesheet?") */}
+      <StudioTopLayerPortal isOpen={pendingSpritesheetPrompt !== null} tier="modal" autoFocus ariaRole="dialog">
+        <SpritesheetDetectedPromptModal
+          isOpen={pendingSpritesheetPrompt !== null}
+          fileName={pendingSpritesheetPrompt?.fileName || ''}
+          rawRaster={pendingSpritesheetPrompt?.rawRaster || null}
+          candidate={pendingSpritesheetPrompt?.candidate || null}
+          onConfirmSpritesheet={handleConfirmSpritesheetDetectedYes}
+          onOpenIntactImage={() => void handleConfirmSpritesheetDetectedNo()}
+          onCancel={() => setPendingSpritesheetPrompt(null)}
+        />
+      </StudioTopLayerPortal>
+
+      {/* Import Resolution Mismatch Prompt ("¿Cómo desea abrir este archivo?") */}
+      <StudioTopLayerPortal isOpen={pendingResolutionMismatch !== null} tier="modal" autoFocus ariaRole="dialog">
+        <ImportResolutionMismatchModal
+          isOpen={pendingResolutionMismatch !== null}
+          fileName={pendingResolutionMismatch?.fileName || ''}
+          sourceWidth={pendingResolutionMismatch?.sourceWidth || canvasWidth}
+          sourceHeight={pendingResolutionMismatch?.sourceHeight || canvasHeight}
+          sourceDpi={pendingResolutionMismatch?.sourceDpi || 72}
+          previewDataUrl={pendingResolutionMismatch?.previewDataUrl || null}
+          canvasWidth={canvasWidth}
+          canvasHeight={canvasHeight}
+          onConfirm={(action: ResolutionMismatchAction, interpolation: InterpolationMode) => {
+            if (!pendingResolutionMismatch) return;
+            const pending = pendingResolutionMismatch;
+            setPendingResolutionMismatch(null);
+            if (action === 'new_document') {
+              void handleOpenDocumentFile(pending.files[0]);
+              return;
+            }
+            if (action === 'original_size') {
+              const resized = resizeCanvasGrid(
+                framesRef.current,
+                canvasWidth,
+                canvasHeight,
+                pending.sourceWidth,
+                pending.sourceHeight,
+                'top-left'
+              );
+              setCanvasWidth(pending.sourceWidth);
+              setCanvasHeight(pending.sourceHeight);
+              setDocumentDpi(pending.sourceDpi || 72);
+              framesRef.current = resized;
+              setFrames(resized);
+              setGlobalPivot({
+                x: Math.floor(pending.sourceWidth / 2),
+                y: Math.floor(pending.sourceHeight * 0.8),
+              });
+              void executeImportIntoProject(
+                pending.files,
+                pending.mode,
+                'original',
+                'nearest',
+                true,
+                { width: pending.sourceWidth, height: pending.sourceHeight }
+              );
+              return;
+            }
+            if (action === 'center_no_resize') {
+              void executeImportIntoProject(
+                pending.files,
+                pending.mode,
+                'center_no_resize',
+                'nearest',
+                true
+              );
+              return;
+            }
+            // 'fit_canvas'
+            void executeImportIntoProject(
+              pending.files,
+              pending.mode,
+              'fit',
+              interpolation,
+              true
+            );
+          }}
+          onCancel={() => setPendingResolutionMismatch(null)}
         />
       </StudioTopLayerPortal>
 
@@ -11648,6 +12211,8 @@ export default function App() {
           onClose={() => setCanvasSizeModalOpen(false)}
           currentWidth={canvasWidth}
           currentHeight={canvasHeight}
+          layersCount={currentFrame?.layers.length || 1}
+          framesCount={frames.length}
           onApply={handleApplyCanvasSize}
         />
       </StudioTopLayerPortal>
@@ -11659,6 +12224,8 @@ export default function App() {
           onClose={() => setImageSizeModalOpen(false)}
           currentWidth={canvasWidth}
           currentHeight={canvasHeight}
+          layersCount={currentFrame?.layers.length || 1}
+          framesCount={frames.length}
           onApply={handleApplyImageSize}
         />
       </StudioTopLayerPortal>
@@ -11667,7 +12234,11 @@ export default function App() {
       <StudioTopLayerPortal isOpen={newProjectModalOpen} tier="modal" autoFocus ariaRole="dialog">
         <NewProjectModal
           isOpen={newProjectModalOpen}
-          onClose={() => setNewProjectModalOpen(false)}
+          initialCategory={newProjectInitialCategory}
+          onClose={() => {
+            setNewProjectModalOpen(false);
+            setNewProjectInitialCategory('Todas');
+          }}
           onCreateProject={handleCreateNewProject}
           onCreateProjectConfig={handleCreateProjectConfig}
           recentProjects={recentProjects}
@@ -12505,6 +13076,44 @@ export default function App() {
           onToggleUiEditMode={() => executeCommandById('cmd.toggle_ui_edit_mode', false)}
           selectionDisplayConfig={selectionDisplayConfig}
           onChangeSelectionDisplayConfig={setSelectionDisplayConfig}
+        />
+      </StudioTopLayerPortal>
+
+      {/* Professional Studio Home Screen (Startup Hub, Recent Projects, Quick Templates & Startup Preferences) */}
+      <StudioTopLayerPortal isOpen={homeScreenOpen} tier="overlay">
+        <HomeScreen
+          isOpen={homeScreenOpen}
+          initialSection={homeScreenSection}
+          hasActiveDocument={openDocuments.length > 0}
+          activeDocumentName={`${projectName} (${canvasWidth}×${canvasHeight} px · ${documentDpi} DPI)`}
+          recentProjects={recentProjects}
+          startupPreferences={startupPreferences}
+          onUpdateStartupPreferences={handleUpdateStartupPreferences}
+          onTestSplashAnimation={handleTestSplashAnimation}
+          onReturnToCanvas={() => setHomeScreenOpen(false)}
+          onNewProject={(category?: NewProjectTemplateCategory) => {
+            setNewProjectInitialCategory(category || 'Todas');
+            setNewProjectModalOpen(true);
+          }}
+          onOpenProjectFile={() => void handleOpenFilePicker()}
+          onOpenRecentProject={(entry) => void handleOpenRecentProject(entry)}
+          onTogglePinRecent={handleTogglePinRecentProject}
+          onRemoveRecent={handleRemoveRecentProject}
+          onClearRecents={handleClearRecentProjects}
+          onOpenToolsGuide={() => setToolGuideModalOpen(true)}
+          onOpenShortcutsModal={() => setShortcutsModalOpen(true)}
+          onOpenInstallerGuide={() => setLocalInstallerModalOpen(true)}
+        />
+      </StudioTopLayerPortal>
+
+      {/* Animated Startup Splash / Loading Screen with Official PixelClash Studio Mascot */}
+      <StudioTopLayerPortal isOpen={splashOpen} tier="critical">
+        <SplashLoadingScreen
+          isOpen={splashOpen}
+          preferences={startupPreferences}
+          versionLabel="v2.4"
+          onInitTask={handleSplashInitTask}
+          onComplete={handleSplashComplete}
         />
       </StudioTopLayerPortal>
     </div>

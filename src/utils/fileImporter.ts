@@ -3,6 +3,7 @@ import { readPsd } from 'ag-psd';
 import {
   ActionTag,
   Frame,
+  InterpolationMode,
   Layer,
   LayerBlendMode,
   LayerGroup,
@@ -10,6 +11,12 @@ import {
   RecentProjectFileFormat,
 } from '../types';
 import { createEmptyGrid } from './pixelMath';
+import {
+  getTiledStore,
+  registerTiledStore,
+  shouldUseTiledStorage,
+  TiledLayerStore,
+} from './tiledImageEngine';
 
 export const SUPPORTED_IMAGE_EXTENSIONS = [
   'png',
@@ -43,8 +50,6 @@ export const SUPPORTED_OPEN_ACCEPT =
 export const SUPPORTED_IMAGE_ACCEPT =
   '.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff,.tga,.ico,image/png,image/jpeg,image/webp,image/gif,image/bmp,image/tiff,image/x-icon,image/vnd.microsoft.icon';
 
-export const MAX_SINGLE_CANVAS_RASTER_DIM = 1024;
-
 export class FileLoadError extends Error {
   public readonly fileName: string;
   public readonly formatLabel: string;
@@ -67,8 +72,13 @@ export class FileLoadError extends Error {
 export interface DecodedRgbaImage {
   width: number;
   height: number;
+  /** Dense RGBA buffer (may be empty length-0 when very large image is backed directly by tiledStoreId) */
   data: Uint8ClampedArray;
   hasTransparency: boolean;
+  /** Original DPI extracted from PNG pHYs / JPEG JFIF / BMP header (defaults to 72) */
+  dpi?: number;
+  /** On-demand 256×256 tiled store ID for high-resolution spritesheets & giant images */
+  tiledStoreId?: string;
 }
 
 export interface SpritesheetCandidateInfo {
@@ -91,21 +101,102 @@ export interface ImportLoadStats {
   wasDownscaled?: boolean;
   originalWidth?: number;
   originalHeight?: number;
+  dpi?: number;
+  usesTiledEngine?: boolean;
 }
 
 export interface ImportResult {
   name: string;
   width: number;
   height: number;
+  dpi?: number;
   frames: Frame[];
   layerGroups?: LayerGroup[];
   actionTags?: ActionTag[];
   projectState?: Partial<ProjectState>;
   fps?: number;
-  /** Full-resolution raw RGBA buffer for single-image imports (enables 1:1 spritesheet slicing!) */
+  /** Full-resolution raw RGBA / Tiled buffer for single-image imports (enables 1:1 spritesheet slicing!) */
   rawRaster?: DecodedRgbaImage;
   spritesheetCandidate?: SpritesheetCandidateInfo;
   stats: ImportLoadStats;
+}
+
+/**
+ * Extracts original DPI metadata from PNG (pHYs chunk), JPEG (JFIF APP0), or BMP (DIB header).
+ * Defaults to 72 DPI when the file specifies no physical resolution metadata.
+ */
+export function extractImageDpiFromBytes(buffer: ArrayBuffer, ext: string): number {
+  try {
+    const bytes = new Uint8Array(buffer);
+    const view = new DataView(buffer);
+    const lower = ext.toLowerCase();
+
+    // PNG pHYs chunk (pixels per meter -> DPI = ppm * 0.0254)
+    if (
+      (lower === 'png' || (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50)) &&
+      bytes.length >= 33
+    ) {
+      let off = 8;
+      while (off + 12 <= bytes.length) {
+        const len = view.getUint32(off, false);
+        const type =
+          String.fromCharCode(bytes[off + 4], bytes[off + 5], bytes[off + 6], bytes[off + 7]);
+        if (type === 'pHYs' && len === 9 && off + 8 + 9 <= bytes.length) {
+          const ppuX = view.getUint32(off + 8, false);
+          const unit = bytes[off + 16];
+          if (unit === 1 && ppuX > 0) {
+            const dpi = Math.round(ppuX * 0.0254);
+            if (dpi >= 1 && dpi <= 4800) return dpi;
+          }
+          break;
+        }
+        if (type === 'IDAT' || type === 'IEND') break;
+        off += 12 + len;
+      }
+    }
+
+    // JPEG JFIF APP0 density
+    if ((lower === 'jpg' || lower === 'jpeg') && bytes.length >= 20 && bytes[0] === 0xff && bytes[1] === 0xd8) {
+      let off = 2;
+      while (off + 4 < bytes.length) {
+        if (bytes[off] !== 0xff) break;
+        const marker = bytes[off + 1];
+        if (marker === 0xda || marker === 0xd9) break;
+        const segLen = view.getUint16(off + 2, false);
+        if (
+          marker === 0xe0 &&
+          segLen >= 16 &&
+          off + 16 <= bytes.length &&
+          bytes[off + 4] === 0x4a &&
+          bytes[off + 5] === 0x46 &&
+          bytes[off + 6] === 0x49 &&
+          bytes[off + 7] === 0x46
+        ) {
+          const units = bytes[off + 11];
+          const xDensity = view.getUint16(off + 12, false);
+          if (units === 1 && xDensity > 0) return Math.max(1, Math.min(4800, xDensity));
+          if (units === 2 && xDensity > 0) return Math.max(1, Math.min(4800, Math.round(xDensity * 2.54)));
+          break;
+        }
+        off += 2 + segLen;
+      }
+    }
+
+    // BMP DIB header XPelsPerMeter at offset 38
+    if (lower === 'bmp' && bytes.length >= 46 && bytes[0] === 0x42 && bytes[1] === 0x4d) {
+      const dibSize = view.getUint32(14, true);
+      if (dibSize >= 40) {
+        const ppmX = view.getInt32(38, true);
+        if (ppmX > 0) {
+          const dpi = Math.round(ppmX * 0.0254);
+          if (dpi >= 1 && dpi <= 4800) return dpi;
+        }
+      }
+    }
+  } catch {
+    // fallback safely to 72 DPI
+  }
+  return 72;
 }
 
 export function getFileExtension(fileName: string): string {
@@ -215,13 +306,34 @@ export function canvasToPixelGrid(
   return rgbaBufferToPixelGrid(imgData.data, width, height).grid;
 }
 
-export function rgbaToDataUrl(rgba: DecodedRgbaImage): string {
+export function rgbaToDataUrl(rgba: DecodedRgbaImage, maxPreviewDim?: number): string {
+  if (rgba.tiledStoreId && rgba.data.length === 0) {
+    const store = getTiledStore(rgba.tiledStoreId);
+    if (store) {
+      return store.exportThumbnailDataUrl(maxPreviewDim || 512);
+    }
+  }
+  const safeW = Math.max(1, rgba.width);
+  const safeH = Math.max(1, rgba.height);
+  if (maxPreviewDim && (safeW > maxPreviewDim || safeH > maxPreviewDim)) {
+    const scale = Math.min(maxPreviewDim / safeW, maxPreviewDim / safeH);
+    const outW = Math.max(1, Math.round(safeW * scale));
+    const outH = Math.max(1, Math.round(safeH * scale));
+    const scaled = scaleRgbaImage(rgba, outW, outH, 'stretch', 'nearest');
+    const c = document.createElement('canvas');
+    c.width = outW;
+    c.height = outH;
+    const ctx = c.getContext('2d');
+    if (!ctx) return '';
+    ctx.putImageData(new ImageData(new Uint8ClampedArray(scaled.data), outW, outH), 0, 0);
+    return c.toDataURL('image/png');
+  }
   const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, rgba.width);
-  canvas.height = Math.max(1, rgba.height);
+  canvas.width = safeW;
+  canvas.height = safeH;
   const ctx = canvas.getContext('2d');
   if (!ctx) return '';
-  const imageData = new ImageData(new Uint8ClampedArray(rgba.data), rgba.width, rgba.height);
+  const imageData = new ImageData(new Uint8ClampedArray(rgba.data), safeW, safeH);
   ctx.putImageData(imageData, 0, 0);
   return canvas.toDataURL('image/png');
 }
@@ -230,8 +342,81 @@ function scaleRgbaImage(
   src: DecodedRgbaImage,
   targetW: number,
   targetH: number,
-  fitMode: 'fit' | 'original' | 'stretch' = 'stretch'
+  fitMode: 'fit' | 'original' | 'stretch' | 'center_no_resize' = 'original',
+  interpolation: InterpolationMode = 'nearest'
 ): DecodedRgbaImage {
+  const safeW = Math.max(1, Math.round(targetW));
+  const safeH = Math.max(1, Math.round(targetH));
+
+  // Fast exact 1:1 pass-through when target matches source
+  if (
+    src.width === safeW &&
+    src.height === safeH &&
+    src.data.length === safeW * safeH * 4
+  ) {
+    return {
+      width: safeW,
+      height: safeH,
+      data: new Uint8ClampedArray(src.data),
+      hasTransparency: src.hasTransparency,
+      dpi: src.dpi,
+    };
+  }
+
+  // If source is backed by a TiledLayerStore (huge spritesheet), sample via tiled store cleanly
+  if (src.tiledStoreId && src.data.length === 0) {
+    const store = getTiledStore(src.tiledStoreId);
+    if (store) {
+      if (fitMode === 'original' || fitMode === 'center_no_resize') {
+        const dx = Math.floor((safeW - src.width) / 2);
+        const dy = Math.floor((safeH - src.height) / 2);
+        const out = new Uint8ClampedArray(safeW * safeH * 4);
+        let hasTransparency = false;
+        const copyStartX = Math.max(0, dx);
+        const copyStartY = Math.max(0, dy);
+        const copyEndX = Math.min(safeW, dx + src.width);
+        const copyEndY = Math.min(safeH, dy + src.height);
+        const sliceW = Math.max(0, copyEndX - copyStartX);
+        const sliceH = Math.max(0, copyEndY - copyStartY);
+        if (sliceW > 0 && sliceH > 0) {
+          const sub = store.sliceRegionToRgba(copyStartX - dx, copyStartY - dy, sliceW, sliceH);
+          for (let ly = 0; ly < sliceH; ly++) {
+            const dstRow = ((copyStartY + ly) * safeW + copyStartX) * 4;
+            const srcRow = ly * sliceW * 4;
+            out.set(sub.subarray(srcRow, srcRow + sliceW * 4), dstRow);
+          }
+        }
+        for (let i = 3; i < out.length; i += 4) {
+          if (out[i] < 254) {
+            hasTransparency = true;
+            break;
+          }
+        }
+        return { width: safeW, height: safeH, data: out, hasTransparency, dpi: src.dpi };
+      }
+
+      const scaledStore =
+        fitMode === 'fit'
+          ? (() => {
+              const sc = Math.min(safeW / src.width, safeH / src.height);
+              const dw = Math.max(1, Math.round(src.width * sc));
+              const dh = Math.max(1, Math.round(src.height * sc));
+              return store.rescale(dw, dh, interpolation).resizeCanvas(safeW, safeH, 'center');
+            })()
+          : store.rescale(safeW, safeH, interpolation);
+      const out = scaledStore.sliceRegionToRgba(0, 0, safeW, safeH);
+      scaledStore.dispose();
+      let hasTransparency = false;
+      for (let i = 3; i < out.length; i += 4) {
+        if (out[i] < 254) {
+          hasTransparency = true;
+          break;
+        }
+      }
+      return { width: safeW, height: safeH, data: out, hasTransparency, dpi: src.dpi };
+    }
+  }
+
   const srcCanvas = document.createElement('canvas');
   srcCanvas.width = src.width;
   srcCanvas.height = src.height;
@@ -242,35 +427,39 @@ function scaleRgbaImage(
   sctx.putImageData(new ImageData(new Uint8ClampedArray(src.data), src.width, src.height), 0, 0);
 
   const dstCanvas = document.createElement('canvas');
-  dstCanvas.width = targetW;
-  dstCanvas.height = targetH;
+  dstCanvas.width = safeW;
+  dstCanvas.height = safeH;
   const dctx = dstCanvas.getContext('2d');
   if (!dctx) {
     throw new Error('No se pudo inicializar el contexto 2D de destino.');
   }
-  dctx.imageSmoothingEnabled = false;
-  dctx.clearRect(0, 0, targetW, targetH);
+  // Strictly Nearest Neighbor by default! Smoothing ONLY if user explicitly requests bilinear/bicubic
+  dctx.imageSmoothingEnabled = interpolation !== 'nearest';
+  if (interpolation !== 'nearest') {
+    dctx.imageSmoothingQuality = interpolation === 'bicubic' ? 'high' : 'medium';
+  }
+  dctx.clearRect(0, 0, safeW, safeH);
 
-  let drawW = targetW;
-  let drawH = targetH;
+  let drawW = safeW;
+  let drawH = safeH;
   let dx = 0;
   let dy = 0;
 
   if (fitMode === 'fit') {
-    const scale = Math.min(targetW / src.width, targetH / src.height);
+    const scale = Math.min(safeW / src.width, safeH / src.height);
     drawW = Math.max(1, Math.round(src.width * scale));
     drawH = Math.max(1, Math.round(src.height * scale));
-    dx = Math.floor((targetW - drawW) / 2);
-    dy = Math.floor((targetH - drawH) / 2);
-  } else if (fitMode === 'original') {
+    dx = Math.floor((safeW - drawW) / 2);
+    dy = Math.floor((safeH - drawH) / 2);
+  } else if (fitMode === 'original' || fitMode === 'center_no_resize') {
     drawW = src.width;
     drawH = src.height;
-    dx = Math.floor((targetW - drawW) / 2);
-    dy = Math.floor((targetH - drawH) / 2);
+    dx = Math.floor((safeW - drawW) / 2);
+    dy = Math.floor((safeH - drawH) / 2);
   }
 
   dctx.drawImage(srcCanvas, dx, dy, drawW, drawH);
-  const out = dctx.getImageData(0, 0, targetW, targetH);
+  const out = dctx.getImageData(0, 0, safeW, safeH);
   let hasTransparency = false;
   for (let i = 3; i < out.data.length; i += 4) {
     if (out.data[i] < 254) {
@@ -278,10 +467,10 @@ function scaleRgbaImage(
       break;
     }
   }
-  return { width: targetW, height: targetH, data: out.data, hasTransparency };
+  return { width: safeW, height: safeH, data: out.data, hasTransparency, dpi: src.dpi };
 }
 
-function decodeBrowserBlobToRgba(blob: Blob): Promise<DecodedRgbaImage> {
+function decodeBrowserBlobToRgba(blob: Blob, dpi: number = 72): Promise<DecodedRgbaImage> {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(blob);
     const img = new Image();
@@ -294,15 +483,35 @@ function decodeBrowserBlobToRgba(blob: Blob): Promise<DecodedRgbaImage> {
           reject(new Error('La imagen decodificada tiene dimensiones nulas (0×0).'));
           return;
         }
+
+        // For massive images/spritesheets (> 4096px or > 16M px), decode directly in 256×256
+        // chunks into a sparse TiledLayerStore — NEVER creates a giant single canvas and NEVER downscales!
+        if (w > 4096 || h > 4096 || w * h > 4096 * 4096) {
+          const store = new TiledLayerStore(w, h);
+          const { hasTransparency } = store.loadFromImageSourceChunked(img, w, h);
+          const tiledStoreId = registerTiledStore(store);
+          URL.revokeObjectURL(url);
+          resolve({
+            width: w,
+            height: h,
+            data: new Uint8ClampedArray(0),
+            hasTransparency,
+            dpi,
+            tiledStoreId,
+          });
+          return;
+        }
+
         const canvas = document.createElement('canvas');
         canvas.width = w;
         canvas.height = h;
-        const ctx = canvas.getContext('2d');
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
         if (!ctx) {
           URL.revokeObjectURL(url);
           reject(new Error('Contexto 2D de canvas no disponible.'));
           return;
         }
+        ctx.imageSmoothingEnabled = false;
         ctx.clearRect(0, 0, w, h);
         ctx.drawImage(img, 0, 0);
         const imgData = ctx.getImageData(0, 0, w, h);
@@ -315,7 +524,7 @@ function decodeBrowserBlobToRgba(blob: Blob): Promise<DecodedRgbaImage> {
             break;
           }
         }
-        resolve({ width: w, height: h, data: imgData.data, hasTransparency });
+        resolve({ width: w, height: h, data: imgData.data, hasTransparency, dpi });
       } catch (err) {
         URL.revokeObjectURL(url);
         reject(err);
@@ -1620,17 +1829,23 @@ export async function decodeTiffFrames(buffer: ArrayBuffer): Promise<DecodedRgba
 export async function decodeAnyRasterFileToRgba(file: File): Promise<DecodedRgbaImage> {
   const ext = getFileExtension(file.name);
   if (ext === 'tga') {
-    return decodeTgaToRgba(await file.arrayBuffer());
+    const buf = await file.arrayBuffer();
+    const res = decodeTgaToRgba(buf);
+    return { ...res, dpi: 72 };
   }
   if (ext === 'bmp') {
-    return decodeBmpToRgba(await file.arrayBuffer(), file);
+    const buf = await file.arrayBuffer();
+    const dpi = extractImageDpiFromBytes(buf, 'bmp');
+    const res = await decodeBmpToRgba(buf, file);
+    return { ...res, dpi };
   }
   if (ext === 'ico') {
-    return decodeIcoToRgba(await file.arrayBuffer());
+    const res = await decodeIcoToRgba(await file.arrayBuffer());
+    return { ...res, dpi: 72 };
   }
   if (ext === 'tif' || ext === 'tiff') {
     const pages = await decodeTiffFrames(await file.arrayBuffer());
-    return pages[0];
+    return { ...pages[0], dpi: pages[0].dpi || 72 };
   }
   if (ext === 'gif') {
     const gif = decodeAnimatedGif(await file.arrayBuffer());
@@ -1639,34 +1854,91 @@ export async function decodeAnyRasterFileToRgba(file: File): Promise<DecodedRgba
       height: gif.height,
       data: gif.frames[0].rgba,
       hasTransparency: gif.hasTransparency,
+      dpi: 72,
     };
   }
-  return decodeBrowserBlobToRgba(file);
+  let dpi = 72;
+  try {
+    // Only need the first 64 KB header slice to read PNG pHYs or JPEG JFIF DPI
+    const headerBuf = await file.slice(0, 65536).arrayBuffer();
+    dpi = extractImageDpiFromBytes(headerBuf, ext || 'png');
+  } catch {
+    dpi = 72;
+  }
+  return decodeBrowserBlobToRgba(file, dpi);
 }
 
 /**
  * Unified rasterizer used by Importar al Proyecto, SmartImportModal, Palettes, References & Assets.
  * Guarantees PNG, JPG, JPEG, WEBP, GIF, BMP, TIFF, TGA, and ICO all decode identically.
+ * Strictly uses Nearest Neighbor interpolation by default (smoothing ONLY if requested).
  */
 export async function rasterizeImageFileToTargetGrid(
   file: File,
   targetW: number,
   targetH: number,
-  fitMode: 'fit' | 'original' | 'stretch' = 'fit'
+  fitMode: 'fit' | 'original' | 'stretch' | 'center_no_resize' = 'original',
+  interpolation: InterpolationMode = 'nearest'
 ): Promise<{
   grid: (string | null)[][];
+  tiledStoreId?: string;
   naturalWidth: number;
   naturalHeight: number;
+  dpi: number;
   dataUrl: string;
 }> {
   const decoded = await decodeAnyRasterFileToRgba(file);
-  const scaled = scaleRgbaImage(decoded, targetW, targetH, fitMode);
-  const { grid } = rgbaBufferToPixelGrid(scaled.data, targetW, targetH);
-  const dataUrl = rgbaToDataUrl(decoded);
+  const safeW = Math.max(1, Math.round(targetW));
+  const safeH = Math.max(1, Math.round(targetH));
+  const dataUrl = rgbaToDataUrl(decoded, 1024);
+
+  if (shouldUseTiledStorage(safeW, safeH)) {
+    const sourceStore =
+      decoded.tiledStoreId && getTiledStore(decoded.tiledStoreId)
+        ? getTiledStore(decoded.tiledStoreId)!.clone()
+        : (() => {
+            const st = new TiledLayerStore(decoded.width, decoded.height);
+            st.loadFromRgbaBuffer(decoded.data, decoded.width, decoded.height);
+            return st;
+          })();
+
+    let finalStore: TiledLayerStore;
+    if (decoded.width === safeW && decoded.height === safeH) {
+      finalStore = sourceStore;
+    } else if (fitMode === 'original' || fitMode === 'center_no_resize') {
+      finalStore = sourceStore.resizeCanvas(safeW, safeH, 'center');
+      sourceStore.dispose();
+    } else if (fitMode === 'fit') {
+      const sc = Math.min(safeW / decoded.width, safeH / decoded.height);
+      const dw = Math.max(1, Math.round(decoded.width * sc));
+      const dh = Math.max(1, Math.round(decoded.height * sc));
+      const scaled = sourceStore.rescale(dw, dh, interpolation);
+      sourceStore.dispose();
+      finalStore = scaled.resizeCanvas(safeW, safeH, 'center');
+      scaled.dispose();
+    } else {
+      finalStore = sourceStore.rescale(safeW, safeH, interpolation);
+      sourceStore.dispose();
+    }
+
+    const tiledStoreId = registerTiledStore(finalStore);
+    return {
+      grid: [],
+      tiledStoreId,
+      naturalWidth: decoded.width,
+      naturalHeight: decoded.height,
+      dpi: decoded.dpi || 72,
+      dataUrl,
+    };
+  }
+
+  const scaled = scaleRgbaImage(decoded, safeW, safeH, fitMode, interpolation);
+  const { grid } = rgbaBufferToPixelGrid(scaled.data, safeW, safeH);
   return {
     grid,
     naturalWidth: decoded.width,
     naturalHeight: decoded.height,
+    dpi: decoded.dpi || 72,
     dataUrl,
   };
 }
@@ -1675,34 +1947,40 @@ export async function decodeFilePreviewDataUrl(file: File): Promise<{
   dataUrl: string;
   width: number;
   height: number;
+  dpi?: number;
   frameCount?: number;
 }> {
   const ext = getFileExtension(file.name);
   if (ext === 'gif') {
     const gif = decodeAnimatedGif(await file.arrayBuffer());
     return {
-      dataUrl: rgbaToDataUrl({
-        width: gif.width,
-        height: gif.height,
-        data: gif.frames[0].rgba,
-        hasTransparency: gif.hasTransparency,
-      }),
+      dataUrl: rgbaToDataUrl(
+        {
+          width: gif.width,
+          height: gif.height,
+          data: gif.frames[0].rgba,
+          hasTransparency: gif.hasTransparency,
+        },
+        512
+      ),
       width: gif.width,
       height: gif.height,
+      dpi: 72,
       frameCount: gif.frames.length,
     };
   }
   const rgba = await decodeAnyRasterFileToRgba(file);
   return {
-    dataUrl: rgbaToDataUrl(rgba),
+    dataUrl: rgbaToDataUrl(rgba, 512),
     width: rgba.width,
     height: rgba.height,
+    dpi: rgba.dpi || 72,
     frameCount: 1,
   };
 }
 
 // =========================================================================
-// SPRITESHEET AUTO-DETECTION & GRID SLICING ENGINE
+// SPRITESHEET AUTO-DETECTION & 1:1 GRID SLICING ENGINE
 // =========================================================================
 export function detectSpritesheetCandidate(
   fileName: string,
@@ -1711,12 +1989,12 @@ export function detectSpritesheetCandidate(
 ): SpritesheetCandidateInfo {
   const lower = fileName.toLowerCase();
 
-  // Explicit grid hint in filename, e.g. hero_4x2.png or attack_6frames.png
-  const gridHint = lower.match(/(?:^|[_\-\s])(\d{1,2})x(\d{1,2})(?:[_\-\s.]|$)/);
+  // Explicit grid hint in filename, e.g. hero_4x2.png or attack_16x4.png
+  const gridHint = lower.match(/(?:^|[_\-\s])(\d{1,3})x(\d{1,3})(?:[_\-\s.]|$)/);
   if (gridHint) {
     const c = parseInt(gridHint[1], 10);
     const r = parseInt(gridHint[2], 10);
-    if (c >= 2 && c <= 32 && r >= 1 && r <= 32 && width % c === 0 && height % r === 0) {
+    if (c >= 2 && c <= 256 && r >= 1 && r <= 256 && width % c === 0 && height % r === 0) {
       return {
         isCandidate: true,
         suggestedCols: c,
@@ -1728,14 +2006,14 @@ export function detectSpritesheetCandidate(
     }
   }
 
-  const stripNameKeyword = /(sheet|strip|sprite|atlas|frames|anim|walk|run|idle|attack|jump|combo|cycle)/i.test(
+  const stripNameKeyword = /(sheet|strip|sprite|atlas|frames|anim|walk|run|idle|attack|jump|combo|cycle|char|fighter|boss)/i.test(
     lower
   );
 
-  // Horizontal square-frame strip (e.g. 256x64 -> 4 frames of 64x64)
+  // Horizontal square-frame strip (e.g. 256×64 -> 4 frames of 64×64, or 2048×128 -> 16 frames of 128×128)
   if (width >= height * 2 && width % height === 0) {
     const cols = width / height;
-    if (cols >= 2 && cols <= 32) {
+    if (cols >= 2 && cols <= 128) {
       return {
         isCandidate: true,
         suggestedCols: cols,
@@ -1747,10 +2025,10 @@ export function detectSpritesheetCandidate(
     }
   }
 
-  // Vertical square-frame strip (e.g. 64x256 -> 4 frames of 64x64)
+  // Vertical square-frame strip (e.g. 64×256 -> 4 frames of 64×64)
   if (height >= width * 2 && height % width === 0) {
     const rows = height / width;
-    if (rows >= 2 && rows <= 32) {
+    if (rows >= 2 && rows <= 128) {
       return {
         isCandidate: true,
         suggestedCols: 1,
@@ -1762,13 +2040,16 @@ export function detectSpritesheetCandidate(
     }
   }
 
-  if (stripNameKeyword && (width >= 64 || height >= 64)) {
-    const commonSizes = [16, 24, 32, 48, 64, 96, 128];
-    for (const sz of commonSizes) {
+  const commonSizes = [16, 24, 32, 48, 64, 80, 96, 128, 160, 192, 256, 512];
+
+  // Clean grid multiples of classic pixel-art cell sizes when filename suggests spritesheet OR aspect ratio is wide/tall
+  if (stripNameKeyword || width / Math.max(1, height) >= 3 || height / Math.max(1, width) >= 3) {
+    for (let i = commonSizes.length - 1; i >= 0; i--) {
+      const sz = commonSizes[i];
       if (width >= sz * 2 && width % sz === 0 && height % sz === 0) {
         const cols = width / sz;
         const rows = height / sz;
-        if (cols * rows >= 2 && cols * rows <= 64) {
+        if (cols * rows >= 2 && cols * rows <= 256) {
           return {
             isCandidate: true,
             suggestedCols: cols,
@@ -1780,20 +2061,22 @@ export function detectSpritesheetCandidate(
         }
       }
     }
-    const cols = width >= height ? Math.max(2, Math.min(16, Math.round(width / Math.max(1, height)))) : 1;
-    const rows = height > width ? Math.max(2, Math.min(16, Math.round(height / Math.max(1, width)))) : 1;
-    return {
-      isCandidate: true,
-      suggestedCols: cols,
-      suggestedRows: rows,
-      suggestedFrameWidth: Math.max(1, Math.floor(width / cols)),
-      suggestedFrameHeight: Math.max(1, Math.floor(height / rows)),
-      reason: 'Nombre de archivo compatible con Spritesheet',
-    };
+    if (stripNameKeyword && (width >= 48 || height >= 48)) {
+      const cols = width >= height ? Math.max(2, Math.min(32, Math.round(width / Math.max(1, height)))) : 1;
+      const rows = height > width ? Math.max(2, Math.min(32, Math.round(height / Math.max(1, width)))) : 1;
+      return {
+        isCandidate: true,
+        suggestedCols: cols,
+        suggestedRows: rows,
+        suggestedFrameWidth: Math.max(1, Math.floor(width / cols)),
+        suggestedFrameHeight: Math.max(1, Math.floor(height / rows)),
+        reason: 'Nombre y proporción compatibles con hoja de sprites',
+      };
+    }
   }
 
-  // Non-candidate default suggestion if user manually slices
-  const defaultCols = width >= height * 2 ? Math.max(2, Math.min(16, Math.round(width / Math.max(1, height)))) : 4;
+  // Non-candidate default suggestion if user manually opens the slicer
+  const defaultCols = width >= height * 2 ? Math.max(2, Math.min(32, Math.round(width / Math.max(1, height)))) : 4;
   return {
     isCandidate: false,
     suggestedCols: defaultCols,
@@ -1820,8 +2103,8 @@ export function sliceRgbaToSpritesheetResult(
   raw: DecodedRgbaImage,
   opts: SpritesheetSliceOptions
 ): ImportResult {
-  const cols = Math.max(1, Math.min(64, Math.floor(opts.cols)));
-  const rows = Math.max(1, Math.min(64, Math.floor(opts.rows)));
+  const cols = Math.max(1, Math.min(512, Math.floor(opts.cols)));
+  const rows = Math.max(1, Math.min(512, Math.floor(opts.rows)));
   const marginX = Math.max(0, Math.floor(opts.marginX || 0));
   const marginY = Math.max(0, Math.floor(opts.marginY || 0));
   const spacingX = Math.max(0, Math.floor(opts.spacingX || 0));
@@ -1837,25 +2120,85 @@ export function sliceRgbaToSpritesheetResult(
   const frameTicks = Math.max(1, Math.round((frameDurationMs / 1000) * 60));
   const stamp = Date.now();
   const frames: Frame[] = [];
+  const sourceTiledStore = raw.tiledStoreId ? getTiledStore(raw.tiledStoreId) : undefined;
+  const cellNeedsTiled = shouldUseTiledStorage(cellW, cellH);
 
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
       const startX = marginX + c * (cellW + spacingX);
       const startY = marginY + r * (cellH + spacingY);
-      const grid = createEmptyGrid(cellW, cellH);
+
+      if (cellNeedsTiled) {
+        const subRgba = sourceTiledStore
+          ? sourceTiledStore.sliceRegionToRgba(startX, startY, cellW, cellH)
+          : (() => {
+              const buf = new Uint8ClampedArray(cellW * cellH * 4);
+              for (let y = 0; y < cellH; y++) {
+                const sy = startY + y;
+                if (sy < 0 || sy >= raw.height) continue;
+                const copyLen = Math.max(0, Math.min(cellW, raw.width - startX));
+                if (copyLen <= 0) continue;
+                const srcOff = (sy * raw.width + startX) * 4;
+                buf.set(raw.data.subarray(srcOff, srcOff + copyLen * 4), y * cellW * 4);
+              }
+              return buf;
+            })();
+
+        const cellStore = new TiledLayerStore(cellW, cellH);
+        const { nonEmptyCount } = cellStore.loadFromRgbaBuffer(subRgba, cellW, cellH);
+        if (opts.skipEmptyFrames && nonEmptyCount === 0) {
+          cellStore.dispose();
+          continue;
+        }
+        const tiledStoreId = registerTiledStore(cellStore);
+        const idx = frames.length;
+        frames.push({
+          id: `frame-sheet-${stamp}-${idx}`,
+          name: `Fotograma #${idx + 1}`,
+          durationTicks: frameTicks,
+          durationMs: frameDurationMs,
+          phase: 'neutral',
+          layers: [
+            {
+              id: `layer-sheet-${stamp}-${idx}`,
+              name: 'Spritesheet',
+              visible: true,
+              locked: false,
+              opacity: 1,
+              fillOpacity: 1,
+              blendMode: 'normal',
+              layerType: 'raster',
+              pixels: [],
+              tiledStoreId,
+              tiledRevision: 1,
+            },
+          ],
+          hitboxes: [],
+        });
+        continue;
+      }
+
+      let grid: (string | null)[][];
       let cellPixels = 0;
 
-      for (let y = 0; y < cellH; y++) {
-        const sy = startY + y;
-        if (sy < 0 || sy >= raw.height) continue;
-        for (let x = 0; x < cellW; x++) {
-          const sx = startX + x;
-          if (sx < 0 || sx >= raw.width) continue;
-          const idx = (sy * raw.width + sx) * 4;
-          const a = raw.data[idx + 3];
-          if (a > 0) {
-            grid[y][x] = rgbaToPixelString(raw.data[idx], raw.data[idx + 1], raw.data[idx + 2], a);
-            cellPixels++;
+      if (sourceTiledStore && raw.data.length === 0) {
+        const sliced = sourceTiledStore.sliceRegionToPixelGrid(startX, startY, cellW, cellH);
+        grid = sliced.grid;
+        cellPixels = sliced.nonEmptyCount;
+      } else {
+        grid = createEmptyGrid(cellW, cellH);
+        for (let y = 0; y < cellH; y++) {
+          const sy = startY + y;
+          if (sy < 0 || sy >= raw.height) continue;
+          for (let x = 0; x < cellW; x++) {
+            const sx = startX + x;
+            if (sx < 0 || sx >= raw.width) continue;
+            const idx = (sy * raw.width + sx) * 4;
+            const a = raw.data[idx + 3];
+            if (a > 0) {
+              grid[y][x] = rgbaToPixelString(raw.data[idx], raw.data[idx + 1], raw.data[idx + 2], a);
+              cellPixels++;
+            }
           }
         }
       }
@@ -1900,6 +2243,7 @@ export function sliceRgbaToSpritesheetResult(
       name: opts.baseName,
       width: cellW,
       height: cellH,
+      dpi: raw.dpi || 72,
       frames,
       fps,
       stats: {
@@ -1910,6 +2254,11 @@ export function sliceRgbaToSpritesheetResult(
         nonEmptyPixelCount: 0,
         hasTransparency: raw.hasTransparency,
         isAnimated: frames.length > 1,
+        wasDownscaled: false,
+        originalWidth: raw.width,
+        originalHeight: raw.height,
+        dpi: raw.dpi || 72,
+        usesTiledEngine: cellNeedsTiled,
       },
     },
     opts.baseName,
@@ -2678,25 +3027,47 @@ export async function importProjectJson(file: File): Promise<ImportResult> {
 // =========================================================================
 async function importGif(file: File): Promise<ImportResult> {
   const gif = decodeAnimatedGif(await file.arrayBuffer());
-  let targetW = gif.width;
-  let targetH = gif.height;
-  let wasDownscaled = false;
-
-  if (targetW > MAX_SINGLE_CANVAS_RASTER_DIM || targetH > MAX_SINGLE_CANVAS_RASTER_DIM) {
-    const scale = Math.min(MAX_SINGLE_CANVAS_RASTER_DIM / targetW, MAX_SINGLE_CANVAS_RASTER_DIM / targetH);
-    targetW = Math.max(1, Math.round(targetW * scale));
-    targetH = Math.max(1, Math.round(targetH * scale));
-    wasDownscaled = true;
-  }
+  // NEVER auto-resize: keep 100% original width, height, transparency, and pixels!
+  const targetW = gif.width;
+  const targetH = gif.height;
+  const useTiled = shouldUseTiledStorage(targetW, targetH);
 
   const stamp = Date.now();
   const frames: Frame[] = gif.frames.map((gf, idx) => {
-    const frameRgba: DecodedRgbaImage = wasDownscaled
-      ? scaleRgbaImage({ width: gif.width, height: gif.height, data: gf.rgba, hasTransparency: gif.hasTransparency }, targetW, targetH, 'stretch')
-      : { width: gif.width, height: gif.height, data: gf.rgba, hasTransparency: gif.hasTransparency };
-
-    const { grid } = rgbaBufferToPixelGrid(frameRgba.data, targetW, targetH);
     const durationTicks = Math.max(1, Math.round((gf.delayMs / 1000) * 60));
+    let layer: Layer;
+
+    if (useTiled) {
+      const store = new TiledLayerStore(targetW, targetH);
+      store.loadFromRgbaBuffer(gf.rgba, targetW, targetH);
+      const tiledStoreId = registerTiledStore(store);
+      layer = {
+        id: `layer-gif-${stamp}-${idx}`,
+        name: gif.frames.length > 1 ? 'Animación GIF' : 'Imagen Base',
+        visible: true,
+        locked: false,
+        opacity: 1,
+        fillOpacity: 1,
+        blendMode: 'normal',
+        layerType: 'raster',
+        pixels: [],
+        tiledStoreId,
+        tiledRevision: 1,
+      };
+    } else {
+      const { grid } = rgbaBufferToPixelGrid(gf.rgba, targetW, targetH);
+      layer = {
+        id: `layer-gif-${stamp}-${idx}`,
+        name: gif.frames.length > 1 ? 'Animación GIF' : 'Imagen Base',
+        visible: true,
+        locked: false,
+        opacity: 1,
+        fillOpacity: 1,
+        blendMode: 'normal',
+        layerType: 'raster',
+        pixels: grid,
+      };
+    }
 
     return {
       id: `frame-gif-${stamp}-${idx}`,
@@ -2704,19 +3075,7 @@ async function importGif(file: File): Promise<ImportResult> {
       durationTicks,
       durationMs: gf.delayMs,
       phase: 'neutral',
-      layers: [
-        {
-          id: `layer-gif-${stamp}-${idx}`,
-          name: gif.frames.length > 1 ? 'Animación GIF' : 'Imagen Base',
-          visible: true,
-          locked: false,
-          opacity: 1,
-          fillOpacity: 1,
-          blendMode: 'normal',
-          layerType: 'raster',
-          pixels: grid,
-        },
-      ],
+      layers: [layer],
       hitboxes: [],
     };
   });
@@ -2728,6 +3087,8 @@ async function importGif(file: File): Promise<ImportResult> {
     height: gif.height,
     data: gif.frames[0].rgba,
     hasTransparency: gif.hasTransparency,
+    dpi: 72,
+    tiledStoreId: frames[0]?.layers[0]?.tiledStoreId,
   };
 
   return validateImportResult(
@@ -2735,6 +3096,7 @@ async function importGif(file: File): Promise<ImportResult> {
       name: file.name.replace(/\.[^/.]+$/, ''),
       width: targetW,
       height: targetH,
+      dpi: 72,
       frames,
       fps: computedFps,
       rawRaster: gif.frames.length === 1 ? rawFirst : undefined,
@@ -2748,9 +3110,11 @@ async function importGif(file: File): Promise<ImportResult> {
         nonEmptyPixelCount: 0,
         hasTransparency: gif.hasTransparency,
         isAnimated: frames.length > 1,
-        wasDownscaled,
+        wasDownscaled: false,
         originalWidth: gif.width,
         originalHeight: gif.height,
+        dpi: 72,
+        usesTiledEngine: useTiled,
       },
     },
     file.name,
@@ -2761,43 +3125,58 @@ async function importGif(file: File): Promise<ImportResult> {
 async function importTiff(file: File): Promise<ImportResult> {
   const pages = await decodeTiffFrames(await file.arrayBuffer());
   const first = pages[0];
-  let targetW = first.width;
-  let targetH = first.height;
-  let wasDownscaled = false;
-
-  if (targetW > MAX_SINGLE_CANVAS_RASTER_DIM || targetH > MAX_SINGLE_CANVAS_RASTER_DIM) {
-    const scale = Math.min(MAX_SINGLE_CANVAS_RASTER_DIM / targetW, MAX_SINGLE_CANVAS_RASTER_DIM / targetH);
-    targetW = Math.max(1, Math.round(targetW * scale));
-    targetH = Math.max(1, Math.round(targetH * scale));
-    wasDownscaled = true;
-  }
+  // NEVER auto-resize: keep 100% original dimensions!
+  const targetW = first.width;
+  const targetH = first.height;
+  const useTiled = shouldUseTiledStorage(targetW, targetH);
 
   const stamp = Date.now();
   const frames: Frame[] = pages.map((page, idx) => {
     const normalized =
       page.width !== targetW || page.height !== targetH
-        ? scaleRgbaImage(page, targetW, targetH, 'fit')
+        ? scaleRgbaImage(page, targetW, targetH, 'center_no_resize', 'nearest')
         : page;
-    const { grid } = rgbaBufferToPixelGrid(normalized.data, targetW, targetH);
+
+    let layer: Layer;
+    if (useTiled) {
+      const store = new TiledLayerStore(targetW, targetH);
+      store.loadFromRgbaBuffer(normalized.data, targetW, targetH);
+      const tiledStoreId = registerTiledStore(store);
+      layer = {
+        id: `layer-tiff-${stamp}-${idx}`,
+        name: 'Imagen Base',
+        visible: true,
+        locked: false,
+        opacity: 1,
+        fillOpacity: 1,
+        blendMode: 'normal',
+        layerType: 'raster',
+        pixels: [],
+        tiledStoreId,
+        tiledRevision: 1,
+      };
+    } else {
+      const { grid } = rgbaBufferToPixelGrid(normalized.data, targetW, targetH);
+      layer = {
+        id: `layer-tiff-${stamp}-${idx}`,
+        name: 'Imagen Base',
+        visible: true,
+        locked: false,
+        opacity: 1,
+        fillOpacity: 1,
+        blendMode: 'normal',
+        layerType: 'raster',
+        pixels: grid,
+      };
+    }
+
     return {
       id: `frame-tiff-${stamp}-${idx}`,
       name: pages.length > 1 ? `Página TIFF #${idx + 1}` : 'Imagen TIFF',
       durationTicks: 5,
       durationMs: 100,
       phase: 'neutral',
-      layers: [
-        {
-          id: `layer-tiff-${stamp}-${idx}`,
-          name: 'Imagen Base',
-          visible: true,
-          locked: false,
-          opacity: 1,
-          fillOpacity: 1,
-          blendMode: 'normal',
-          layerType: 'raster',
-          pixels: grid,
-        },
-      ],
+      layers: [layer],
       hitboxes: [],
     };
   });
@@ -2807,9 +3186,10 @@ async function importTiff(file: File): Promise<ImportResult> {
       name: file.name.replace(/\.[^/.]+$/, ''),
       width: targetW,
       height: targetH,
+      dpi: first.dpi || 72,
       frames,
       fps: 10,
-      rawRaster: pages.length === 1 ? first : undefined,
+      rawRaster: pages.length === 1 ? { ...first, tiledStoreId: frames[0]?.layers[0]?.tiledStoreId } : undefined,
       spritesheetCandidate:
         pages.length === 1 ? detectSpritesheetCandidate(file.name, first.width, first.height) : undefined,
       stats: {
@@ -2820,9 +3200,11 @@ async function importTiff(file: File): Promise<ImportResult> {
         nonEmptyPixelCount: 0,
         hasTransparency: pages.some((p) => p.hasTransparency),
         isAnimated: pages.length > 1,
-        wasDownscaled,
+        wasDownscaled: false,
         originalWidth: first.width,
         originalHeight: first.height,
+        dpi: first.dpi || 72,
+        usesTiledEngine: useTiled,
       },
     },
     file.name,
@@ -2836,32 +3218,69 @@ async function importSingleRasterImage(
   fileFormat: RecentProjectFileFormat
 ): Promise<ImportResult> {
   const raw = await decodeAnyRasterFileToRgba(file);
-  let targetW = raw.width;
-  let targetH = raw.height;
-  let wasDownscaled = false;
-
-  if (targetW > MAX_SINGLE_CANVAS_RASTER_DIM || targetH > MAX_SINGLE_CANVAS_RASTER_DIM) {
-    const scale = Math.min(MAX_SINGLE_CANVAS_RASTER_DIM / targetW, MAX_SINGLE_CANVAS_RASTER_DIM / targetH);
-    targetW = Math.max(1, Math.round(targetW * scale));
-    targetH = Math.max(1, Math.round(targetH * scale));
-    wasDownscaled = true;
-  }
-
-  const effective = wasDownscaled ? scaleRgbaImage(raw, targetW, targetH, 'stretch') : raw;
-  const { grid, nonEmptyCount, hasTransparency } = rgbaBufferToPixelGrid(
-    effective.data,
-    targetW,
-    targetH
-  );
+  // PIXEL INTEGRITY GUARANTEE: NEVER resize or resample on Open!
+  const targetW = raw.width;
+  const targetH = raw.height;
+  const dpi = raw.dpi || 72;
+  const useTiled = shouldUseTiledStorage(targetW, targetH);
 
   const stamp = Date.now();
   const baseName = file.name.replace(/\.[^/.]+$/, '');
+
+  let layer: Layer;
+  let nonEmptyCount = 0;
+  let hasTransparency = raw.hasTransparency;
+  let rawWithTile: DecodedRgbaImage = raw;
+
+  if (useTiled) {
+    let tiledStoreId = raw.tiledStoreId;
+    if (!tiledStoreId || !getTiledStore(tiledStoreId)) {
+      const store = new TiledLayerStore(targetW, targetH);
+      const stats = store.loadFromRgbaBuffer(raw.data, targetW, targetH);
+      nonEmptyCount = stats.nonEmptyCount;
+      hasTransparency = hasTransparency || stats.hasTransparency;
+      tiledStoreId = registerTiledStore(store);
+    } else {
+      const store = getTiledStore(tiledStoreId)!;
+      nonEmptyCount = store.allocatedTileCount > 0 ? Math.max(1, store.allocatedTileCount * 64) : 0;
+    }
+    rawWithTile = { ...raw, tiledStoreId };
+    layer = {
+      id: `layer-${fileFormat}-${stamp}`,
+      name: baseName || 'Imagen Base',
+      visible: true,
+      locked: false,
+      opacity: 1,
+      fillOpacity: 1,
+      blendMode: 'normal',
+      layerType: 'raster',
+      pixels: [],
+      tiledStoreId,
+      tiledRevision: 1,
+    };
+  } else {
+    const converted = rgbaBufferToPixelGrid(raw.data, targetW, targetH);
+    nonEmptyCount = converted.nonEmptyCount;
+    hasTransparency = converted.hasTransparency;
+    layer = {
+      id: `layer-${fileFormat}-${stamp}`,
+      name: baseName || 'Imagen Base',
+      visible: true,
+      locked: false,
+      opacity: 1,
+      fillOpacity: 1,
+      blendMode: 'normal',
+      layerType: 'raster',
+      pixels: converted.grid,
+    };
+  }
 
   return validateImportResult(
     {
       name: baseName,
       width: targetW,
       height: targetH,
+      dpi,
       frames: [
         {
           id: `frame-${fileFormat}-${stamp}`,
@@ -2869,23 +3288,11 @@ async function importSingleRasterImage(
           durationTicks: 5,
           durationMs: 83,
           phase: 'neutral',
-          layers: [
-            {
-              id: `layer-${fileFormat}-${stamp}`,
-              name: baseName || 'Imagen Base',
-              visible: true,
-              locked: false,
-              opacity: 1,
-              fillOpacity: 1,
-              blendMode: 'normal',
-              layerType: 'raster',
-              pixels: grid,
-            },
-          ],
+          layers: [layer],
           hitboxes: [],
         },
       ],
-      rawRaster: raw,
+      rawRaster: rawWithTile,
       spritesheetCandidate: detectSpritesheetCandidate(file.name, raw.width, raw.height),
       stats: {
         formatLabel,
@@ -2895,9 +3302,11 @@ async function importSingleRasterImage(
         nonEmptyPixelCount: nonEmptyCount,
         hasTransparency,
         isAnimated: false,
-        wasDownscaled,
+        wasDownscaled: false,
         originalWidth: raw.width,
         originalHeight: raw.height,
+        dpi,
+        usesTiledEngine: useTiled,
       },
     },
     file.name,
@@ -2950,6 +3359,28 @@ export function validateDocumentFramesIntegrity(
     maxLayerCount = Math.max(maxLayerCount, frame.layers.length);
 
     const normalizedLayers: Layer[] = frame.layers.map((layer, lIdx) => {
+      // Fast O(1) validation for Tiled/Chunked high-resolution layers (never allocate giant string[][])
+      const tiledStore = layer?.tiledStoreId ? getTiledStore(layer.tiledStoreId) : undefined;
+      if (tiledStore) {
+        if (tiledStore.hasNonEmptyContent()) {
+          nonEmptyPixelCount += Math.max(1, tiledStore.allocatedTileCount * 64);
+        }
+        hasTransparency = true;
+        return {
+          ...layer,
+          id: layer.id || `layer-val-${fIdx}-${lIdx}`,
+          name: layer.name || `Capa ${lIdx + 1}`,
+          visible: layer.visible !== false,
+          locked: Boolean(layer.locked),
+          opacity: typeof layer.opacity === 'number' ? layer.opacity : 1,
+          fillOpacity: typeof layer.fillOpacity === 'number' ? layer.fillOpacity : 1,
+          blendMode: layer.blendMode || 'normal',
+          pixels: [],
+          tiledStoreId: layer.tiledStoreId,
+          tiledRevision: layer.tiledRevision || 1,
+        };
+      }
+
       if (!layer || !Array.isArray(layer.pixels)) {
         throw new FileLoadError(
           `La capa "${layer?.name || lIdx + 1}" del fotograma #${fIdx + 1} no tiene matriz de píxeles válida.`,

@@ -13,6 +13,7 @@ files:
   - dist/**/*
   - electron/**/*
   - assets/pixelclash.ico
+  - assets/pixelclash.png
   - package.json
   - "!node_modules/**/*"
 win:

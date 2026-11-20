@@ -12,6 +12,7 @@ import {
   Repeat,
   X,
 } from 'lucide-react';
+import { InterpolationMode } from '../types';
 import { decodeFilePreviewDataUrl } from '../utils/fileImporter';
 
 export type SmartImportDestination =
@@ -24,7 +25,7 @@ export type SmartImportDestination =
   | 'all_frames'
   | 'brush';
 
-export type SmartImportFitMode = 'fit' | 'original' | 'stretch';
+export type SmartImportFitMode = 'original' | 'fit' | 'center_no_resize' | 'stretch';
 
 interface SmartImportModalProps {
   isOpen: boolean;
@@ -34,7 +35,11 @@ interface SmartImportModalProps {
   activeGroupName: string | null;
   activeFrameName: string;
   totalFrames: number;
-  onConfirm: (destination: SmartImportDestination, fitMode: SmartImportFitMode) => void;
+  onConfirm: (
+    destination: SmartImportDestination,
+    fitMode: SmartImportFitMode,
+    interpolation?: InterpolationMode
+  ) => void;
   onOpenAsNewDocument?: (file: File) => void;
   onCancel: () => void;
 }
@@ -108,7 +113,8 @@ export const SmartImportModal: React.FC<SmartImportModalProps> = ({
   onCancel,
 }) => {
   const [destination, setDestination] = useState<SmartImportDestination>('new_layer');
-  const [fitMode, setFitMode] = useState<SmartImportFitMode>('fit');
+  const [fitMode, setFitMode] = useState<SmartImportFitMode>('original');
+  const [interpolation, setInterpolation] = useState<InterpolationMode>('nearest');
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [naturalSize, setNaturalSize] = useState<{ w: number; h: number; frames?: number } | null>(null);
 
@@ -120,6 +126,9 @@ export const SmartImportModal: React.FC<SmartImportModalProps> = ({
       setNaturalSize(null);
       return;
     }
+
+    setFitMode('original');
+    setInterpolation('nearest');
 
     let cancelled = false;
     decodeFilePreviewDataUrl(primaryFile)
@@ -147,9 +156,14 @@ export const SmartImportModal: React.FC<SmartImportModalProps> = ({
     destination === 'current_frame' ||
     destination === 'all_frames';
 
+  const hasResolutionMismatch =
+    naturalSize !== null && (naturalSize.w !== canvasWidth || naturalSize.h !== canvasHeight);
+
+  const needsInterpolation = fitMode === 'fit' || fitMode === 'stretch';
+
   return (
     <div
-      className="fixed inset-0 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4"
+      className="fixed inset-0 z-[180] bg-black/75 backdrop-blur-xs flex items-center justify-center p-4"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onCancel();
       }}
@@ -175,13 +189,13 @@ export const SmartImportModal: React.FC<SmartImportModalProps> = ({
               Importación Inteligente · ¿Dónde desea importar este archivo?
             </h3>
             <p className="text-[11px] mt-0.5" style={{ color: 'var(--studio-text-muted)' }}>
-              El contenido se incorporará al proyecto activo sin cerrar ni reemplazar tu documento actual.
+              El contenido se incorporará al proyecto activo sin redimensionamiento automático.
             </p>
           </div>
           <button
             type="button"
             onClick={onCancel}
-            className="p-1.5 rounded-lg hover:bg-white/10 transition-colors"
+            className="p-1.5 rounded-lg hover:bg-white/10 transition-colors cursor-pointer"
             style={{ color: 'var(--studio-text-muted)' }}
           >
             <X className="w-4 h-4" />
@@ -225,7 +239,10 @@ export const SmartImportModal: React.FC<SmartImportModalProps> = ({
               >
                 {naturalSize && (
                   <span>
-                    Origen: {naturalSize.w}×{naturalSize.h} px
+                    Origen:{' '}
+                    <strong className={hasResolutionMismatch ? 'text-amber-300' : 'text-slate-200'}>
+                      {naturalSize.w}×{naturalSize.h} px
+                    </strong>
                     {naturalSize.frames && naturalSize.frames > 1 ? ` (${naturalSize.frames} frames)` : ''}
                   </span>
                 )}
@@ -310,41 +327,86 @@ export const SmartImportModal: React.FC<SmartImportModalProps> = ({
             })}
           </div>
 
-          {/* Pixel Fit Policy when importing into canvas layers */}
+          {/* Pixel Fit Policy & Interpolation when importing into canvas layers */}
           {showsFitMode && (
             <div
-              className="p-2.5 rounded-lg border flex flex-wrap items-center justify-between gap-2 text-xs"
+              className="p-3 rounded-lg border space-y-2.5 text-xs"
               style={{
                 backgroundColor: 'var(--studio-bg-card)',
                 borderColor: 'var(--studio-border)',
               }}
             >
-              <span className="text-[11px] font-medium" style={{ color: 'var(--studio-text-muted)' }}>
-                Ajuste al tamaño del lienzo ({canvasWidth}×{canvasHeight} px):
-              </span>
-              <div className="flex items-center gap-1">
-                {(
-                  [
-                    ['fit', 'Ajustar proporcional'],
-                    ['original', '1:1 Centrado'],
-                    ['stretch', 'Rellenar lienzo'],
-                  ] as const
-                ).map(([id, label]) => (
-                  <button
-                    key={id}
-                    type="button"
-                    onClick={() => setFitMode(id)}
-                    className="px-2.5 py-1 rounded text-[11px] font-medium border transition-colors cursor-pointer whitespace-nowrap"
-                    style={{
-                      backgroundColor: fitMode === id ? 'var(--studio-accent)' : 'var(--studio-bg-elevated)',
-                      color: fitMode === id ? 'var(--studio-accent-text)' : 'var(--studio-text)',
-                      borderColor: fitMode === id ? 'var(--studio-accent)' : 'var(--studio-border)',
-                    }}
-                  >
-                    {label}
-                  </button>
-                ))}
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-[11px] font-medium" style={{ color: 'var(--studio-text-muted)' }}>
+                  Ajuste al lienzo ({canvasWidth}×{canvasHeight} px):
+                </span>
+                <div className="flex flex-wrap items-center gap-1">
+                  {(
+                    [
+                      ['original', '1:1 Centrado (Sin escalar)'],
+                      ['fit', 'Ajustar al lienzo'],
+                      ['stretch', 'Rellenar lienzo'],
+                    ] as const
+                  ).map(([id, label]) => (
+                    <button
+                      key={id}
+                      type="button"
+                      onClick={() => setFitMode(id)}
+                      className="px-2.5 py-1 rounded text-[11px] font-medium border transition-colors cursor-pointer whitespace-nowrap"
+                      style={{
+                        backgroundColor: fitMode === id ? 'var(--studio-accent)' : 'var(--studio-bg-elevated)',
+                        color: fitMode === id ? 'var(--studio-accent-text)' : 'var(--studio-text)',
+                        borderColor: fitMode === id ? 'var(--studio-accent)' : 'var(--studio-border)',
+                      }}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
               </div>
+
+              {needsInterpolation && (
+                <div
+                  className="pt-2 border-t flex flex-wrap items-center justify-between gap-2"
+                  style={{ borderColor: 'var(--studio-border)' }}
+                >
+                  <span className="text-[11px]" style={{ color: 'var(--studio-text-muted)' }}>
+                    Interpolación:
+                  </span>
+                  <div className="flex items-center gap-1">
+                    {(
+                      [
+                        ['nearest', 'Nearest Neighbor'],
+                        ['bilinear', 'Bilinear'],
+                        ['bicubic', 'Bicubic'],
+                      ] as const
+                    ).map(([mode, label]) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        onClick={() => setInterpolation(mode)}
+                        className="px-2.5 py-1 rounded text-[11px] font-medium border transition-colors cursor-pointer whitespace-nowrap"
+                        style={{
+                          backgroundColor:
+                            interpolation === mode ? 'var(--studio-accent)' : 'var(--studio-bg-app)',
+                          color:
+                            interpolation === mode ? 'var(--studio-accent-text)' : 'var(--studio-text)',
+                          borderColor:
+                            interpolation === mode ? 'var(--studio-accent)' : 'var(--studio-border)',
+                        }}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {hasResolutionMismatch && fitMode === 'original' && (
+                <p className="text-[10px] text-emerald-400">
+                  Conservación 1:1 activa: cada píxel mantiene su posición y tamaño original exacto. Si prefieres adaptar el lienzo al archivo, el diálogo de resolución te dará las 4 opciones.
+                </p>
+              )}
             </div>
           )}
         </div>
@@ -389,7 +451,7 @@ export const SmartImportModal: React.FC<SmartImportModalProps> = ({
             </button>
             <button
               type="button"
-              onClick={() => onConfirm(destination, fitMode)}
+              onClick={() => onConfirm(destination, fitMode, interpolation)}
               className="px-4 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-opacity hover:opacity-90 cursor-pointer"
               style={{
                 backgroundColor: 'var(--studio-accent)',
@@ -405,3 +467,4 @@ export const SmartImportModal: React.FC<SmartImportModalProps> = ({
     </div>
   );
 };
+

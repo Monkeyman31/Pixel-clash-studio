@@ -238,6 +238,10 @@ interface MenuBarProps {
   onPasteAsReference?: () => void;
   quickPasteMode?: boolean;
   onToggleQuickPasteMode?: () => void;
+  // Home Screen & Startup Splash Controls
+  onOpenHomeScreen?: (section?: 'inicio' | 'recientes' | 'configuracion' | 'ayuda' | 'novedades') => void;
+  onTestSplashAnimation?: () => void;
+  onActivateCanvasEditTool?: () => void;
 }
 
 // Strictly vertical submenu alias (zero horizontal flyouts, preserves main menu structure)
@@ -391,6 +395,9 @@ export const MenuBar: React.FC<MenuBarProps> = ({
   onPasteAsReference,
   quickPasteMode = false,
   onToggleQuickPasteMode,
+  onOpenHomeScreen,
+  onTestSplashAnimation,
+  onActivateCanvasEditTool,
 }) => {
   const activeWorkModeDef = WORK_MODES_REGISTRY[workMode] || WORK_MODES_REGISTRY.fighter;
   const [activeMenu, setActiveMenu] = useState<string | null>(null);
@@ -547,6 +554,23 @@ export const MenuBar: React.FC<MenuBarProps> = ({
         btnClass={menuBtnClass('archivo')}
         widthClass="w-72"
       >
+            {onOpenHomeScreen && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => handleItemClick(() => onOpenHomeScreen('inicio'))}
+                  className="px-3 py-1.5 flex items-center justify-between hover:bg-[#20273a] transition-colors text-left font-bold text-amber-300"
+                >
+                  <span className="flex items-center gap-2">
+                    <LayoutGrid className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Pantalla de Inicio...</span>
+                  </span>
+                  <span className="text-[10px] text-amber-400 font-mono">Hub</span>
+                </button>
+                <div className="h-[1px] bg-[#22283a] my-1" />
+              </>
+            )}
+
             <button
               type="button"
               data-help-id="action.new_project"
@@ -1723,6 +1747,22 @@ export const MenuBar: React.FC<MenuBarProps> = ({
         btnClass={menuBtnClass('imagen')}
         widthClass="w-68"
       >
+            {onActivateCanvasEditTool && (
+              <button
+                type="button"
+                onClick={() => handleItemClick(onActivateCanvasEditTool)}
+                className="px-3 py-1.5 flex items-center justify-between gap-2 hover:bg-[#20273a] transition-colors text-left"
+              >
+                <span className="flex items-center gap-2">
+                  <Crop className="w-3.5 h-3.5 text-yellow-400" />
+                  <span className="font-medium text-yellow-200">Editar Lienzo (Visual)</span>
+                </span>
+                <span className="text-[10px] font-mono text-slate-400">
+                  {shortcutLabels['tool.canvas_edit'] || 'Shift+C'}
+                </span>
+              </button>
+            )}
+
             <button
               type="button"
               onClick={() => handleItemClick(onOpenCanvasSizeModal)}
@@ -2559,6 +2599,38 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     </button>
                   ))}
                 </SubMenu>
+              </>
+            )}
+
+            {(onOpenHomeScreen || onTestSplashAnimation) && (
+              <>
+                <div className="h-[1px] bg-[#22283a] my-1" />
+                {onOpenHomeScreen && (
+                  <button
+                    type="button"
+                    onClick={() => handleItemClick(() => onOpenHomeScreen('configuracion'))}
+                    className="px-3 py-1.5 flex items-center justify-between hover:bg-[#20273a] transition-colors text-left text-slate-200"
+                  >
+                    <span className="flex items-center gap-2">
+                      <Sliders className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Preferencias de Inicio y Mascota...</span>
+                    </span>
+                    <span className="text-[10px] text-amber-400 font-mono">Inicio</span>
+                  </button>
+                )}
+                {onTestSplashAnimation && (
+                  <button
+                    type="button"
+                    onClick={() => handleItemClick(onTestSplashAnimation)}
+                    className="px-3 py-1.5 flex items-center justify-between hover:bg-[#20273a] transition-colors text-left text-slate-300"
+                  >
+                    <span className="flex items-center gap-2">
+                      <Sparkles className="w-3.5 h-3.5 text-sky-400" />
+                      <span>Ver Animación de Carga</span>
+                    </span>
+                    <span className="text-[10px] text-slate-500 font-mono">Splash</span>
+                  </button>
+                )}
               </>
             )}
       </TopMenuGroup>

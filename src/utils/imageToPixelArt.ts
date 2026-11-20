@@ -141,8 +141,8 @@ export function convertImageElementToPixelArt(
   img: HTMLImageElement,
   options: ImageToPixelArtOptions
 ): ImageToPixelArtResult {
-  const targetWidth = Math.max(8, Math.min(512, Math.round(options.targetWidth)));
-  const targetHeight = Math.max(8, Math.min(512, Math.round(options.targetHeight)));
+  const targetWidth = Math.max(1, Math.round(options.targetWidth));
+  const targetHeight = Math.max(1, Math.round(options.targetHeight));
   const fidelity = Math.max(0, Math.min(100, options.fidelity));
   const alphaCutoff = options.alphaThreshold ?? 96;
 

@@ -1,7 +1,9 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
+  AlertTriangle,
   CheckSquare,
   Clock,
+  Cpu,
   FilePlus,
   Film,
   Gamepad2,
@@ -16,10 +18,23 @@ import {
 } from 'lucide-react';
 import { FIGHTING_GAME_PALETTES } from '../constants/palettes';
 import { NewProjectConfig, RecentProjectEntry } from '../types';
+import { estimateCanvasResources } from '../utils/canvasMemoryEstimator';
+
+export type NewProjectTemplateCategory =
+  | 'Todas'
+  | 'Personaje'
+  | 'Stage'
+  | 'HUD'
+  | 'FX'
+  | 'Portrait'
+  | 'Cutscene'
+  | 'Tileset'
+  | 'Personalizado';
 
 interface NewProjectModalProps {
   isOpen: boolean;
   onClose: () => void;
+  initialCategory?: NewProjectTemplateCategory | string;
   onCreateProject?: (name: string, width: number, height: number) => void;
   onCreateProjectConfig?: (config: NewProjectConfig) => void;
   recentProjects?: RecentProjectEntry[];
@@ -29,7 +44,7 @@ interface NewProjectModalProps {
 
 interface ProjectTemplateItem {
   id: string;
-  category: 'Lucha' | 'Pixel Art' | 'Spritesheets' | 'UI / HUD' | 'Concepto';
+  category: Exclude<NewProjectTemplateCategory, 'Todas'>;
   name: string;
   width: number;
   height: number;
@@ -41,44 +56,63 @@ interface ProjectTemplateItem {
 }
 
 const PROJECT_TEMPLATES: ProjectTemplateItem[] = [
-  { id: 'fg-16bit', category: 'Lucha', name: 'Fighter 16-Bit', width: 48, height: 48, pixelScale: 1, desc: 'Estándar arcade ágil', animationMode: true, grid: true, pixelPerfect: true },
-  { id: 'fg-cps2', category: 'Lucha', name: 'CPS-2 Luchador', width: 64, height: 64, pixelScale: 1, desc: 'Sprite medio detallado', animationMode: true, grid: true, pixelPerfect: true },
-  { id: 'fg-boss', category: 'Lucha', name: 'Jefe SNK Boss', width: 96, height: 96, pixelScale: 1, desc: 'Personaje gran escala', animationMode: true, grid: true, pixelPerfect: false },
-  { id: 'pa-micro', category: 'Pixel Art', name: 'Icono / Ítem 16×16', width: 16, height: 16, pixelScale: 2, desc: 'Objetos RPG / HUD', animationMode: false, grid: true, pixelPerfect: true },
-  { id: 'pa-tile', category: 'Pixel Art', name: 'Tile 32×32', width: 32, height: 32, pixelScale: 1, desc: 'Mosaico / Chibi', animationMode: false, grid: true, pixelPerfect: true },
-  { id: 'pa-portrait', category: 'Pixel Art', name: 'Retrato 64×80', width: 64, height: 80, pixelScale: 1, desc: 'Diálogo y selección', animationMode: false, grid: false, pixelPerfect: true },
-  { id: 'ss-combo', category: 'Spritesheets', name: 'Tira Acción 80×80', width: 80, height: 80, pixelScale: 1, desc: 'Ataques largos / VFX', animationMode: true, grid: true, pixelPerfect: true },
-  { id: 'ss-vfx', category: 'Spritesheets', name: 'Proyectil / Aura', width: 64, height: 48, pixelScale: 1, desc: 'Bolas de fuego e impactos', animationMode: true, grid: true, pixelPerfect: false },
-  { id: 'ui-hud', category: 'UI / HUD', name: 'Barra Vida / HUD', width: 192, height: 48, pixelScale: 1, desc: 'Barras arcade K.O.', animationMode: false, grid: true, pixelPerfect: true },
-  { id: 'ui-card', category: 'UI / HUD', name: 'Tarjeta / Marco UI', width: 128, height: 96, pixelScale: 1, desc: 'Ventanas de menú retro', animationMode: false, grid: true, pixelPerfect: true },
-  { id: 'co-stage', category: 'Concepto', name: 'Escenario 256×144', width: 256, height: 144, pixelScale: 1, desc: 'Fondo panorámico 16:9', animationMode: false, grid: false, pixelPerfect: false },
-  { id: 'co-sketch', category: 'Concepto', name: 'Concepto Amplio', width: 160, height: 120, pixelScale: 1, desc: 'Boceto o composición libre', animationMode: false, grid: false, pixelPerfect: false },
+  // Personaje
+  { id: 'char-16bit', category: 'Personaje', name: 'Fighter 16-Bit', width: 48, height: 48, pixelScale: 1, desc: 'Estándar arcade ágil', animationMode: true, grid: true, pixelPerfect: true },
+  { id: 'char-cps2', category: 'Personaje', name: 'Luchador CPS-2', width: 64, height: 64, pixelScale: 1, desc: 'Sprite medio detallado', animationMode: true, grid: true, pixelPerfect: true },
+  { id: 'char-boss', category: 'Personaje', name: 'Jefe SNK Boss', width: 128, height: 128, pixelScale: 1, desc: 'Personaje gran escala', animationMode: true, grid: true, pixelPerfect: false },
+  // Stage
+  { id: 'stage-retro', category: 'Stage', name: 'Stage 16:9 Retro', width: 320, height: 180, pixelScale: 1, desc: 'Escenario pixel art clásico', animationMode: false, grid: false, pixelPerfect: false },
+  { id: 'stage-panoramic', category: 'Stage', name: 'Escenario Panorámico', width: 1024, height: 384, pixelScale: 1, desc: 'Fondo amplio con parallax', animationMode: false, grid: false, pixelPerfect: false },
+  { id: 'stage-hd', category: 'Stage', name: 'Stage Ultra-Wide HD', width: 2560, height: 720, pixelScale: 1, desc: 'Motor Tiled 256×256', animationMode: false, grid: false, pixelPerfect: false },
+  // HUD
+  { id: 'hud-life', category: 'HUD', name: 'Barra Vida / K.O.', width: 256, height: 64, pixelScale: 1, desc: 'Interfaz de combate arcade', animationMode: false, grid: true, pixelPerfect: true },
+  { id: 'hud-panel', category: 'HUD', name: 'Marco / Menú UI', width: 192, height: 128, pixelScale: 1, desc: 'Ventanas, contadores e iconos', animationMode: false, grid: true, pixelPerfect: true },
+  // FX
+  { id: 'fx-hit', category: 'FX', name: 'Impacto / Slash', width: 80, height: 80, pixelScale: 1, desc: 'Golpes, chispas y smears', animationMode: true, grid: true, pixelPerfect: true },
+  { id: 'fx-aura', category: 'FX', name: 'Aura / Proyectil', width: 128, height: 96, pixelScale: 1, desc: 'Ki, fuego, rayos y explosiones', animationMode: true, grid: true, pixelPerfect: false },
+  // Portrait
+  { id: 'port-select', category: 'Portrait', name: 'Retrato Selección', width: 96, height: 112, pixelScale: 1, desc: 'Pantalla de selección / diálogo', animationMode: false, grid: false, pixelPerfect: true },
+  { id: 'port-super', category: 'Portrait', name: 'Retrato Super Move', width: 256, height: 160, pixelScale: 1, desc: 'Ilustración de ataque especial', animationMode: false, grid: false, pixelPerfect: false },
+  // Cutscene
+  { id: 'cut-arcade', category: 'Cutscene', name: 'Cinemática 384×216', width: 384, height: 216, pixelScale: 1, desc: 'Escena narrativa 16:9', animationMode: true, grid: false, pixelPerfect: false },
+  { id: 'cut-hd', category: 'Cutscene', name: 'Storyboard 1280×720', width: 1280, height: 720, pixelScale: 1, desc: 'Alta resolución Tiled', animationMode: true, grid: false, pixelPerfect: false },
+  // Tileset
+  { id: 'tile-16', category: 'Tileset', name: 'Hoja Tiles 256×256', width: 256, height: 256, pixelScale: 1, desc: 'Mosaicos 16×16 o 32×32', animationMode: false, grid: true, pixelPerfect: true },
+  { id: 'tile-atlas', category: 'Tileset', name: 'Mega Atlas 1024×1024', width: 1024, height: 1024, pixelScale: 1, desc: 'Atlas completo de niveles', animationMode: false, grid: true, pixelPerfect: true },
+  // Personalizado
+  { id: 'custom-1024', category: 'Personalizado', name: 'Alta Resolución 1024', width: 1024, height: 1024, pixelScale: 1, desc: 'Lienzo HD sin límites', animationMode: false, grid: false, pixelPerfect: false },
+  { id: 'custom-4096', category: 'Personalizado', name: 'Mega Lienzo 4096', width: 4096, height: 4096, pixelScale: 1, desc: 'Tiled 256×256 bajo demanda', animationMode: false, grid: false, pixelPerfect: false },
 ];
 
-const CATEGORIES: ('Todas' | ProjectTemplateItem['category'])[] = [
+const CATEGORIES: NewProjectTemplateCategory[] = [
   'Todas',
-  'Lucha',
-  'Pixel Art',
-  'Spritesheets',
-  'UI / HUD',
-  'Concepto',
+  'Personaje',
+  'Stage',
+  'HUD',
+  'FX',
+  'Portrait',
+  'Cutscene',
+  'Tileset',
+  'Personalizado',
 ];
 
 export const NewProjectModal: React.FC<NewProjectModalProps> = ({
   isOpen,
   onClose,
+  initialCategory,
   onCreateProject,
   onCreateProjectConfig,
   recentProjects = [],
   onOpenRecentProject,
   onClearRecentProjects,
 }) => {
-  const [name, setName] = useState<string>('Nuevo Fighter');
-  const [category, setCategory] = useState<'Todas' | ProjectTemplateItem['category']>('Todas');
-  const [selectedTemplateId, setSelectedTemplateId] = useState<string>('fg-16bit');
+  const [name, setName] = useState<string>('Nuevo Proyecto');
+  const [category, setCategory] = useState<NewProjectTemplateCategory>('Todas');
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>('char-16bit');
   const [width, setWidth] = useState<number>(48);
   const [height, setHeight] = useState<number>(48);
   const [pixelScale, setPixelScale] = useState<number>(1);
+  const [dpi, setDpi] = useState<number>(72);
   const [backgroundMode, setBackgroundMode] = useState<'transparent' | 'solid'>('transparent');
   const [backgroundColor, setBackgroundColor] = useState<string>('#111524');
   const [initialPaletteId, setInitialPaletteId] = useState<string>(FIGHTING_GAME_PALETTES[0]?.id || 'capcom-cps2');
@@ -87,6 +121,28 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
   const [createInitialLayer, setCreateInitialLayer] = useState<boolean>(true);
   const [createInitialGroup, setCreateInitialGroup] = useState<boolean>(false);
   const [enableAnimationMode, setEnableAnimationMode] = useState<boolean>(true);
+
+  // Sync category & first template when launched from Home Screen quick templates
+  useEffect(() => {
+    if (!isOpen) return;
+    if (initialCategory && CATEGORIES.includes(initialCategory as NewProjectTemplateCategory)) {
+      const targetCat = initialCategory as NewProjectTemplateCategory;
+      setCategory(targetCat);
+      if (targetCat !== 'Todas') {
+        const match = PROJECT_TEMPLATES.find((t) => t.category === targetCat);
+        if (match) {
+          setSelectedTemplateId(match.id);
+          setWidth(match.width);
+          setHeight(match.height);
+          setPixelScale(match.pixelScale);
+          setEnableAnimationMode(match.animationMode);
+          setEnableGrid(match.grid);
+          setEnablePixelPerfect(match.pixelPerfect);
+          setName(`Nuevo ${targetCat}`);
+        }
+      }
+    }
+  }, [isOpen, initialCategory]);
 
   const visibleTemplates = useMemo(
     () =>
@@ -101,8 +157,21 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
     [initialPaletteId]
   );
 
-  const effWidth = Math.max(8, Math.min(512, Math.round(width * pixelScale)));
-  const effHeight = Math.max(8, Math.min(512, Math.round(height * pixelScale)));
+  // ZERO artificial upper caps! Any positive resolution allowed (e.g. 100×100, 10000×10000, 32000×32000+)
+  const effWidth = Math.max(1, Math.round(width * pixelScale));
+  const effHeight = Math.max(1, Math.round(height * pixelScale));
+
+  const resourceEstimate = useMemo(
+    () =>
+      estimateCanvasResources({
+        width: effWidth,
+        height: effHeight,
+        layersCount: 1,
+        framesCount: 1,
+        isSparseBlank: true,
+      }),
+    [effWidth, effHeight]
+  );
 
   if (!isOpen) return null;
 
@@ -128,7 +197,8 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
         width: effWidth,
         height: effHeight,
         pixelScale,
-        category: tpl?.category || 'Personalizado',
+        dpi: Math.max(1, Math.round(dpi || 72)),
+        category: tpl?.category || (category === 'Todas' ? 'Personalizado' : category),
         templateId: selectedTemplateId,
         backgroundMode,
         backgroundColor,
@@ -148,7 +218,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
   // Live aspect box dimensions inside preview area
   const aspectRatio = effWidth / Math.max(1, effHeight);
   const maxPreviewW = 148;
-  const maxPreviewH = 112;
+  const maxPreviewH = 100;
   let prevW = maxPreviewW;
   let prevH = prevW / aspectRatio;
   if (prevH > maxPreviewH) {
@@ -157,7 +227,12 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
   }
 
   return (
-    <div className="fixed inset-0 z-[110] bg-black/80 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4">
+    <div
+      className="fixed inset-0 z-[170] bg-black/80 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
       <div className="bg-[#121521] border border-[#2a334a] rounded-xl w-full max-w-4xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
         {/* Header */}
         <div className="px-5 py-3.5 border-b border-[#242b40] bg-[#0f121d] flex items-center justify-between gap-3">
@@ -168,11 +243,12 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
             <div>
               <h3 className="text-sm font-bold text-slate-100">Nuevo Archivo &amp; Plantillas de Estudio</h3>
               <p className="text-[11px] text-slate-400">
-                Configura lienzo, fondo inicial, paleta y espacio de trabajo listo para crear
+                Sin límites artificiales de resolución · Motor Tiled 256×256 automático para alta resolución
               </p>
             </div>
           </div>
           <button
+            type="button"
             onClick={onClose}
             className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer"
           >
@@ -181,7 +257,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
         </div>
 
         <form onSubmit={handleSubmit} className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[1.25fr_1fr] overflow-hidden">
-          {/* Left Column: Templates & Dimensions */}
+          {/* Left Column: Templates & Unlimited Dimensions */}
           <div className="p-5 overflow-y-auto space-y-4 border-b lg:border-b-0 lg:border-r border-[#21273b]">
             <div>
               <label className="text-[11px] font-bold uppercase tracking-wider text-slate-400 block mb-1.5">
@@ -200,7 +276,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
               <div className="flex items-center justify-between flex-wrap gap-1.5">
                 <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
                   <Gamepad2 className="w-3.5 h-3.5 text-amber-400" />
-                  Plantillas Visuales
+                  Plantillas de Estudio
                 </span>
                 <div className="flex flex-wrap gap-1">
                   {CATEGORIES.map((cat) => (
@@ -208,7 +284,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
                       key={cat}
                       type="button"
                       onClick={() => setCategory(cat)}
-                      className={`px-2 py-0.5 rounded text-[10px] border cursor-pointer ${
+                      className={`px-2 py-0.5 rounded text-[10px] border cursor-pointer transition-colors ${
                         category === cat
                           ? 'bg-amber-400 text-slate-950 border-amber-300 font-bold'
                           : 'bg-[#171b2a] border-[#29324a] text-slate-400 hover:text-white'
@@ -220,7 +296,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-48 overflow-y-auto pr-0.5">
                 {visibleTemplates.map((tpl) => {
                   const isSel = selectedTemplateId === tpl.id && width === tpl.width && height === tpl.height;
                   return (
@@ -247,42 +323,56 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
               </div>
             </div>
 
-            {/* Custom Dimensions & Pixel Scale */}
+            {/* Custom Unlimited Dimensions, DPI & Pixel Scale */}
             <div className="p-3 rounded-lg bg-[#161a28] border border-[#252d43] space-y-2.5">
-              <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                Resolución y Escala Base
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                  Resolución Libre, DPI y Escala
+                </span>
+                <span className="text-[10px] font-mono text-slate-500">
+                  Ej.: 100×100, 1024×1024, 10000×10000+
+                </span>
               </div>
-              <div className="grid grid-cols-3 gap-2.5 text-xs">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
                 <div>
-                  <label className="text-[10px] text-slate-400 block mb-1">Ancho base (px)</label>
+                  <label className="text-[10px] text-slate-400 block mb-1">Ancho (px)</label>
                   <input
                     type="number"
-                    min={8}
-                    max={512}
+                    min={1}
                     value={width}
                     onChange={(e) => {
                       setSelectedTemplateId('custom');
-                      setWidth(Math.max(8, Math.min(512, parseInt(e.target.value, 10) || 8)));
+                      setWidth(Math.max(1, parseInt(e.target.value, 10) || 1));
                     }}
                     className="w-full bg-[#10131e] border border-[#2c354a] rounded px-2.5 py-1.5 text-slate-100 font-mono tabular-nums focus:border-emerald-400 focus:outline-none"
                   />
                 </div>
                 <div>
-                  <label className="text-[10px] text-slate-400 block mb-1">Alto base (px)</label>
+                  <label className="text-[10px] text-slate-400 block mb-1">Alto (px)</label>
                   <input
                     type="number"
-                    min={8}
-                    max={512}
+                    min={1}
                     value={height}
                     onChange={(e) => {
                       setSelectedTemplateId('custom');
-                      setHeight(Math.max(8, Math.min(512, parseInt(e.target.value, 10) || 8)));
+                      setHeight(Math.max(1, parseInt(e.target.value, 10) || 1));
                     }}
                     className="w-full bg-[#10131e] border border-[#2c354a] rounded px-2.5 py-1.5 text-slate-100 font-mono tabular-nums focus:border-emerald-400 focus:outline-none"
                   />
                 </div>
                 <div>
-                  <label className="text-[10px] text-slate-400 block mb-1">Escala de píxel</label>
+                  <label className="text-[10px] text-slate-400 block mb-1">DPI</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={2400}
+                    value={dpi}
+                    onChange={(e) => setDpi(Math.max(1, parseInt(e.target.value, 10) || 72))}
+                    className="w-full bg-[#10131e] border border-[#2c354a] rounded px-2.5 py-1.5 text-slate-100 font-mono tabular-nums focus:border-emerald-400 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] text-slate-400 block mb-1">Escala</label>
                   <div className="grid grid-cols-4 gap-1">
                     {[1, 2, 3, 4].map((sc) => (
                       <button
@@ -302,16 +392,58 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
                 </div>
               </div>
               <div className="text-[10px] font-mono text-slate-400 flex items-center justify-between pt-1 border-t border-[#22293d]">
-                <span>Resolución final del lienzo:</span>
+                <span>Resolución final del lienzo ({dpi} DPI):</span>
                 <span className="text-emerald-300 font-bold tabular-nums">
-                  {effWidth} × {effHeight} px
+                  {effWidth.toLocaleString()} × {effHeight.toLocaleString()} px
                 </span>
               </div>
             </div>
 
+            {/* Hardware-Aware Memory, VRAM & Project Size Estimator (Non-blocking) */}
+            <div className="p-3 rounded-lg bg-[#111522] border border-[#252d43] space-y-2 text-[11px]">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+                  <Cpu className="w-3.5 h-3.5 text-sky-400" />
+                  Estimador de Recursos del Sistema
+                </span>
+                <span className="text-[10px] font-mono text-slate-400 tabular-nums">
+                  Estado: <strong className="text-slate-200">{resourceEstimate.severityLabel}</strong>
+                  {resourceEstimate.usesTiledEngine ? ' · Motor Tiled 256×256' : ''}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2 font-mono tabular-nums text-[10px]">
+                <div className="p-2 rounded bg-[#161a28] border border-[#232b40]">
+                  <div className="text-slate-400">RAM estimada</div>
+                  <div className="text-slate-100 font-bold mt-0.5">{resourceEstimate.ramFormatted}</div>
+                </div>
+                <div className="p-2 rounded bg-[#161a28] border border-[#232b40]">
+                  <div className="text-slate-400">VRAM estimada</div>
+                  <div className="text-slate-100 font-bold mt-0.5">{resourceEstimate.vramFormatted}</div>
+                </div>
+                <div className="p-2 rounded bg-[#161a28] border border-[#232b40]">
+                  <div className="text-slate-400">Tamaño proyecto</div>
+                  <div className="text-slate-100 font-bold mt-0.5">{resourceEstimate.projectFormatted}</div>
+                </div>
+              </div>
+
+              {resourceEstimate.warningMessage && (
+                <div className="p-2 rounded-md border border-amber-500/40 bg-amber-500/10 text-amber-200 flex items-start gap-2 text-[10px] leading-snug">
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
+                  <span>{resourceEstimate.warningMessage}</span>
+                </div>
+              )}
+
+              {resourceEstimate.recommendationNote && (
+                <p className="text-[10px] text-slate-400 leading-snug">
+                  {resourceEstimate.recommendationNote}
+                </p>
+              )}
+            </div>
+
             {/* Initial Palette */}
             <div className="p-3 rounded-lg bg-[#161a28] border border-[#252d43] space-y-2">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-2">
                 <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
                   <Palette className="w-3.5 h-3.5 text-sky-400" />
                   Paleta Inicial
@@ -352,7 +484,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
                   {effWidth}×{effHeight}
                 </span>
               </div>
-              <div className="w-full h-32 rounded-lg bg-[#090c14] border border-[#20273b] flex items-center justify-center overflow-hidden">
+              <div className="w-full h-28 rounded-lg bg-[#090c14] border border-[#20273b] flex items-center justify-center overflow-hidden">
                 <div
                   className={`relative border border-amber-400/70 shadow-lg ${
                     backgroundMode === 'transparent' ? 'canvas-checkerboard' : ''
@@ -454,7 +586,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
                     <button
                       type="button"
                       onClick={() => opt.set(!opt.val)}
-                      className="text-emerald-400"
+                      className="text-emerald-400 cursor-pointer"
                     >
                       {opt.val ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4 text-slate-500" />}
                     </button>
@@ -482,7 +614,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
                     </button>
                   )}
                 </div>
-                <div className="space-y-1 max-h-40 overflow-y-auto">
+                <div className="space-y-1 max-h-36 overflow-y-auto">
                   {[...recentProjects]
                     .sort((a, b) => (Boolean(a.pinned) === Boolean(b.pinned) ? 0 : a.pinned ? -1 : 1))
                     .map((rp) => {
@@ -547,7 +679,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
           {/* Footer Bar spans full width */}
           <div className="lg:col-span-2 px-5 py-3 border-t border-[#242b40] bg-[#0f121d] flex items-center justify-between gap-2">
             <span className="text-[11px] text-slate-400 font-mono tabular-nums">
-              Lienzo: {effWidth}×{effHeight} · Fondo:{' '}
+              Lienzo: {effWidth}×{effHeight} px · {dpi} DPI · Fondo:{' '}
               {backgroundMode === 'transparent' ? 'Transparente' : backgroundColor}
             </span>
             <div className="flex items-center gap-2">
@@ -571,3 +703,4 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
     </div>
   );
 };
+
