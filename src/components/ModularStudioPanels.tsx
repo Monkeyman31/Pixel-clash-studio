@@ -39,7 +39,7 @@ import {
   VectorToolConfig,
 } from '../types';
 import { FIGHTING_GAME_PALETTES } from '../constants/palettes';
-import { compositeFrame } from '../utils/pixelMath';
+import { compositeFrame, renderFramePreviewToTargetCanvas } from '../utils/pixelMath';
 import { StudioSlider } from './StudioSlider';
 
 // =========================================================
@@ -69,22 +69,23 @@ export const NavigatorPanel: React.FC<{
   useEffect(() => {
     const c = canvasRef.current;
     if (!c) return;
-    const ctx = c.getContext('2d');
-    if (!ctx) return;
-    c.width = canvasWidth;
-    c.height = canvasHeight;
-    ctx.imageSmoothingEnabled = false;
-    ctx.clearRect(0, 0, canvasWidth, canvasHeight);
-    const grid = compositeFrame(currentFrame, canvasWidth, canvasHeight, currentFrameIndex);
-    for (let y = 0; y < canvasHeight; y++) {
-      for (let x = 0; x < canvasWidth; x++) {
-        const col = grid[y]?.[x];
-        if (col) {
-          ctx.fillStyle = col;
-          ctx.fillRect(x, y, 1, 1);
-        }
-      }
-    }
+    const maxDim = 128;
+    const ratio = Math.min(maxDim / Math.max(1, canvasWidth), maxDim / Math.max(1, canvasHeight), 1);
+    const targetW = canvasWidth <= maxDim && canvasHeight <= maxDim
+      ? canvasWidth
+      : Math.max(1, Math.round(canvasWidth * ratio));
+    const targetH = canvasWidth <= maxDim && canvasHeight <= maxDim
+      ? canvasHeight
+      : Math.max(1, Math.round(canvasHeight * ratio));
+    renderFramePreviewToTargetCanvas(
+      currentFrame,
+      canvasWidth,
+      canvasHeight,
+      c,
+      targetW,
+      targetH,
+      currentFrameIndex
+    );
   }, [currentFrame, currentFrameIndex, canvasWidth, canvasHeight]);
 
   return (
@@ -144,11 +145,40 @@ export const LivePreviewPanel: React.FC<{
   isPlaying: boolean;
   onTogglePlay: () => void;
   onSelectFrame: (idx: number) => void;
-}> = ({ frames, currentFrameIndex, canvasWidth, canvasHeight, fps, isPlaying, onTogglePlay, onSelectFrame }) => {
-  const [localPlay, setLocalPlay] = useState(true);
+  onFloatToCanvas?: () => void;
+}> = ({
+  frames,
+  currentFrameIndex,
+  canvasWidth,
+  canvasHeight,
+  fps,
+  isPlaying,
+  onTogglePlay,
+  onSelectFrame,
+  onFloatToCanvas,
+}) => {
+  const [localPlay, setLocalPlay] = useState(false);
   const [idx, setIdx] = useState(currentFrameIndex);
-  const [scale, setScale] = useState(2);
+  const [scale, setScale] = useState<'auto' | 1 | 2 | 3>('auto');
   const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  const previewDimensions = useMemo(() => {
+    const boxW = 200;
+    const boxH = 132;
+    const srcW = Math.max(1, canvasWidth);
+    const srcH = Math.max(1, canvasHeight);
+    const fitScale = Math.min(boxW / srcW, boxH / srcH);
+    const effectiveScale =
+      scale === 'auto'
+        ? fitScale >= 1
+          ? Math.max(1, Math.floor(fitScale))
+          : fitScale
+        : Math.min(scale, fitScale);
+    return {
+      drawW: Math.max(1, Math.min(boxW, Math.round(srcW * effectiveScale))),
+      drawH: Math.max(1, Math.min(boxH, Math.round(srcH * effectiveScale))),
+    };
+  }, [canvasWidth, canvasHeight, scale]);
 
   useEffect(() => {
     if (!localPlay || frames.length <= 1) {
@@ -165,26 +195,19 @@ export const LivePreviewPanel: React.FC<{
   useEffect(() => {
     const c = canvasRef.current;
     if (!c) return;
-    const ctx = c.getContext('2d');
-    if (!ctx) return;
     const safeIdx = Math.min(frames.length - 1, Math.max(0, idx));
     const frame = frames[safeIdx];
     if (!frame) return;
-    c.width = canvasWidth;
-    c.height = canvasHeight;
-    ctx.imageSmoothingEnabled = false;
-    ctx.clearRect(0, 0, canvasWidth, canvasHeight);
-    const grid = compositeFrame(frame, canvasWidth, canvasHeight, safeIdx);
-    for (let y = 0; y < canvasHeight; y++) {
-      for (let x = 0; x < canvasWidth; x++) {
-        const col = grid[y]?.[x];
-        if (col) {
-          ctx.fillStyle = col;
-          ctx.fillRect(x, y, 1, 1);
-        }
-      }
-    }
-  }, [frames, idx, canvasWidth, canvasHeight]);
+    renderFramePreviewToTargetCanvas(
+      frame,
+      canvasWidth,
+      canvasHeight,
+      c,
+      previewDimensions.drawW,
+      previewDimensions.drawH,
+      safeIdx
+    );
+  }, [frames, idx, canvasWidth, canvasHeight, previewDimensions.drawW, previewDimensions.drawH]);
 
   return (
     <div className="p-2.5 flex flex-col gap-2 text-[11px]">
@@ -194,8 +217,8 @@ export const LivePreviewPanel: React.FC<{
       >
         <canvas
           ref={canvasRef}
-          className="pixel-canvas"
-          style={{ width: Math.min(180, canvasWidth * scale), height: Math.min(130, canvasHeight * scale), objectFit: 'contain' }}
+          className="pixel-canvas block"
+          style={{ width: previewDimensions.drawW, height: previewDimensions.drawH }}
         />
         <span
           className="absolute bottom-1 right-1.5 px-1.5 py-0.5 rounded text-[9px] font-mono"
@@ -228,14 +251,14 @@ export const LivePreviewPanel: React.FC<{
         </button>
         <button
           type="button"
-          onClick={() => setScale((s) => (s >= 4 ? 1 : s + 1))}
+          onClick={() => setScale((s) => (s === 'auto' ? 1 : s === 1 ? 2 : s === 2 ? 3 : 'auto'))}
           className="px-2 py-1 rounded border font-mono text-[10px]"
           style={{ backgroundColor: 'var(--studio-bg-elevated)', borderColor: 'var(--studio-border-strong)' }}
         >
-          {scale}×
+          {scale === 'auto' ? 'Auto' : `${scale}×`}
         </button>
       </div>
-      <div className="flex items-center justify-between text-[10px]">
+      <div className="flex items-center justify-between text-[10px] gap-1">
         <button
           type="button"
           onClick={() => onSelectFrame((currentFrameIndex - 1 + frames.length) % frames.length)}
@@ -244,6 +267,17 @@ export const LivePreviewPanel: React.FC<{
         >
           <ChevronLeft className="w-3 h-3" /> Ant
         </button>
+        {onFloatToCanvas && (
+          <button
+            type="button"
+            onClick={onFloatToCanvas}
+            className="px-2 py-0.5 rounded border text-[10px] font-medium hover:opacity-90"
+            style={{ backgroundColor: 'var(--studio-bg-card)', borderColor: 'var(--studio-border-strong)' }}
+            title="Mostrar Mini Preview flotante sobre el lienzo"
+          >
+            Flotar en Lienzo
+          </button>
+        )}
         <button
           type="button"
           onClick={() => onSelectFrame((currentFrameIndex + 1) % frames.length)}

@@ -1226,6 +1226,71 @@ export function frameToCanvas(
   return canvas;
 }
 
+/**
+ * Renders any frame (raster or large tiled image) directly onto an existing targetCanvas
+ * resized to fit within [targetWidth x targetHeight] with strict Nearest Neighbor rendering.
+ */
+export function renderFramePreviewToTargetCanvas(
+  frame: Frame,
+  sourceWidth: number,
+  sourceHeight: number,
+  targetCanvas: HTMLCanvasElement,
+  targetWidth: number,
+  targetHeight: number,
+  frameIndex: number = 0,
+  layerGroups: LayerGroup[] = [],
+  excludeTempLayers: boolean = false
+): void {
+  const safeSrcW = Math.max(1, Math.round(sourceWidth));
+  const safeSrcH = Math.max(1, Math.round(sourceHeight));
+  const safeDestW = Math.max(1, Math.round(targetWidth));
+  const safeDestH = Math.max(1, Math.round(targetHeight));
+
+  if (targetCanvas.width !== safeDestW) targetCanvas.width = safeDestW;
+  if (targetCanvas.height !== safeDestH) targetCanvas.height = safeDestH;
+
+  const ctx = targetCanvas.getContext('2d');
+  if (!ctx) return;
+
+  ctx.imageSmoothingEnabled = false;
+  ctx.clearRect(0, 0, safeDestW, safeDestH);
+
+  if (isFrameTiled(frame)) {
+    for (let li = 0; li < frame.layers.length; li++) {
+      const layer = frame.layers[li];
+      if (!layer.visible) continue;
+      if (excludeTempLayers && layer.layerType === 'temp') continue;
+      const groupState = resolveGroupVisibilityAndOpacity(layer.groupId, layerGroups);
+      if (!groupState.visible) continue;
+      const kf = evaluateLayerKeyframeTransform(layer, frameIndex);
+      const effectiveOpacity = Math.max(
+        0,
+        Math.min(1, (layer.opacity ?? 1) * (layer.fillOpacity ?? 1) * kf.opacityMultiplier * groupState.opacity)
+      );
+      if (effectiveOpacity <= 0.001) continue;
+
+      ctx.save();
+      ctx.globalAlpha = effectiveOpacity;
+      ctx.imageSmoothingEnabled = false;
+      if (layer.tiledStoreId) {
+        const store = getTiledStore(layer.tiledStoreId);
+        if (store) {
+          store.renderScaledPreviewToContext(ctx, safeDestW, safeDestH, 0);
+        }
+      } else if (layer.pixels && layer.pixels.length > 0) {
+        const layerCanvas = getCachedPixelGridCanvas(layer.pixels, safeSrcW, safeSrcH);
+        ctx.drawImage(layerCanvas, 0, 0, safeDestW, safeDestH);
+      }
+      ctx.restore();
+    }
+    return;
+  }
+
+  const composited = compositeFrame(frame, safeSrcW, safeSrcH, frameIndex, excludeTempLayers, layerGroups);
+  const cachedFrameCanvas = getCachedPixelGridCanvas(composited, safeSrcW, safeSrcH);
+  ctx.drawImage(cachedFrameCanvas, 0, 0, safeDestW, safeDestH);
+}
+
 // Generate Spritesheet canvas
 export function generateSpritesheet(
   frames: Frame[],

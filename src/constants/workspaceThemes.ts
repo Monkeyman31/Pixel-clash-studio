@@ -83,8 +83,8 @@ export const PANEL_REGISTRY: PanelRegistryMeta[] = [
   { id: 'workmode', title: 'Modo de Trabajo & Estudio', shortLabel: 'Modo', category: 'Producción', defaultVisible: true, defaultExpanded: false, defaultDock: 'right-mini', description: 'Modos Fighter, Stage (Parallax), HUD/UI, FX Lab, Tileset 3×3, Portrait y Cutscene.' },
   { id: 'tilesets', title: 'Tilesets y Tiles de Escenario', shortLabel: 'Tilesets', category: 'Producción', defaultVisible: true, defaultExpanded: false, defaultDock: 'right-mini', description: 'Crear, importar, exportar, organizar y agrupar tiles con categorías y autotile.' },
   { id: 'timeline', title: 'Línea de Tiempo', shortLabel: 'Timeline', category: 'Animación', defaultVisible: true, defaultExpanded: true, defaultDock: 'bottom', minWidth: 260, minHeight: 110, description: 'Línea de tiempo acoplable arriba, abajo, costados o flotante con redimensionamiento total.' },
-  { id: 'preview', title: 'Vista Previa Animada', shortLabel: 'Preview', category: 'Animación', defaultVisible: false, defaultExpanded: true, defaultDock: 'left-main', description: 'Visor independiente de bucle animado y zoom.' },
-  { id: 'navigator', title: 'Navegador de Lienzo', shortLabel: 'Nav', category: 'Core', defaultVisible: false, defaultExpanded: true, defaultDock: 'left-main', description: 'Minimapa general del sprite con control de zoom rápido.' },
+  { id: 'preview', title: 'Vista Previa Animada', shortLabel: 'Preview', category: 'Animación', defaultVisible: false, defaultExpanded: false, defaultDock: 'left-main', description: 'Visor independiente de bucle animado y zoom.' },
+  { id: 'navigator', title: 'Navegador de Lienzo', shortLabel: 'Nav', category: 'Core', defaultVisible: false, defaultExpanded: false, defaultDock: 'left-main', description: 'Minimapa general del sprite con control de zoom rápido.' },
   { id: 'animation', title: 'Animación & Papel Cebolla', shortLabel: 'Anim', category: 'Animación', defaultVisible: false, defaultExpanded: true, defaultDock: 'left-mini', description: 'Control de FPS, modo bucle, onion skin e interpolación.' },
   { id: 'keyframes', title: 'Keyframes & Curvas', shortLabel: 'Keyfrm', category: 'Animación', defaultVisible: false, defaultExpanded: true, defaultDock: 'right-mini', description: 'Inspector de desplazamiento, escala, opacidad y easing por capa.' },
   { id: 'vector_editor', title: 'Editor Vectorial', shortLabel: 'Vector', category: 'Dibujo y Color', defaultVisible: false, defaultExpanded: true, defaultDock: 'left-main', description: 'Trazos editables, Smart Pixel Curve y operaciones de nodos.' },
@@ -137,6 +137,28 @@ export type SidebarAutoCollapseMode = AutoCollapseMode;
 
 export type TimelineSectionId = 'tags' | 'ruler' | 'frames' | 'transport';
 
+export interface MiniPreviewPreferences {
+  rememberLastState: boolean;
+  startCollapsed: boolean;
+  neverAutoOpen: boolean;
+  openOnDemandOnly: boolean;
+}
+
+export const DEFAULT_MINI_PREVIEW_PREFS: MiniPreviewPreferences = {
+  rememberLastState: true,
+  startCollapsed: true,
+  neverAutoOpen: true,
+  openOnDemandOnly: true,
+};
+
+export const MINI_PREVIEW_DEFAULT_WIDTH = 176;
+export const MINI_PREVIEW_DEFAULT_HEIGHT = 140;
+export const MINI_PREVIEW_MIN_WIDTH = 128;
+export const MINI_PREVIEW_MAX_WIDTH = 340;
+export const MINI_PREVIEW_MIN_HEIGHT = 96;
+export const MINI_PREVIEW_MAX_HEIGHT = 280;
+export const MINI_PREVIEW_POLICY_VERSION = 2;
+
 export interface WorkspaceLayoutConfig {
   templateId: string;
   toolbarPosition: 'left' | 'right' | 'hidden';
@@ -169,6 +191,12 @@ export interface WorkspaceLayoutConfig {
   timelineSectionOrder: TimelineSectionId[];
   showTopBar: boolean;
   showMiniPlayer: boolean;
+  miniPreviewCollapsed?: boolean;
+  miniPreviewWidth?: number;
+  miniPreviewHeight?: number;
+  miniPreviewPosition?: { x: number; y: number } | null;
+  miniPreviewPrefs?: MiniPreviewPreferences;
+  miniPreviewPolicyVersion?: number;
   windowDragZones?: 'topbar_only' | 'topbar_and_empty_bars';
   integratedTitlebarTabs?: boolean;
   rightPanels: RightPanelConfig[];
@@ -360,7 +388,13 @@ export const DEFAULT_WORKSPACE_LAYOUT: WorkspaceLayoutConfig = {
   timelinePosition: 'bottom',
   timelineSectionOrder: ['tags', 'ruler', 'frames', 'transport'],
   showTopBar: true,
-  showMiniPlayer: true,
+  showMiniPlayer: false,
+  miniPreviewCollapsed: true,
+  miniPreviewWidth: MINI_PREVIEW_DEFAULT_WIDTH,
+  miniPreviewHeight: MINI_PREVIEW_DEFAULT_HEIGHT,
+  miniPreviewPosition: null,
+  miniPreviewPrefs: { ...DEFAULT_MINI_PREVIEW_PREFS },
+  miniPreviewPolicyVersion: MINI_PREVIEW_POLICY_VERSION,
   windowDragZones: 'topbar_and_empty_bars',
   integratedTitlebarTabs: true,
   rightPanels: DEFAULT_RIGHT_PANELS,
@@ -422,7 +456,7 @@ export const WORKSPACE_TEMPLATES: WorkspaceTemplate[] = [
       bottomDockHeight: 256,
       timelineSectionOrder: ['transport', 'tags', 'ruler', 'frames'],
       rightPanels: mapPanelsWithOverrides({
-        preview: { dock: 'left-main', expanded: true, visible: true },
+        preview: { dock: 'left-main', expanded: false, visible: false },
         animation: { dock: 'left-main', expanded: true, visible: true },
         keyframes: { dock: 'left-main', expanded: true, visible: true },
         layers: { dock: 'right-main', expanded: true, visible: true },
@@ -450,7 +484,7 @@ export const WORKSPACE_TEMPLATES: WorkspaceTemplate[] = [
       rightPanels: mapPanelsWithOverrides({
         combat: { dock: 'left-main', expanded: true, visible: true },
         stage: { dock: 'left-main', expanded: true, visible: true },
-        preview: { dock: 'left-main', expanded: true, visible: true },
+        preview: { dock: 'left-main', expanded: false, visible: false },
         references: { dock: 'left-mini', expanded: true, visible: true },
         brushes: { dock: 'left-mini', expanded: true, visible: true },
         layers: { dock: 'right-main', expanded: true, visible: true },
@@ -501,7 +535,7 @@ export const WORKSPACE_TEMPLATES: WorkspaceTemplate[] = [
       bottomDockHeight: 148,
       rightPanels: mapPanelsWithOverrides({
         vector_editor: { dock: 'left-main', expanded: true, visible: true },
-        navigator: { dock: 'left-main', expanded: true, visible: true },
+        navigator: { dock: 'left-main', expanded: false, visible: true },
         palette: { dock: 'left-mini', expanded: true, visible: true },
         properties: { dock: 'right-main', expanded: true, visible: true },
         layers: { dock: 'right-main', expanded: true, visible: true },
@@ -585,7 +619,7 @@ export const WORKSPACE_TEMPLATES: WorkspaceTemplate[] = [
       templateId: 'photoshop_style',
       rightMainWidth: 340,
       rightPanels: mapPanelsWithOverrides({
-        navigator: { dock: 'right-main', expanded: true, visible: true },
+        navigator: { dock: 'right-main', expanded: false, visible: true },
         colorwheel: { dock: 'right-main', expanded: true, visible: true },
         layers: { dock: 'right-main', expanded: true, visible: true },
         properties: { dock: 'right-main', expanded: true, visible: true },
@@ -628,7 +662,7 @@ export const WORKSPACE_TEMPLATES: WorkspaceTemplate[] = [
       compactMode: true,
       rightPanels: mapPanelsWithOverrides({
         palette: { dock: 'left-main', expanded: true, visible: true },
-        preview: { dock: 'left-main', expanded: true, visible: true },
+        preview: { dock: 'left-main', expanded: false, visible: false },
         brushes: { dock: 'left-mini', expanded: true, visible: true },
         layers: { dock: 'right-main', expanded: true, visible: true },
         properties: { dock: 'right-main', expanded: true, visible: true },
@@ -1059,14 +1093,38 @@ const STORAGE_STYLE_KEY = 'pixelclash_studio_style_v1';
 const STORAGE_SAVED_THEMES_KEY = 'pixelclash_saved_themes_v1';
 
 export function sanitizeWorkspaceLayout(parsed: Partial<WorkspaceLayoutConfig>): WorkspaceLayoutConfig {
+  const miniPreviewPrefs: MiniPreviewPreferences = {
+    rememberLastState:
+      typeof parsed.miniPreviewPrefs?.rememberLastState === 'boolean'
+        ? parsed.miniPreviewPrefs.rememberLastState
+        : DEFAULT_MINI_PREVIEW_PREFS.rememberLastState,
+    startCollapsed:
+      typeof parsed.miniPreviewPrefs?.startCollapsed === 'boolean'
+        ? parsed.miniPreviewPrefs.startCollapsed
+        : DEFAULT_MINI_PREVIEW_PREFS.startCollapsed,
+    neverAutoOpen:
+      typeof parsed.miniPreviewPrefs?.neverAutoOpen === 'boolean'
+        ? parsed.miniPreviewPrefs.neverAutoOpen
+        : DEFAULT_MINI_PREVIEW_PREFS.neverAutoOpen,
+    openOnDemandOnly:
+      typeof parsed.miniPreviewPrefs?.openOnDemandOnly === 'boolean'
+        ? parsed.miniPreviewPrefs.openOnDemandOnly
+        : DEFAULT_MINI_PREVIEW_PREFS.openOnDemandOnly,
+  };
+  const isLegacyMiniPreviewLayout = parsed.miniPreviewPolicyVersion !== MINI_PREVIEW_POLICY_VERSION;
+
   let mergedPanels: RightPanelConfig[] = DEFAULT_RIGHT_PANELS;
   if (Array.isArray(parsed.rightPanels) && parsed.rightPanels.length > 0) {
     const validIds = new Set(DEFAULT_RIGHT_PANELS.map((dp) => dp.id));
     const filteredSaved = parsed.rightPanels
       .filter((p: RightPanelConfig) => validIds.has(p.id))
-      .map((p: RightPanelConfig) =>
-        p.id === 'timeline' ? { ...p, title: 'Línea de Tiempo' } : p
-      );
+      .map((p: RightPanelConfig) => {
+        if (p.id === 'timeline') return { ...p, title: 'Línea de Tiempo' };
+        if (isLegacyMiniPreviewLayout && p.id === 'preview') {
+          return { ...p, visible: false, expanded: false };
+        }
+        return p;
+      });
     const existingIds = new Set(filteredSaved.map((p: RightPanelConfig) => p.id));
     const missingDefaults = DEFAULT_RIGHT_PANELS.filter((dp) => !existingIds.has(dp.id)).map((dp) => {
       if (dp.id === 'timeline' && parsed.timelinePosition === 'top') {
@@ -1076,9 +1134,52 @@ export function sanitizeWorkspaceLayout(parsed: Partial<WorkspaceLayoutConfig>):
     });
     mergedPanels = [...filteredSaved, ...missingDefaults];
   }
+
+  const clampedMiniWidth =
+    typeof parsed.miniPreviewWidth === 'number' && !Number.isNaN(parsed.miniPreviewWidth)
+      ? Math.max(MINI_PREVIEW_MIN_WIDTH, Math.min(MINI_PREVIEW_MAX_WIDTH, Math.round(parsed.miniPreviewWidth)))
+      : MINI_PREVIEW_DEFAULT_WIDTH;
+  const clampedMiniHeight =
+    typeof parsed.miniPreviewHeight === 'number' && !Number.isNaN(parsed.miniPreviewHeight)
+      ? Math.max(MINI_PREVIEW_MIN_HEIGHT, Math.min(MINI_PREVIEW_MAX_HEIGHT, Math.round(parsed.miniPreviewHeight)))
+      : MINI_PREVIEW_DEFAULT_HEIGHT;
+  const validMiniPosition =
+    parsed.miniPreviewPosition &&
+    typeof parsed.miniPreviewPosition.x === 'number' &&
+    typeof parsed.miniPreviewPosition.y === 'number' &&
+    Number.isFinite(parsed.miniPreviewPosition.x) &&
+    Number.isFinite(parsed.miniPreviewPosition.y)
+      ? {
+          x: Math.max(4, Math.round(parsed.miniPreviewPosition.x)),
+          y: Math.max(4, Math.round(parsed.miniPreviewPosition.y)),
+        }
+      : null;
+
+  const resolvedShowMiniPlayer = isLegacyMiniPreviewLayout
+    ? false
+    : !miniPreviewPrefs.rememberLastState
+    ? false
+    : typeof parsed.showMiniPlayer === 'boolean'
+    ? parsed.showMiniPlayer
+    : false;
+  const resolvedMiniCollapsed = isLegacyMiniPreviewLayout
+    ? true
+    : !miniPreviewPrefs.rememberLastState
+    ? miniPreviewPrefs.startCollapsed
+    : typeof parsed.miniPreviewCollapsed === 'boolean'
+    ? parsed.miniPreviewCollapsed
+    : miniPreviewPrefs.startCollapsed;
+
   return {
     ...DEFAULT_WORKSPACE_LAYOUT,
     ...parsed,
+    showMiniPlayer: resolvedShowMiniPlayer,
+    miniPreviewCollapsed: resolvedMiniCollapsed,
+    miniPreviewWidth: isLegacyMiniPreviewLayout ? MINI_PREVIEW_DEFAULT_WIDTH : clampedMiniWidth,
+    miniPreviewHeight: isLegacyMiniPreviewLayout ? MINI_PREVIEW_DEFAULT_HEIGHT : clampedMiniHeight,
+    miniPreviewPosition: isLegacyMiniPreviewLayout ? null : validMiniPosition,
+    miniPreviewPrefs,
+    miniPreviewPolicyVersion: MINI_PREVIEW_POLICY_VERSION,
     dockOrientations: {
       ...DEFAULT_WORKSPACE_LAYOUT.dockOrientations,
       ...(parsed.dockOrientations || {}),

@@ -29,6 +29,9 @@ import {
   Spline,
   Image as ImageIcon,
   BoxSelect,
+  ChevronUp,
+  ChevronDown,
+  PanelRight,
 } from 'lucide-react';
 import { 
   AssetLibraryItem,
@@ -114,11 +117,20 @@ import {
   getAdvancedDitherColor,
   getBrushStampOffsets,
   getFrameDurationMs,
+  renderFramePreviewToTargetCanvas,
   resolveGroupVisibilityAndOpacity,
   resolveMaskAlpha,
   sampleDitherMask,
   shiftLayerPixelsNonDestructive
 } from '../utils/pixelMath';
+import {
+  MINI_PREVIEW_DEFAULT_HEIGHT,
+  MINI_PREVIEW_DEFAULT_WIDTH,
+  MINI_PREVIEW_MAX_HEIGHT,
+  MINI_PREVIEW_MAX_WIDTH,
+  MINI_PREVIEW_MIN_HEIGHT,
+  MINI_PREVIEW_MIN_WIDTH,
+} from '../constants/workspaceThemes';
 import { applyAdjustmentToHex } from '../utils/colorFilters';
 import { PixelTextAlign, PixelTextFont, rasterizePixelText } from '../utils/pixelText';
 import { renderDummyOpponent, renderStageBackground } from '../utils/stageRenderer';
@@ -295,6 +307,18 @@ interface CanvasViewportProps {
   linkMoveAllFrames?: boolean;
   onShiftAllFramesLayer?: (dx: number, dy: number) => void;
   showMiniPlayerProp?: boolean;
+  miniPreviewCollapsedProp?: boolean;
+  miniPreviewWidthProp?: number;
+  miniPreviewHeightProp?: number;
+  miniPreviewPositionProp?: { x: number; y: number } | null;
+  onUpdateMiniPreviewState?: (patch: {
+    showMiniPlayer?: boolean;
+    miniPreviewCollapsed?: boolean;
+    miniPreviewWidth?: number;
+    miniPreviewHeight?: number;
+    miniPreviewPosition?: { x: number; y: number } | null;
+  }) => void;
+  onDockMiniPreviewToSidebar?: () => void;
   brushSettings?: BrushSettings;
   selection?: SelectionArea | null;
   onChangeSelection?: (sel: SelectionArea | null) => void;
@@ -430,7 +454,13 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   onSelectFrame,
   linkMoveAllFrames = false,
   onShiftAllFramesLayer,
-  showMiniPlayerProp = true,
+  showMiniPlayerProp = false,
+  miniPreviewCollapsedProp = true,
+  miniPreviewWidthProp = MINI_PREVIEW_DEFAULT_WIDTH,
+  miniPreviewHeightProp = MINI_PREVIEW_DEFAULT_HEIGHT,
+  miniPreviewPositionProp = null,
+  onUpdateMiniPreviewState,
+  onDockMiniPreviewToSidebar,
   showGrid,
   showHitboxes,
   showPivot,
@@ -1109,12 +1139,146 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     cornerY: number;
   } | null>(null);
 
-  // Mini preview & Hitstop
+  // Mini preview & Hitstop (persisted, collapsed/hidden by default, bounded & controllable panel)
   const [showMiniPlayer, setShowMiniPlayer] = useState<boolean>(showMiniPlayerProp);
+  const [miniPreviewCollapsed, setMiniPreviewCollapsed] = useState<boolean>(miniPreviewCollapsedProp);
+  const [miniPreviewWidth, setMiniPreviewWidth] = useState<number>(miniPreviewWidthProp);
+  const [miniPreviewHeight, setMiniPreviewHeight] = useState<number>(miniPreviewHeightProp);
+  const [miniPreviewPosition, setMiniPreviewPosition] = useState<{ x: number; y: number } | null>(
+    miniPreviewPositionProp
+  );
   useEffect(() => {
     setShowMiniPlayer(showMiniPlayerProp);
   }, [showMiniPlayerProp]);
-  const [previewScale, setPreviewScale] = useState<number>(3);
+  useEffect(() => {
+    setMiniPreviewCollapsed(miniPreviewCollapsedProp);
+  }, [miniPreviewCollapsedProp]);
+  useEffect(() => {
+    setMiniPreviewWidth(miniPreviewWidthProp);
+  }, [miniPreviewWidthProp]);
+  useEffect(() => {
+    setMiniPreviewHeight(miniPreviewHeightProp);
+  }, [miniPreviewHeightProp]);
+  useEffect(() => {
+    setMiniPreviewPosition(miniPreviewPositionProp);
+  }, [miniPreviewPositionProp]);
+
+  const [miniPreviewZoomMode, setMiniPreviewZoomMode] = useState<'fit' | 1 | 2 | 3>('fit');
+  const miniPreviewDragRef = useRef<{
+    kind: 'move' | 'resize-bl' | 'resize-br';
+    startClientX: number;
+    startClientY: number;
+    origX: number;
+    origY: number;
+    origW: number;
+    origH: number;
+    latestX?: number;
+    latestY?: number;
+    latestW?: number;
+    latestH?: number;
+  } | null>(null);
+
+  const commitMiniPreviewPatch = useCallback(
+    (patch: {
+      showMiniPlayer?: boolean;
+      miniPreviewCollapsed?: boolean;
+      miniPreviewWidth?: number;
+      miniPreviewHeight?: number;
+      miniPreviewPosition?: { x: number; y: number } | null;
+    }) => {
+      if (patch.showMiniPlayer !== undefined) setShowMiniPlayer(patch.showMiniPlayer);
+      if (patch.miniPreviewCollapsed !== undefined) setMiniPreviewCollapsed(patch.miniPreviewCollapsed);
+      if (patch.miniPreviewWidth !== undefined) setMiniPreviewWidth(patch.miniPreviewWidth);
+      if (patch.miniPreviewHeight !== undefined) setMiniPreviewHeight(patch.miniPreviewHeight);
+      if (patch.miniPreviewPosition !== undefined) setMiniPreviewPosition(patch.miniPreviewPosition);
+      onUpdateMiniPreviewState?.(patch);
+    },
+    [onUpdateMiniPreviewState]
+  );
+
+  const miniPreviewMetrics = useMemo(() => {
+    const viewportW = containerRef.current?.clientWidth || 1000;
+    const viewportH = containerRef.current?.clientHeight || 700;
+    const maxW = Math.max(MINI_PREVIEW_MIN_WIDTH, Math.min(MINI_PREVIEW_MAX_WIDTH, Math.round(viewportW * 0.28)));
+    const maxH = Math.max(MINI_PREVIEW_MIN_HEIGHT, Math.min(MINI_PREVIEW_MAX_HEIGHT, Math.round(viewportH * 0.30)));
+    const panelW = Math.max(MINI_PREVIEW_MIN_WIDTH, Math.min(maxW, Math.round(miniPreviewWidth || MINI_PREVIEW_DEFAULT_WIDTH)));
+    const panelH = Math.max(MINI_PREVIEW_MIN_HEIGHT, Math.min(maxH, Math.round(miniPreviewHeight || MINI_PREVIEW_DEFAULT_HEIGHT)));
+    const innerMaxW = Math.max(64, panelW - 18);
+    const innerMaxH = Math.max(44, panelH - 68);
+    const srcW = Math.max(1, width);
+    const srcH = Math.max(1, height);
+    const fitScale = Math.min(innerMaxW / srcW, innerMaxH / srcH);
+    const effectiveScale =
+      miniPreviewZoomMode === 'fit'
+        ? fitScale >= 1
+          ? Math.max(1, Math.floor(fitScale))
+          : fitScale
+        : Math.min(miniPreviewZoomMode, fitScale);
+    const drawW = Math.max(1, Math.min(innerMaxW, Math.round(srcW * effectiveScale)));
+    const drawH = Math.max(1, Math.min(innerMaxH, Math.round(srcH * effectiveScale)));
+    return { panelW, panelH, innerMaxW, innerMaxH, drawW, drawH, maxW, maxH, viewportW, viewportH };
+  }, [width, height, miniPreviewWidth, miniPreviewHeight, miniPreviewZoomMode, showMiniPlayer, miniPreviewCollapsed]);
+
+  useEffect(() => {
+    const handleMove = (ev: PointerEvent) => {
+      const drag = miniPreviewDragRef.current;
+      if (!drag) return;
+      const dx = ev.clientX - drag.startClientX;
+      const dy = ev.clientY - drag.startClientY;
+      const vw = containerRef.current?.clientWidth || 1000;
+      const vh = containerRef.current?.clientHeight || 700;
+      const maxW = Math.max(MINI_PREVIEW_MIN_WIDTH, Math.min(MINI_PREVIEW_MAX_WIDTH, Math.round(vw * 0.28)));
+      const maxH = Math.max(MINI_PREVIEW_MIN_HEIGHT, Math.min(MINI_PREVIEW_MAX_HEIGHT, Math.round(vh * 0.30)));
+
+      if (drag.kind === 'move') {
+        const panelW = miniPreviewCollapsed ? 168 : drag.origW;
+        const panelH = miniPreviewCollapsed ? 32 : drag.origH;
+        const nextX = Math.max(8, Math.min(Math.max(8, vw - panelW - 8), Math.round(drag.origX + dx)));
+        const nextY = Math.max(8, Math.min(Math.max(8, vh - panelH - 8), Math.round(drag.origY + dy)));
+        drag.latestX = nextX;
+        drag.latestY = nextY;
+        setMiniPreviewPosition({ x: nextX, y: nextY });
+      } else if (drag.kind === 'resize-bl') {
+        const nextW = Math.max(MINI_PREVIEW_MIN_WIDTH, Math.min(maxW, Math.round(drag.origW - dx)));
+        const nextH = Math.max(MINI_PREVIEW_MIN_HEIGHT, Math.min(maxH, Math.round(drag.origH + dy)));
+        drag.latestW = nextW;
+        drag.latestH = nextH;
+        setMiniPreviewWidth(nextW);
+        setMiniPreviewHeight(nextH);
+      } else {
+        const nextW = Math.max(MINI_PREVIEW_MIN_WIDTH, Math.min(maxW, Math.round(drag.origW + dx)));
+        const nextH = Math.max(MINI_PREVIEW_MIN_HEIGHT, Math.min(maxH, Math.round(drag.origH + dy)));
+        drag.latestW = nextW;
+        drag.latestH = nextH;
+        setMiniPreviewWidth(nextW);
+        setMiniPreviewHeight(nextH);
+      }
+    };
+    const handleUp = () => {
+      const drag = miniPreviewDragRef.current;
+      if (!drag) return;
+      miniPreviewDragRef.current = null;
+      if (drag.kind === 'move' && drag.latestX !== undefined && drag.latestY !== undefined) {
+        commitMiniPreviewPatch({
+          miniPreviewPosition: { x: drag.latestX, y: drag.latestY },
+        });
+      } else if ((drag.kind === 'resize-bl' || drag.kind === 'resize-br') && drag.latestW !== undefined && drag.latestH !== undefined) {
+        commitMiniPreviewPatch({
+          miniPreviewWidth: drag.latestW,
+          miniPreviewHeight: drag.latestH,
+        });
+      }
+    };
+    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointerup', handleUp);
+    window.addEventListener('pointercancel', handleUp);
+    return () => {
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleUp);
+      window.removeEventListener('pointercancel', handleUp);
+    };
+  }, [commitMiniPreviewPatch, miniPreviewCollapsed]);
+
   const [playbackFrameIndex, setPlaybackFrameIndex] = useState<number>(0);
   const playbackDirectionRef = useRef<number>(1);
   const hitstopFreezeTicksRef = useRef<number>(0);
@@ -4120,16 +4284,12 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     draftPixelsRef.current = [];
   };
 
-  // Reactive Mini-Preview renderer (NEVER runs on an idle 60fps loop; uses single cached ImageData blit)
+  // Reactive Mini-Preview renderer (ONLY runs when Mini Preview is visible AND expanded; supports raster + tiled canvases)
   useEffect(() => {
+    if (!showMiniPlayer || miniPreviewCollapsed) return;
     if (performanceMode === 'performance' && isDrawing) return;
     const pCanvas = previewCanvasRef.current;
     if (!pCanvas || allFrames.length === 0) return;
-    const pCtx = pCanvas.getContext('2d');
-    if (!pCtx) return;
-
-    pCtx.imageSmoothingEnabled = false;
-    pCtx.clearRect(0, 0, pCanvas.width, pCanvas.height);
 
     const frameIdx = isPlaying
       ? playbackFrameIndex % allFrames.length
@@ -4139,9 +4299,17 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     const frameToDraw = allFrames[frameIdx] || currentFrame;
     if (!frameToDraw) return;
 
-    const composited = compositeFrame(frameToDraw, width, height, frameIdx, false, layerGroups);
-    const cachedFrameCanvas = getCachedPixelGridCanvas(composited, width, height);
-    pCtx.drawImage(cachedFrameCanvas, 0, 0, width * previewScale, height * previewScale);
+    renderFramePreviewToTargetCanvas(
+      frameToDraw,
+      width,
+      height,
+      pCanvas,
+      miniPreviewMetrics.drawW,
+      miniPreviewMetrics.drawH,
+      frameIdx,
+      layerGroups,
+      false
+    );
   }, [
     allFrames,
     currentFrame,
@@ -4151,10 +4319,12 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     playbackFrameIndex,
     width,
     height,
-    previewScale,
+    miniPreviewMetrics.drawW,
+    miniPreviewMetrics.drawH,
     layerGroups,
     performanceMode,
     showMiniPlayer,
+    miniPreviewCollapsed,
   ]);
 
   // Live Playback + Combat Test + Dummy Loop (ONLY runs RAF when an animation is actually active!)
@@ -9579,58 +9749,165 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         </div>
       )}
 
-      {/* Mini Preview Player with Hitstop indicator */}
+      {/* Compact Bounded Mini Preview Panel (Collapsible, Draggable, Resizable, Dockable & Hideable) */}
       {showMiniPlayer && (
-        <div className="absolute top-3 right-3 bg-[#131620]/95 backdrop-blur-md border border-[#262e42] rounded-xl p-2.5 shadow-2xl flex flex-col items-center gap-2 z-20">
-          <div className="flex items-center justify-between w-full gap-2 border-b border-[#22293b] pb-1.5">
-            <span className="text-[10px] font-mono tracking-wider uppercase text-slate-400 font-semibold flex items-center gap-1">
-              <span>Preview</span>
-              {combatFx.hitstop && (
-                <span className="text-rose-400 text-[9px] font-bold">[Hitstop]</span>
-              )}
-            </span>
-            <div className="flex items-center gap-1">
+        <div
+          onPointerDown={(e) => e.stopPropagation()}
+          className="absolute bg-[#131620]/95 backdrop-blur-md border border-[#262e42] rounded-xl shadow-2xl flex flex-col z-20 select-none"
+          style={{
+            ...(miniPreviewPosition
+              ? { left: miniPreviewPosition.x, top: miniPreviewPosition.y }
+              : { top: 12, right: 12 }),
+            width: miniPreviewCollapsed ? 172 : miniPreviewMetrics.panelW,
+            minHeight: miniPreviewCollapsed ? undefined : miniPreviewMetrics.panelH,
+          }}
+        >
+          {/* Draggable Panel Header */}
+          <div
+            onPointerDown={(e) => {
+              if (e.button !== 0) return;
+              e.stopPropagation();
+              const vw = containerRef.current?.clientWidth || 1000;
+              const defaultX = Math.max(8, vw - (miniPreviewCollapsed ? 172 : miniPreviewMetrics.panelW) - 12);
+              const origX = miniPreviewPosition ? miniPreviewPosition.x : defaultX;
+              const origY = miniPreviewPosition ? miniPreviewPosition.y : 12;
+              miniPreviewDragRef.current = {
+                kind: 'move',
+                startClientX: e.clientX,
+                startClientY: e.clientY,
+                origX,
+                origY,
+                origW: miniPreviewMetrics.panelW,
+                origH: miniPreviewMetrics.panelH,
+              };
+            }}
+            className={`flex items-center justify-between gap-1.5 px-2 py-1.5 cursor-move ${
+              miniPreviewCollapsed ? '' : 'border-b border-[#22293b]'
+            }`}
+            title="Arrastrar Mini Preview"
+          >
+            <div className="flex items-center gap-1 min-w-0">
               <button
-                onClick={() => setPreviewScale((s) => (s === 1 ? 2 : s === 2 ? 3 : 1))}
-                className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-[#1c2233] text-amber-400 hover:bg-[#262f47]"
+                type="button"
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={() => commitMiniPreviewPatch({ miniPreviewCollapsed: !miniPreviewCollapsed })}
+                className="p-0.5 rounded text-slate-400 hover:text-white hover:bg-[#22293b]"
+                title={miniPreviewCollapsed ? 'Expandir Mini Preview' : 'Contraer Mini Preview'}
               >
-                {previewScale}x
+                {miniPreviewCollapsed ? (
+                  <ChevronDown className="w-3.5 h-3.5" />
+                ) : (
+                  <ChevronUp className="w-3.5 h-3.5" />
+                )}
               </button>
+              <span className="text-[10px] font-mono tracking-wider uppercase text-slate-300 font-semibold truncate">
+                Preview
+              </span>
+              {combatFx.hitstop && (
+                <span className="text-rose-400 text-[9px] font-bold shrink-0">[Hitstop]</span>
+              )}
+            </div>
+
+            <div
+              className="flex items-center gap-0.5 shrink-0"
+              onPointerDown={(e) => e.stopPropagation()}
+            >
+              {!miniPreviewCollapsed && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setMiniPreviewZoomMode((m) => (m === 'fit' ? 1 : m === 1 ? 2 : m === 2 ? 3 : 'fit'))
+                  }
+                  className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-[#1c2233] text-amber-400 hover:bg-[#262f47]"
+                  title="Escala de previsualización (ajustada automáticamente al panel)"
+                >
+                  {miniPreviewZoomMode === 'fit' ? 'Auto' : `${miniPreviewZoomMode}×`}
+                </button>
+              )}
+              {onDockMiniPreviewToSidebar && (
+                <button
+                  type="button"
+                  onClick={onDockMiniPreviewToSidebar}
+                  className="p-1 rounded text-slate-400 hover:text-amber-300 hover:bg-[#22293b]"
+                  title="Acoplar como panel lateral (Vista Previa Animada)"
+                >
+                  <PanelRight className="w-3 h-3" />
+                </button>
+              )}
               <button
-                onClick={() => setShowMiniPlayer(false)}
+                type="button"
+                onClick={() => commitMiniPreviewPatch({ showMiniPlayer: false })}
                 className="p-1 rounded text-slate-400 hover:text-white hover:bg-[#22293b]"
+                title="Ocultar Mini Preview"
               >
-                <EyeOff className="w-3 h-3" />
+                <X className="w-3 h-3" />
               </button>
             </div>
           </div>
 
-          <div 
-            className="canvas-checkerboard rounded border border-[#2e374d] overflow-hidden flex items-center justify-center p-1"
-            style={{
-              width: width * previewScale + 8,
-              height: height * previewScale + 8,
-            }}
-          >
-            <canvas
-              ref={previewCanvasRef}
-              width={width * previewScale}
-              height={height * previewScale}
-              className="pixel-canvas block"
-            />
-          </div>
+          {!miniPreviewCollapsed && (
+            <div className="p-2 pt-1.5 flex flex-col items-center gap-1.5 relative flex-1">
+              <div
+                className="canvas-checkerboard rounded border border-[#2e374d] overflow-hidden flex items-center justify-center relative"
+                style={{
+                  width: miniPreviewMetrics.innerMaxW,
+                  height: miniPreviewMetrics.innerMaxH,
+                }}
+              >
+                <canvas
+                  ref={previewCanvasRef}
+                  width={miniPreviewMetrics.drawW}
+                  height={miniPreviewMetrics.drawH}
+                  className="pixel-canvas block"
+                  style={{
+                    width: miniPreviewMetrics.drawW,
+                    height: miniPreviewMetrics.drawH,
+                  }}
+                />
+                <span className="absolute bottom-1 right-1 px-1 py-0.2 rounded bg-black/70 text-[8px] font-mono text-slate-300 pointer-events-none">
+                  {width}×{height}
+                </span>
+              </div>
 
-          <button
-            onClick={onTogglePlay}
-            className={`w-full py-1 rounded text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors ${
-              isPlaying
-                ? 'bg-amber-400 text-slate-950 hover:bg-amber-300'
-                : 'bg-[#22293d] text-slate-200 hover:bg-[#2c364f]'
-            }`}
-          >
-            {isPlaying ? <Pause className="w-3 h-3 fill-current" /> : <Play className="w-3 h-3 fill-current" />}
-            <span className="text-[11px]">{isPlaying ? 'Pausar' : 'Reproducir'}</span>
-          </button>
+              <div className="w-full flex items-center gap-1.5 pr-3">
+                <button
+                  type="button"
+                  onClick={onTogglePlay}
+                  className={`flex-1 py-1 rounded text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors ${
+                    isPlaying
+                      ? 'bg-amber-400 text-slate-950 hover:bg-amber-300'
+                      : 'bg-[#22293d] text-slate-200 hover:bg-[#2c364f]'
+                  }`}
+                >
+                  {isPlaying ? <Pause className="w-3 h-3 fill-current" /> : <Play className="w-3 h-3 fill-current" />}
+                  <span className="text-[11px]">{isPlaying ? 'Pausar' : 'Reproducir'}</span>
+                </button>
+              </div>
+
+              {/* Resize Handle (bottom-left when anchored top-right, or bottom-right when freely positioned) */}
+              <div
+                onPointerDown={(e) => {
+                  if (e.button !== 0) return;
+                  e.stopPropagation();
+                  miniPreviewDragRef.current = {
+                    kind: miniPreviewPosition ? 'resize-br' : 'resize-bl',
+                    startClientX: e.clientX,
+                    startClientY: e.clientY,
+                    origX: miniPreviewPosition?.x || 0,
+                    origY: miniPreviewPosition?.y || 0,
+                    origW: miniPreviewMetrics.panelW,
+                    origH: miniPreviewMetrics.panelH,
+                  };
+                }}
+                title="Arrastrar para redimensionar Mini Preview"
+                className={`absolute bottom-1 ${
+                  miniPreviewPosition ? 'right-1 cursor-nwse-resize' : 'left-1 cursor-nesw-resize'
+                } w-3.5 h-3.5 flex items-center justify-center text-slate-500 hover:text-amber-400`}
+              >
+                <span className="w-2 h-2 border-b-2 border-r-2 border-current rounded-[1px]" />
+              </div>
+            </div>
+          )}
         </div>
       )}
 
