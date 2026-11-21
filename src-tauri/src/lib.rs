@@ -135,7 +135,7 @@ async fn open_file_dialog(options: Option<OpenFileDialogOptions>) -> OpenFileDia
             .add_filter(
                 "Todos los formatos compatibles",
                 &[
-                    "pcs", "ase", "aseprite", "psd", "json", "png", "jpg", "jpeg", "webp", "gif",
+                    "pcs", "ase", "aseprite", "psd", "psb", "json", "png", "jpg", "jpeg", "webp", "gif",
                     "bmp", "tif", "tiff", "tga", "ico",
                 ],
             )
@@ -144,8 +144,8 @@ async fn open_file_dialog(options: Option<OpenFileDialogOptions>) -> OpenFileDia
                 &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "tga", "ico"],
             )
             .add_filter(
-                "Pixel Art y Proyectos (PCS, ASE, ASEPRITE, PSD, JSON)",
-                &["pcs", "ase", "aseprite", "psd", "json"],
+                "Pixel Art y Proyectos (PCS, ASE, ASEPRITE, PSD, PSB, JSON)",
+                &["pcs", "ase", "aseprite", "psd", "psb", "json"],
             )
             .add_filter("Todos los archivos", &["*"]);
     }

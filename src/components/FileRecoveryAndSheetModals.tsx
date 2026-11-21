@@ -2,16 +2,22 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Check,
+  Copy,
+  Download,
   Film,
   FolderOpen,
   FolderSearch,
   Grid3X3,
   Image as ImageIcon,
+  Layers,
   Maximize2,
   Move,
   Play,
   Pause,
+  RefreshCw,
   Scaling,
+  ShieldAlert,
+  Sparkles,
   Trash2,
   X,
   FileWarning,
@@ -28,6 +34,13 @@ import {
   SpritesheetCandidateInfo,
   SpritesheetSliceOptions,
 } from '../utils/fileImporter';
+import {
+  formatByteSize,
+  formatDiagnosticLogText,
+  PsdCompatibilityReport,
+  PsdRecoveryMode,
+} from '../utils/fileDiagnostics';
+import { downloadBlob } from '../utils/fileExporter';
 import { getTiledStore } from '../utils/tiledImageEngine';
 
 // Helper to draw either standard DecodedRgbaImage or TiledLayerStore preview into a canvas
@@ -238,7 +251,7 @@ export const MissingRecentFileModal: React.FC<MissingRecentFileModalProps> = ({
 };
 
 // =========================================================================
-// 2. DESCRIPTIVE FILE LOAD ERROR MODAL
+// 2. DESCRIPTIVE FILE LOAD ERROR, DIAGNOSTIC LOG & PSD RECOVERY MODAL
 // Guarantees failed or corrupted loads NEVER silently create an empty canvas
 // =========================================================================
 export interface FileLoadErrorPayload {
@@ -246,28 +259,130 @@ export interface FileLoadErrorPayload {
   formatLabel: string;
   message: string;
   technicalDetails?: string;
+  file?: File;
+  fileSizeBytes?: number;
+  moduleName?: string;
+  errorCode?: string;
+  psdVersion?: string;
+  incompatibleElement?: string;
+  canRecoverPsd?: boolean;
+  attemptedRecoveryMode?: PsdRecoveryMode;
+  timestamp?: string;
 }
 
 interface FileLoadErrorModalProps {
   isOpen: boolean;
   error: FileLoadErrorPayload | null;
   onRetryPickFile: () => void;
+  onRetryFile?: (file: File) => void;
+  onRecoverPsdWithMode?: (file: File, mode: PsdRecoveryMode) => void;
   onClose: () => void;
 }
+
+const PSD_RECOVERY_OPTIONS: Array<{
+  mode: PsdRecoveryMode;
+  label: string;
+  description: string;
+}> = [
+  {
+    mode: 'rasterize_incompatible',
+    label: 'Rasterizar capas incompatibles',
+    description: 'Convierte objetos inteligentes, texto y ajustes complejos a píxeles seguros.',
+  },
+  {
+    mode: 'ignore_incompatible',
+    label: 'Ignorar capas incompatibles',
+    description: 'Omite las capas dañadas o no compatibles y carga el resto del documento.',
+  },
+  {
+    mode: 'merged_composite',
+    label: 'Abrir imagen fusionada',
+    description: 'Extrae la imagen compuesta acoplada del PSD manteniendo resolución 1:1.',
+  },
+  {
+    mode: 'visible_only',
+    label: 'Importar únicamente capas visibles',
+    description: 'Descarta capas ocultas que suelen contener recursos pesados o bloqueados.',
+  },
+];
 
 export const FileLoadErrorModal: React.FC<FileLoadErrorModalProps> = ({
   isOpen,
   error,
   onRetryPickFile,
+  onRetryFile,
+  onRecoverPsdWithMode,
   onClose,
 }) => {
   const [showTech, setShowTech] = useState(false);
+  const [copiedLog, setCopiedLog] = useState(false);
+  const [selectedRecoveryMode, setSelectedRecoveryMode] =
+    useState<PsdRecoveryMode>('rasterize_incompatible');
 
   useEffect(() => {
     setShowTech(false);
+    setCopiedLog(false);
+    if (error?.attemptedRecoveryMode === 'rasterize_incompatible') {
+      setSelectedRecoveryMode('ignore_incompatible');
+    } else if (error?.attemptedRecoveryMode === 'ignore_incompatible') {
+      setSelectedRecoveryMode('merged_composite');
+    } else {
+      setSelectedRecoveryMode('rasterize_incompatible');
+    }
+  }, [error]);
+
+  const diagnosticLogText = useMemo(() => {
+    if (!error) return '';
+    return formatDiagnosticLogText({
+      fileName: error.fileName,
+      fileSizeBytes: error.fileSizeBytes ?? error.file?.size,
+      formatLabel: error.formatLabel,
+      psdVersion: error.psdVersion,
+      incompatibleElement: error.incompatibleElement,
+      moduleName: error.moduleName,
+      errorCode: error.errorCode,
+      message: error.message,
+      technicalDetails: error.technicalDetails,
+      recoveryModeAttempted: error.attemptedRecoveryMode,
+      timestamp: error.timestamp,
+    });
   }, [error]);
 
   if (!isOpen || !error) return null;
+
+  const fileBytes = error.fileSizeBytes ?? error.file?.size;
+  const isPsdRelated =
+    Boolean(error.canRecoverPsd) ||
+    /\.ps[db]$/i.test(error.fileName) ||
+    error.formatLabel.toLowerCase().includes('psd');
+  const showRecoveryPanel = Boolean(isPsdRelated && error.file && onRecoverPsdWithMode);
+
+  const handleCopyLog = async () => {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(diagnosticLogText);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = diagnosticLogText;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      setCopiedLog(true);
+      window.setTimeout(() => setCopiedLog(false), 2200);
+    } catch {
+      // Fallback ignored gracefully
+    }
+  };
+
+  const handleSaveLog = (ext: 'txt' | 'log') => {
+    const cleanBase = error.fileName.replace(/\.[^/.]+$/, '') || 'archivo';
+    const blob = new Blob([diagnosticLogText], { type: 'text/plain;charset=utf-8' });
+    downloadBlob(blob, `${cleanBase}_diagnostico.${ext}`);
+  };
 
   return (
     <div
@@ -277,15 +392,16 @@ export const FileLoadErrorModal: React.FC<FileLoadErrorModalProps> = ({
       }}
     >
       <div
-        className="w-full max-w-md rounded-xl border shadow-2xl overflow-hidden flex flex-col"
+        className="w-full max-w-2xl max-h-[92vh] rounded-xl border shadow-2xl overflow-hidden flex flex-col"
         style={{
           backgroundColor: 'var(--studio-bg-panel)',
           borderColor: 'var(--studio-border-strong)',
           color: 'var(--studio-text)',
         }}
       >
+        {/* Header */}
         <div
-          className="px-5 py-3.5 border-b flex items-center justify-between gap-3"
+          className="px-5 py-3.5 border-b flex items-center justify-between gap-3 shrink-0"
           style={{
             backgroundColor: 'var(--studio-bg-header)',
             borderColor: 'var(--studio-border)',
@@ -294,7 +410,7 @@ export const FileLoadErrorModal: React.FC<FileLoadErrorModalProps> = ({
           <div className="flex items-center gap-2.5 min-w-0">
             <FileWarning className="w-4 h-4 text-rose-400 shrink-0" />
             <h3 className="text-sm font-bold tracking-tight truncate">
-              No se pudo abrir el archivo
+              No fue posible abrir este archivo.
             </h3>
           </div>
           <button
@@ -307,85 +423,257 @@ export const FileLoadErrorModal: React.FC<FileLoadErrorModalProps> = ({
           </button>
         </div>
 
-        <div className="p-5 space-y-3.5">
+        {/* Body */}
+        <div className="p-5 space-y-4 overflow-y-auto">
+          {/* Motivo detectado */}
           <div
-            className="p-3 rounded-lg border space-y-1"
+            className="p-3.5 rounded-lg border space-y-1.5"
+            style={{
+              backgroundColor: 'rgba(244, 63, 94, 0.08)',
+              borderColor: 'rgba(244, 63, 94, 0.28)',
+            }}
+          >
+            <div className="text-[11px] font-bold uppercase tracking-wider text-rose-300">
+              Motivo detectado:
+            </div>
+            <p className="text-xs leading-relaxed text-rose-100 font-medium">
+              {error.message}
+            </p>
+          </div>
+
+          {/* Diagnostic Info Card */}
+          <div
+            className="p-3.5 rounded-lg border grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2 text-[11px]"
             style={{
               backgroundColor: 'var(--studio-bg-card)',
               borderColor: 'var(--studio-border)',
             }}
           >
-            <div className="text-xs font-bold font-mono truncate">{error.fileName}</div>
-            <div className="text-[11px]" style={{ color: 'var(--studio-text-muted)' }}>
-              Formato detectado: <span className="font-mono">{error.formatLabel}</span>
+            <div className="min-w-0">
+              <span style={{ color: 'var(--studio-text-muted)' }}>Nombre del archivo: </span>
+              <span className="font-mono font-bold break-all">{error.fileName}</span>
             </div>
+            <div>
+              <span style={{ color: 'var(--studio-text-muted)' }}>Tamaño: </span>
+              <span className="font-mono">{formatByteSize(fileBytes)}</span>
+            </div>
+            <div>
+              <span style={{ color: 'var(--studio-text-muted)' }}>Tipo detectado: </span>
+              <span className="font-mono">{error.formatLabel}</span>
+            </div>
+            <div>
+              <span style={{ color: 'var(--studio-text-muted)' }}>Módulo / Código: </span>
+              <span className="font-mono">
+                {error.moduleName || 'File Loader'} · {error.errorCode || 'FILE_LOAD_ERR'}
+              </span>
+            </div>
+            {error.psdVersion && (
+              <div>
+                <span style={{ color: 'var(--studio-text-muted)' }}>Versión PSD detectada: </span>
+                <span className="font-mono text-sky-300">{error.psdVersion}</span>
+              </div>
+            )}
+            {error.incompatibleElement && (
+              <div className="sm:col-span-2">
+                <span style={{ color: 'var(--studio-text-muted)' }}>Elemento incompatible: </span>
+                <span className="font-mono text-amber-300">{error.incompatibleElement}</span>
+              </div>
+            )}
           </div>
 
-          <p className="text-xs leading-relaxed text-rose-300">
-            {error.message}
-          </p>
-
+          {/* Protection notice */}
           <p className="text-[11px] leading-relaxed" style={{ color: 'var(--studio-text-muted)' }}>
-            Para proteger tu trabajo, no se creó ningún lienzo vacío. Formatos compatibles: PNG, JPG, JPEG, WEBP, GIF animado, BMP, TIFF, TGA, ICO, ASE, ASEPRITE, PSD, PCS y JSON.
+            PixelClash Studio protegió tu espacio de trabajo actual y no creó ningún documento o lienzo vacío tras el fallo.
           </p>
 
-          {error.technicalDetails && (
-            <div className="pt-1">
-              <button
-                type="button"
-                onClick={() => setShowTech((v) => !v)}
-                className="flex items-center gap-1 text-[11px] font-mono cursor-pointer hover:underline"
-                style={{ color: 'var(--studio-text-muted)' }}
-              >
-                {showTech ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-                <span>Detalles técnicos del registro</span>
-              </button>
-              {showTech && (
-                <pre
-                  className="mt-2 p-2.5 rounded-md border text-[10px] font-mono overflow-x-auto max-h-28 whitespace-pre-wrap break-all"
-                  style={{
-                    backgroundColor: 'var(--studio-bg-app)',
-                    borderColor: 'var(--studio-border)',
-                    color: 'var(--studio-text-muted)',
+          {/* PSD Recovery Modes */}
+          {showRecoveryPanel && (
+            <div
+              className="p-3.5 rounded-lg border space-y-2.5"
+              style={{
+                backgroundColor: 'rgba(56, 189, 248, 0.06)',
+                borderColor: 'rgba(56, 189, 248, 0.25)',
+              }}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-xs font-bold text-sky-300">
+                  <ShieldAlert className="w-4 h-4 shrink-0" />
+                  <span>Intentar modo de recuperación</span>
+                </div>
+                <span className="text-[10px] font-mono text-sky-200/70">
+                  Recuperación asistida PSD
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {PSD_RECOVERY_OPTIONS.map((opt) => {
+                  const selected = selectedRecoveryMode === opt.mode;
+                  return (
+                    <label
+                      key={opt.mode}
+                      className="p-2.5 rounded-lg border flex items-start gap-2 cursor-pointer transition-colors"
+                      style={{
+                        backgroundColor: selected ? 'rgba(56, 189, 248, 0.14)' : 'var(--studio-bg-card)',
+                        borderColor: selected ? 'rgba(56, 189, 248, 0.6)' : 'var(--studio-border)',
+                      }}
+                    >
+                      <input
+                        type="radio"
+                        name="psd-recovery-mode"
+                        checked={selected}
+                        onChange={() => setSelectedRecoveryMode(opt.mode)}
+                        className="mt-0.5 accent-sky-400 cursor-pointer"
+                      />
+                      <div className="min-w-0">
+                        <div className="text-[11px] font-bold leading-snug">{opt.label}</div>
+                        <div
+                          className="text-[10px] leading-snug mt-0.5"
+                          style={{ color: 'var(--studio-text-muted)' }}
+                        >
+                          {opt.description}
+                        </div>
+                      </div>
+                    </label>
+                  );
+                })}
+              </div>
+
+              <div className="flex justify-end pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (error.file && onRecoverPsdWithMode) {
+                      onRecoverPsdWithMode(error.file, selectedRecoveryMode);
+                    }
                   }}
+                  className="px-3.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 bg-sky-500 hover:bg-sky-400 text-slate-950 transition-colors cursor-pointer"
                 >
-                  {error.technicalDetails}
-                </pre>
-              )}
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>Aplicar modo de recuperación</span>
+                </button>
+              </div>
             </div>
           )}
+
+          {/* Technical Log Toggle */}
+          <div>
+            <button
+              type="button"
+              onClick={() => setShowTech((v) => !v)}
+              className="flex items-center gap-1 text-[11px] font-mono cursor-pointer hover:underline"
+              style={{ color: 'var(--studio-text-muted)' }}
+            >
+              {showTech ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+              <span>Ver registro completo de diagnóstico (Log)</span>
+            </button>
+            {showTech && (
+              <pre
+                className="mt-2 p-2.5 rounded-md border text-[10px] font-mono overflow-x-auto max-h-36 whitespace-pre-wrap break-all"
+                style={{
+                  backgroundColor: 'var(--studio-bg-app)',
+                  borderColor: 'var(--studio-border)',
+                  color: 'var(--studio-text-muted)',
+                }}
+              >
+                {diagnosticLogText}
+              </pre>
+            )}
+          </div>
         </div>
 
+        {/* Footer Actions */}
         <div
-          className="px-5 py-3 border-t flex items-center justify-end gap-2"
+          className="px-5 py-3 border-t flex flex-wrap items-center justify-between gap-2 shrink-0"
           style={{
             backgroundColor: 'var(--studio-bg-bar)',
             borderColor: 'var(--studio-border)',
           }}
         >
-          <button
-            type="button"
-            onClick={onRetryPickFile}
-            className="px-3.5 py-1.5 rounded-lg text-xs font-medium border hover:bg-white/5 transition-colors flex items-center gap-1.5 cursor-pointer"
-            style={{
-              borderColor: 'var(--studio-border-strong)',
-              color: 'var(--studio-text)',
-            }}
-          >
-            <FolderSearch className="w-3.5 h-3.5" />
-            <span>Elegir otro archivo</span>
-          </button>
-          <button
-            type="button"
-            onClick={onClose}
-            className="px-4 py-1.5 rounded-lg text-xs font-bold hover:opacity-90 transition-opacity cursor-pointer"
-            style={{
-              backgroundColor: 'var(--studio-accent)',
-              color: 'var(--studio-accent-text)',
-            }}
-          >
-            Entendido
-          </button>
+          {/* Log Copy & Export */}
+          <div className="flex flex-wrap items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => void handleCopyLog()}
+              className="px-2.5 py-1.5 rounded-lg text-[11px] font-medium border hover:bg-white/5 transition-colors flex items-center gap-1.5 cursor-pointer"
+              style={{
+                borderColor: 'var(--studio-border-strong)',
+                color: copiedLog ? '#4ade80' : 'var(--studio-text)',
+              }}
+            >
+              {copiedLog ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+              <span>{copiedLog ? 'Log copiado' : 'Copiar Log'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSaveLog('txt')}
+              className="px-2.5 py-1.5 rounded-lg text-[11px] font-medium border hover:bg-white/5 transition-colors flex items-center gap-1 cursor-pointer"
+              style={{
+                borderColor: 'var(--studio-border-strong)',
+                color: 'var(--studio-text)',
+              }}
+              title="Exportar registro diagnóstico como .TXT"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Guardar Log (.TXT)</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSaveLog('log')}
+              className="px-2.5 py-1.5 rounded-lg text-[11px] font-medium border hover:bg-white/5 transition-colors flex items-center gap-1 cursor-pointer"
+              style={{
+                borderColor: 'var(--studio-border-strong)',
+                color: 'var(--studio-text-muted)',
+              }}
+              title="Exportar registro diagnóstico como .LOG"
+            >
+              <span>.LOG</span>
+            </button>
+          </div>
+
+          {/* Retry & Close */}
+          <div className="flex flex-wrap items-center gap-2">
+            {error.file && onRetryFile && (
+              <button
+                type="button"
+                onClick={() => {
+                  const f = error.file!;
+                  onClose();
+                  onRetryFile(f);
+                }}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium border hover:bg-white/5 transition-colors flex items-center gap-1.5 cursor-pointer"
+                style={{
+                  borderColor: 'var(--studio-border-strong)',
+                  color: 'var(--studio-text)',
+                }}
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Reintentar</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onRetryPickFile}
+              className="px-3 py-1.5 rounded-lg text-xs font-medium border hover:bg-white/5 transition-colors flex items-center gap-1.5 cursor-pointer"
+              style={{
+                borderColor: 'var(--studio-border-strong)',
+                color: 'var(--studio-text)',
+              }}
+            >
+              <FolderSearch className="w-3.5 h-3.5" />
+              <span>Elegir otro archivo</span>
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-1.5 rounded-lg text-xs font-bold hover:opacity-90 transition-opacity cursor-pointer"
+              style={{
+                backgroundColor: 'var(--studio-accent)',
+                color: 'var(--studio-accent-text)',
+              }}
+            >
+              Cerrar
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -1349,6 +1637,158 @@ export const SpritesheetSlicerModal: React.FC<SpritesheetSlicerModalProps> = ({
               <span>Abrir como Spritesheet ({totalCells} celdas)</span>
             </button>
           </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// =========================================================================
+// 6. PSD COMPATIBILITY REPORT MODAL
+// Displays feature compatibility breakdown (Layers, Groups, Transparency, Masks, etc.)
+// =========================================================================
+interface PsdCompatibilityReportModalProps {
+  isOpen: boolean;
+  report: PsdCompatibilityReport | null;
+  onClose: () => void;
+}
+
+export const PsdCompatibilityReportModal: React.FC<PsdCompatibilityReportModalProps> = ({
+  isOpen,
+  report,
+  onClose,
+}) => {
+  if (!isOpen || !report) return null;
+
+  return (
+    <div
+      className="fixed inset-0 z-[175] bg-black/70 backdrop-blur-xs flex items-center justify-center p-4"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        className="w-full max-w-lg rounded-xl border shadow-2xl overflow-hidden flex flex-col"
+        style={{
+          backgroundColor: 'var(--studio-bg-panel)',
+          borderColor: 'var(--studio-border-strong)',
+          color: 'var(--studio-text)',
+        }}
+      >
+        <div
+          className="px-5 py-3.5 border-b flex items-center justify-between gap-3"
+          style={{
+            backgroundColor: 'var(--studio-bg-header)',
+            borderColor: 'var(--studio-border)',
+          }}
+        >
+          <div className="flex items-center gap-2.5 min-w-0">
+            <Layers className="w-4 h-4 text-sky-400 shrink-0" />
+            <h3 className="text-sm font-bold tracking-tight truncate">
+              Informe de compatibilidad PSD
+            </h3>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-1 rounded-md hover:bg-white/10 transition-colors cursor-pointer"
+            style={{ color: 'var(--studio-text-muted)' }}
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-4">
+          <div
+            className="p-3 rounded-lg border flex flex-wrap items-center justify-between gap-2 text-[11px]"
+            style={{
+              backgroundColor: 'var(--studio-bg-card)',
+              borderColor: 'var(--studio-border)',
+            }}
+          >
+            <div className="min-w-0">
+              <div className="font-mono font-bold truncate">{report.fileName}</div>
+              <div style={{ color: 'var(--studio-text-muted)' }}>
+                Origen: {report.sourceSoftware} · {report.psdVersion}
+              </div>
+            </div>
+            <div className="text-right font-mono tabular-nums" style={{ color: 'var(--studio-text-muted)' }}>
+              <div>
+                {report.width}×{report.height} px · {report.dpi} DPI
+              </div>
+              <div>
+                {report.colorModeLabel} · {report.bitsPerChannel}-bit
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            {report.items.map((item) => {
+              const isOk = item.status === 'compatible';
+              return (
+                <div
+                  key={item.key}
+                  className="px-3 py-2 rounded-lg border flex items-center justify-between gap-3 text-xs"
+                  style={{
+                    backgroundColor: 'var(--studio-bg-app)',
+                    borderColor: 'var(--studio-border)',
+                  }}
+                >
+                  <div className="flex items-center gap-2 font-medium shrink-0">
+                    {isOk ? (
+                      <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    ) : (
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    )}
+                    <span>{item.label}</span>
+                  </div>
+                  <span
+                    className="text-[11px] font-mono text-right truncate"
+                    style={{
+                      color: isOk ? '#6ee7b7' : '#fcd34d',
+                    }}
+                  >
+                    {item.detail}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+
+          {report.notes.length > 0 && (
+            <div
+              className="p-3 rounded-lg border space-y-1 text-[11px]"
+              style={{
+                backgroundColor: 'rgba(245, 158, 11, 0.08)',
+                borderColor: 'rgba(245, 158, 11, 0.25)',
+                color: '#fde68a',
+              }}
+            >
+              {report.notes.map((note, idx) => (
+                <div key={idx}>• {note}</div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div
+          className="px-5 py-3 border-t flex items-center justify-end"
+          style={{
+            backgroundColor: 'var(--studio-bg-bar)',
+            borderColor: 'var(--studio-border)',
+          }}
+        >
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-4 py-1.5 rounded-lg text-xs font-bold hover:opacity-90 transition-opacity cursor-pointer"
+            style={{
+              backgroundColor: 'var(--studio-accent)',
+              color: 'var(--studio-accent-text)',
+            }}
+          >
+            Entendido
+          </button>
         </div>
       </div>
     </div>

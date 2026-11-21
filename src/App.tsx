@@ -33,6 +33,7 @@ import {
   FileLoadErrorPayload,
   ImportResolutionMismatchModal,
   MissingRecentFileModal,
+  PsdCompatibilityReportModal,
   SpritesheetDetectedPromptModal,
   SpritesheetSlicerModal,
 } from './components/FileRecoveryAndSheetModals';
@@ -310,6 +311,11 @@ import {
   validateDocumentFramesIntegrity,
 } from './utils/fileImporter';
 import {
+  PsdCompatibilityReport,
+  PsdRecoveryMode,
+  recordFileFailureDiagnostic,
+} from './utils/fileDiagnostics';
+import {
   clearAllRecentProjectPayloads,
   deleteRecentProjectPayload,
   getRecentProjectPayload,
@@ -548,7 +554,7 @@ function getAcceptForImportMode(mode: ImportMenuMode | null): string {
     case 'brush':
       return `.pcsbrush,.json,${SUPPORTED_IMAGE_ACCEPT}`;
     case 'external_project':
-      return '.pcs,.ase,.aseprite,.psd,.json,.gif,.tif,.tiff';
+      return '.pcs,.ase,.aseprite,.psd,.psb,.json,.gif,.tif,.tiff';
     case 'spritesheet':
       return SUPPORTED_IMAGE_ACCEPT;
     default:
@@ -1235,9 +1241,10 @@ export default function App() {
   const [smartImportFiles, setSmartImportFiles] = useState<File[]>([]);
   const [isExternalFileDragOver, setIsExternalFileDragOver] = useState<boolean>(false);
 
-  // Unified File Recovery, Load Validation Error, Spritesheet Detection & Resolution Mismatch Modals
+  // Unified File Recovery, Load Validation Error, PSD Compatibility, Spritesheet Detection & Resolution Mismatch Modals
   const [missingRecentEntry, setMissingRecentEntry] = useState<RecentProjectEntry | null>(null);
   const [fileLoadError, setFileLoadError] = useState<FileLoadErrorPayload | null>(null);
+  const [psdCompatibilityReport, setPsdCompatibilityReport] = useState<PsdCompatibilityReport | null>(null);
   const [pendingSpritesheetPrompt, setPendingSpritesheetPrompt] =
     useState<PendingSpritesheetOpenState | null>(null);
   const [pendingSpritesheetOpen, setPendingSpritesheetOpen] =
@@ -8197,7 +8204,18 @@ export default function App() {
   // Usado por: Archivo -> Abrir, Abrir Recientes, Spritesheets y Drag & Drop
   // =========================================================================
   const reportFileLoadFailure = useCallback(
-    (fileName: string, err: unknown, fallbackFormat: string = 'Archivo') => {
+    (
+      fileName: string,
+      err: unknown,
+      fallbackFormat: string = 'Archivo',
+      ctx?: {
+        file?: File;
+        moduleName?: string;
+        errorCode?: string;
+        incompatibleElement?: string;
+        attemptedRecoveryMode?: PsdRecoveryMode;
+      }
+    ) => {
       const isStructured = err instanceof FileLoadError;
       const message = isStructured
         ? err.message
@@ -8210,9 +8228,31 @@ export default function App() {
         : err instanceof Error
         ? err.stack || err.message
         : String(err);
+      const errorCode = (isStructured ? err.errorCode : undefined) || ctx?.errorCode || 'FILE_LOAD_ERR';
+      const moduleName = (isStructured ? err.moduleName : undefined) || ctx?.moduleName || 'File Loader';
+      const fileSizeBytes = (isStructured ? err.fileSizeBytes : undefined) ?? ctx?.file?.size;
+      const psdVersion = isStructured ? err.psdVersion : undefined;
+      const incompatibleElement =
+        (isStructured ? err.incompatibleElement : undefined) || ctx?.incompatibleElement;
+      const canRecoverPsd = isStructured
+        ? err.canOfferPsdRecovery
+        : /\.ps[db]$/i.test(fileName) || formatLabel.toLowerCase().includes('psd');
 
-      console.error(`[PixelClash FileLoader] Error al abrir "${fileName}":`, err);
-      appendStudioLog(`Error al abrir "${fileName}" (${formatLabel}): ${message}`);
+      const diagEntry = recordFileFailureDiagnostic({
+        fileName,
+        fileSizeBytes,
+        formatLabel,
+        psdVersion,
+        incompatibleElement,
+        moduleName,
+        errorCode,
+        message,
+        technicalDetails,
+        recoveryModeAttempted: ctx?.attemptedRecoveryMode,
+      });
+
+      console.error(`[PixelClash FileLoader] Error al abrir "${fileName}" [${errorCode}]:`, err);
+      appendStudioLog(`Error al abrir "${fileName}" (${formatLabel} · ${errorCode}): ${message}`);
       setImportNotification(`Error al abrir "${fileName}": ${message}`);
       setTimeout(() => setImportNotification(null), 5000);
       setFileLoadError({
@@ -8220,6 +8260,15 @@ export default function App() {
         formatLabel,
         message,
         technicalDetails,
+        file: ctx?.file,
+        fileSizeBytes,
+        moduleName,
+        errorCode,
+        psdVersion,
+        incompatibleElement,
+        canRecoverPsd,
+        attemptedRecoveryMode: ctx?.attemptedRecoveryMode,
+        timestamp: diagEntry.timestamp,
       });
     },
     [appendStudioLog]
@@ -8453,6 +8502,9 @@ export default function App() {
         `${res.stats.formatLabel} abierto${openedInNewTab ? ' en nueva pestaña' : ''}: ${file.name} (${res.width}×${res.height} px${dpiNote}${frameNote}${tiledNote} · 1:1 exacto)`
       );
       setTimeout(() => setImportNotification(null), 4000);
+      if (res.psdCompatibilityReport && res.psdCompatibilityReport.hasWarnings) {
+        setPsdCompatibilityReport(res.psdCompatibilityReport);
+      }
     },
     [cameraShake, handleChangeBrushSettings, hydrateOpenedDocumentSnapshot, recordRecentProject]
   );
@@ -8469,10 +8521,15 @@ export default function App() {
         replaceRecentId?: string;
         skipSpritesheetPrompt?: boolean;
         forceSpritesheetSlicer?: boolean;
+        psdRecoveryMode?: PsdRecoveryMode;
       }
     ) => {
       try {
-        setImportNotification(`Abriendo "${file.name}"...`);
+        setImportNotification(
+          opts?.psdRecoveryMode && opts.psdRecoveryMode !== 'normal'
+            ? `Recuperando "${file.name}"...`
+            : `Abriendo "${file.name}"...`
+        );
 
         if (opts?.forceSpritesheetSlicer) {
           const rawRaster = await decodeAnyRasterFileToRgba(file);
@@ -8492,7 +8549,9 @@ export default function App() {
           return;
         }
 
-        const res = await importGraphicFile(file);
+        const res = await importGraphicFile(file, {
+          psdRecoveryMode: opts?.psdRecoveryMode,
+        });
 
         // Ask user explicitly before treating a detected image as a spritesheet!
         // "Se ha detectado una posible hoja de sprites. ¿Desea abrirla como spritesheet?"
@@ -8519,7 +8578,10 @@ export default function App() {
 
         hydrateImportResultAsDocument(res, file, opts);
       } catch (err) {
-        reportFileLoadFailure(file.name, err);
+        reportFileLoadFailure(file.name, err, 'Archivo', {
+          file,
+          attemptedRecoveryMode: opts?.psdRecoveryMode,
+        });
       }
     },
     [hydrateImportResultAsDocument, reportFileLoadFailure]
@@ -8642,7 +8704,7 @@ export default function App() {
                   'image/*': [
                     '.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.tif', '.tiff', '.tga', '.ico',
                   ],
-                  'application/octet-stream': ['.pcs', '.ase', '.aseprite', '.psd'],
+                  'application/octet-stream': ['.pcs', '.ase', '.aseprite', '.psd', '.psb'],
                   'application/json': ['.json'],
                 },
               },
@@ -10184,7 +10246,9 @@ export default function App() {
           setTimeout(() => setImportNotification(null), 3800);
         }
       } catch (err: any) {
-        reportFileLoadFailure(files[0]?.name || 'Archivo', err, 'Importación');
+        reportFileLoadFailure(files[0]?.name || 'Archivo', err, 'Importación', {
+          file: files[0],
+        });
       }
     },
     [
@@ -10293,14 +10357,16 @@ export default function App() {
         executeImportIntoProject(dropped, 'config');
       } else if (lower.endsWith('.pcsbrush')) {
         executeImportIntoProject(dropped, 'brush');
-      } else if (/\.(pcs|ase|aseprite|psd|json)$/.test(lower)) {
+      } else if (/\.(pcs|ase|aseprite|psd|psb|json)$/.test(lower)) {
         void handleOpenDocumentFile(first);
       } else {
         reportFileLoadFailure(
           first.name,
           new Error(
-            `Formato no reconocido al arrastrar "${first.name}". Usa PNG, JPG, JPEG, WEBP, GIF, BMP, TIFF, TGA, ICO, ASE, ASEPRITE, PSD, PCS o JSON.`
-          )
+            `Formato no reconocido al arrastrar "${first.name}". Usa PNG, JPG, JPEG, WEBP, GIF, BMP, TIFF, TGA, ICO, ASE, ASEPRITE, PSD, PSB, PCS o JSON.`
+          ),
+          'Archivo',
+          { file: first, errorCode: 'FORMAT_UNSUPPORTED_415', moduleName: 'Drag & Drop Loader' }
         );
       }
     },
@@ -12360,7 +12426,24 @@ export default function App() {
             setFileLoadError(null);
             void handleOpenFilePicker();
           }}
+          onRetryFile={(file) => {
+            setFileLoadError(null);
+            void handleOpenDocumentFile(file);
+          }}
+          onRecoverPsdWithMode={(file, mode) => {
+            setFileLoadError(null);
+            void handleOpenDocumentFile(file, { psdRecoveryMode: mode });
+          }}
           onClose={() => setFileLoadError(null)}
+        />
+      </StudioTopLayerPortal>
+
+      {/* PSD Compatibility Breakdown Modal (shown when warnings or recovery conversion occurred) */}
+      <StudioTopLayerPortal isOpen={psdCompatibilityReport !== null} tier="modal" autoFocus ariaRole="dialog">
+        <PsdCompatibilityReportModal
+          isOpen={psdCompatibilityReport !== null}
+          report={psdCompatibilityReport}
+          onClose={() => setPsdCompatibilityReport(null)}
         />
       </StudioTopLayerPortal>
 

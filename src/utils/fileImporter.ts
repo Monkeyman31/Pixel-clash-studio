@@ -1,12 +1,23 @@
 import JSZip from 'jszip';
-import { readPsd } from 'ag-psd';
+import {
+  decodeLayerPixels,
+  getCompositeImageData,
+  Layer as AgPsdLayer,
+  LayerMaskData as AgPsdMaskData,
+  PixelData as AgPsdPixelData,
+  Psd as AgPsd,
+  readPsd,
+  ReadOptions as AgPsdReadOptions,
+} from 'ag-psd';
 import {
   ActionTag,
   Frame,
   InterpolationMode,
   Layer,
+  LayerAdjustmentConfig,
   LayerBlendMode,
   LayerGroup,
+  LayerMask,
   ProjectState,
   RecentProjectFileFormat,
 } from '../types';
@@ -17,6 +28,14 @@ import {
   shouldUseTiledStorage,
   TiledLayerStore,
 } from './tiledImageEngine';
+import {
+  detectPsdSourceSoftware,
+  inspectPsdHeader,
+  PsdCompatibilityCheckItem,
+  PsdCompatibilityReport,
+  PsdHeaderInspection,
+  PsdRecoveryMode,
+} from './fileDiagnostics';
 
 export const SUPPORTED_IMAGE_EXTENSIONS = [
   'png',
@@ -36,6 +55,7 @@ export const SUPPORTED_PROJECT_EXTENSIONS = [
   'ase',
   'aseprite',
   'psd',
+  'psb',
   'json',
 ] as const;
 
@@ -45,27 +65,49 @@ export const SUPPORTED_ALL_OPEN_EXTENSIONS = [
 ] as const;
 
 export const SUPPORTED_OPEN_ACCEPT =
-  '.pcs,.ase,.aseprite,.psd,.json,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff,.tga,.ico,image/png,image/jpeg,image/webp,image/gif,image/bmp,image/tiff,image/x-icon,image/vnd.microsoft.icon';
+  '.pcs,.ase,.aseprite,.psd,.psb,.json,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff,.tga,.ico,image/png,image/jpeg,image/webp,image/gif,image/bmp,image/tiff,image/x-icon,image/vnd.microsoft.icon';
 
 export const SUPPORTED_IMAGE_ACCEPT =
   '.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff,.tga,.ico,image/png,image/jpeg,image/webp,image/gif,image/bmp,image/tiff,image/x-icon,image/vnd.microsoft.icon';
+
+export interface FileLoadErrorMeta {
+  errorCode?: string;
+  moduleName?: string;
+  fileSizeBytes?: number;
+  psdVersion?: string;
+  incompatibleElement?: string;
+  canOfferPsdRecovery?: boolean;
+}
 
 export class FileLoadError extends Error {
   public readonly fileName: string;
   public readonly formatLabel: string;
   public readonly technicalDetails?: string;
+  public readonly errorCode: string;
+  public readonly moduleName: string;
+  public readonly fileSizeBytes?: number;
+  public readonly psdVersion?: string;
+  public readonly incompatibleElement?: string;
+  public readonly canOfferPsdRecovery: boolean;
 
   constructor(
     message: string,
     fileName: string,
     formatLabel: string = 'Archivo',
-    technicalDetails?: string
+    technicalDetails?: string,
+    meta?: FileLoadErrorMeta
   ) {
     super(message);
     this.name = 'FileLoadError';
     this.fileName = fileName;
     this.formatLabel = formatLabel;
     this.technicalDetails = technicalDetails;
+    this.errorCode = meta?.errorCode || 'FILE_LOAD_ERR';
+    this.moduleName = meta?.moduleName || 'File Importer';
+    this.fileSizeBytes = meta?.fileSizeBytes;
+    this.psdVersion = meta?.psdVersion;
+    this.incompatibleElement = meta?.incompatibleElement;
+    this.canOfferPsdRecovery = Boolean(meta?.canOfferPsdRecovery);
   }
 }
 
@@ -118,6 +160,8 @@ export interface ImportResult {
   /** Full-resolution raw RGBA / Tiled buffer for single-image imports (enables 1:1 spritesheet slicing!) */
   rawRaster?: DecodedRgbaImage;
   spritesheetCandidate?: SpritesheetCandidateInfo;
+  psdCompatibilityReport?: PsdCompatibilityReport;
+  usedRecoveryMode?: PsdRecoveryMode;
   stats: ImportLoadStats;
 }
 
@@ -225,6 +269,7 @@ export function normalizeFileFormatTag(fileName: string): RecentProjectFileForma
     case 'json':
       return 'json';
     case 'psd':
+    case 'psb':
       return 'psd';
     case 'ase':
     case 'aseprite':
@@ -2267,80 +2312,752 @@ export function sliceRgbaToSpritesheetResult(
 }
 
 // =========================================================================
-// PSD (PHOTOSHOP) IMPORTER (With Layer Groups, Blend Modes & Full Alpha)
+// PSD / PSB (PHOTOSHOP, KRITA, CLIP STUDIO) COMPATIBILITY & RECOVERY IMPORTER
 // =========================================================================
-function mapPsdBlendMode(mode?: string): LayerBlendMode {
+function mapPsdBlendMode(mode?: string): { blendMode: LayerBlendMode; supported: boolean } {
   switch (mode) {
+    case undefined:
+    case 'normal':
+    case 'pass through':
+      return { blendMode: 'normal', supported: true };
     case 'multiply':
-      return 'multiply';
+      return { blendMode: 'multiply', supported: true };
     case 'screen':
-      return 'screen';
+      return { blendMode: 'screen', supported: true };
     case 'overlay':
-      return 'overlay';
+      return { blendMode: 'overlay', supported: true };
     case 'soft light':
-      return 'soft-light';
+      return { blendMode: 'soft-light', supported: true };
     case 'hard light':
-      return 'hard-light';
+      return { blendMode: 'hard-light', supported: true };
     case 'darken':
-      return 'darken';
+      return { blendMode: 'darken', supported: true };
     case 'lighten':
-      return 'lighten';
+      return { blendMode: 'lighten', supported: true };
     case 'color dodge':
     case 'linear dodge':
-      return 'color-dodge';
+      return { blendMode: 'color-dodge', supported: true };
     case 'color burn':
     case 'linear burn':
-      return 'color-burn';
+      return { blendMode: 'color-burn', supported: true };
     case 'difference':
-      return 'difference';
+      return { blendMode: 'difference', supported: true };
     case 'exclusion':
-      return 'exclusion';
+      return { blendMode: 'exclusion', supported: true };
+    case 'hue':
+      return { blendMode: 'hue', supported: true };
+    case 'saturation':
+      return { blendMode: 'saturation', supported: true };
+    case 'color':
+      return { blendMode: 'color', supported: true };
+    case 'luminosity':
+      return { blendMode: 'luminosity', supported: true };
     default:
-      return 'normal';
+      return { blendMode: 'normal', supported: false };
   }
 }
 
-function psdLayerCanvasToGrid(
-  canvas: HTMLCanvasElement,
-  canvasWidth: number,
-  canvasHeight: number,
-  offsetX: number = 0,
-  offsetY: number = 0
-): (string | null)[][] {
-  const grid = createEmptyGrid(canvasWidth, canvasHeight);
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return grid;
-  const w = canvas.width;
-  const h = canvas.height;
-  if (w <= 0 || h <= 0) return grid;
+function extractPsdDpi(psd: AgPsd): number {
+  const res = psd.imageResources?.resolutionInfo;
+  if (res && typeof res.horizontalResolution === 'number' && res.horizontalResolution > 0) {
+    const dpi =
+      res.horizontalResolutionUnit === 'PPCM'
+        ? Math.round(res.horizontalResolution * 2.54)
+        : Math.round(res.horizontalResolution);
+    if (dpi >= 1 && dpi <= 4800) return dpi;
+  }
+  return 72;
+}
 
-  const { data } = ctx.getImageData(0, 0, w, h);
-  for (let y = 0; y < h; y++) {
-    const destY = offsetY + y;
+function pixelDataToUint8ClampedRgba(pixelData: AgPsdPixelData): Uint8ClampedArray {
+  const src = pixelData.data;
+  if (src instanceof Uint8ClampedArray) return src;
+  const out = new Uint8ClampedArray(src.length);
+  if (src instanceof Uint8Array) {
+    out.set(src);
+    return out;
+  }
+  if (src instanceof Uint16Array) {
+    for (let i = 0; i < src.length; i++) {
+      out[i] = src[i] >> 8;
+    }
+    return out;
+  }
+  // Float32Array (32-bit HDR channel)
+  for (let i = 0; i < src.length; i++) {
+    const v = src[i];
+    out[i] = Math.max(0, Math.min(255, Math.round((Number.isFinite(v) ? v : 0) * 255)));
+  }
+  return out;
+}
+
+function extractMaskPlaneFromPsdMask(
+  psdMask: AgPsdMaskData,
+  canvasWidth: number,
+  canvasHeight: number
+): Uint8Array | null {
+  let maskImageData = psdMask.imageData;
+  if (!maskImageData && psdMask.canvas) {
+    const ctx = psdMask.canvas.getContext('2d');
+    if (ctx) {
+      maskImageData = ctx.getImageData(0, 0, psdMask.canvas.width, psdMask.canvas.height);
+    }
+  }
+  if (!maskImageData || maskImageData.width <= 0 || maskImageData.height <= 0) {
+    return null;
+  }
+
+  const defaultVal = Math.max(0, Math.min(255, psdMask.defaultColor ?? 255));
+  const density =
+    typeof psdMask.userMaskDensity === 'number'
+      ? Math.max(0, Math.min(1, psdMask.userMaskDensity))
+      : typeof psdMask.vectorMaskDensity === 'number'
+      ? Math.max(0, Math.min(1, psdMask.vectorMaskDensity))
+      : 1;
+
+  const applyDensity = (rawVal: number): number => {
+    if (density >= 0.999) return rawVal;
+    return Math.round(255 * (1 - density) + rawVal * density);
+  };
+
+  const plane = new Uint8Array(canvasWidth * canvasHeight);
+  plane.fill(applyDensity(defaultVal));
+
+  const srcRgba = pixelDataToUint8ClampedRgba(maskImageData);
+  const mw = maskImageData.width;
+  const mh = maskImageData.height;
+  const offX = psdMask.left || 0;
+  const offY = psdMask.top || 0;
+
+  for (let y = 0; y < mh; y++) {
+    const destY = offY + y;
     if (destY < 0 || destY >= canvasHeight) continue;
-    for (let x = 0; x < w; x++) {
-      const destX = offsetX + x;
+    const rowDst = destY * canvasWidth;
+    const rowSrc = y * mw * 4;
+    for (let x = 0; x < mw; x++) {
+      const destX = offX + x;
       if (destX < 0 || destX >= canvasWidth) continue;
-      const idx = (y * w + x) * 4;
-      const a = data[idx + 3];
-      if (a > 0) {
-        grid[destY][destX] = rgbaToPixelString(data[idx], data[idx + 1], data[idx + 2], a);
+      plane[rowDst + destX] = applyDensity(srcRgba[rowSrc + x * 4]);
+    }
+  }
+  return plane;
+}
+
+function buildCombinedPsdMaskPlane(
+  child: AgPsdLayer,
+  canvasWidth: number,
+  canvasHeight: number
+): { plane: Uint8Array | null; disabled: boolean; isVectorMask: boolean; hasAdvancedMask: boolean } {
+  let hasAdvancedMask = false;
+  let isVectorMask = false;
+  let combined: Uint8Array | null = null;
+  let allDisabled = true;
+
+  const masks: Array<{ data: AgPsdMaskData; fromReal?: boolean }> = [];
+  if (child.mask) masks.push({ data: child.mask, fromReal: false });
+  if (child.realMask) masks.push({ data: child.realMask, fromReal: true });
+
+  if (child.vectorMask || child.realMask) {
+    hasAdvancedMask = true;
+  }
+
+  for (const entry of masks) {
+    const m = entry.data;
+    if (m.fromVectorData || entry.fromReal) {
+      isVectorMask = true;
+      hasAdvancedMask = true;
+    }
+    if (
+      (typeof m.userMaskFeather === 'number' && m.userMaskFeather > 0) ||
+      (typeof m.vectorMaskFeather === 'number' && m.vectorMaskFeather > 0)
+    ) {
+      hasAdvancedMask = true;
+    }
+    const plane = extractMaskPlaneFromPsdMask(m, canvasWidth, canvasHeight);
+    if (!plane) continue;
+    if (!m.disabled) allDisabled = false;
+    if (!combined) {
+      combined = plane;
+    } else if (!m.disabled) {
+      for (let i = 0; i < combined.length; i++) {
+        combined[i] = Math.round((combined[i] * plane[i]) / 255);
       }
     }
   }
-  return grid;
+
+  return {
+    plane: combined,
+    disabled: allDisabled,
+    isVectorMask,
+    hasAdvancedMask: hasAdvancedMask || Boolean(child.mask),
+  };
 }
 
-export async function importPsd(file: File): Promise<ImportResult> {
-  const buffer = await file.arrayBuffer();
-  const psd = readPsd(buffer);
-  const width = psd.width;
-  const height = psd.height;
+function maskPlaneToLayerMask(
+  plane: Uint8Array,
+  width: number,
+  height: number,
+  disabled: boolean,
+  isVectorMask: boolean
+): LayerMask {
+  const pixels: number[][] = Array.from({ length: height }, (_, y) => {
+    const row = new Array<number>(width);
+    const rowOff = y * width;
+    for (let x = 0; x < width; x++) {
+      row[x] = plane[rowOff + x];
+    }
+    return row;
+  });
+  return {
+    type: isVectorMask ? 'vector' : 'layer',
+    pixels,
+    disabled,
+    inverted: false,
+    linked: true,
+  };
+}
 
-  if (!width || !height || width <= 0 || height <= 0) {
-    throw new FileLoadError('El archivo PSD no contiene dimensiones válidas.', file.name, 'PSD');
+function buildCanvasRgbaBufferFromPsdLayer(
+  child: AgPsdLayer,
+  canvasWidth: number,
+  canvasHeight: number
+): { rgba: Uint8ClampedArray; hasPixels: boolean; hasTransparency: boolean } | null {
+  let pixelData: AgPsdPixelData | undefined = child.imageData;
+  if (!pixelData && child.canvas) {
+    const ctx = child.canvas.getContext('2d');
+    if (ctx && child.canvas.width > 0 && child.canvas.height > 0) {
+      pixelData = ctx.getImageData(0, 0, child.canvas.width, child.canvas.height);
+    }
+  }
+  if (!pixelData || pixelData.width <= 0 || pixelData.height <= 0) {
+    return null;
   }
 
+  const srcRgba = pixelDataToUint8ClampedRgba(pixelData);
+  const w = pixelData.width;
+  const h = pixelData.height;
+  const offsetX = child.left || 0;
+  const offsetY = child.top || 0;
+  const out = new Uint8ClampedArray(canvasWidth * canvasHeight * 4);
+  let hasPixels = false;
+  let hasTransparency = false;
+
+  for (let y = 0; y < h; y++) {
+    const destY = offsetY + y;
+    if (destY < 0 || destY >= canvasHeight) continue;
+    const dstRow = destY * canvasWidth * 4;
+    const srcRow = y * w * 4;
+    for (let x = 0; x < w; x++) {
+      const destX = offsetX + x;
+      if (destX < 0 || destX >= canvasWidth) continue;
+      const srcIdx = srcRow + x * 4;
+      const a = srcRgba[srcIdx + 3];
+      if (a > 0) {
+        hasPixels = true;
+        if (a < 254) hasTransparency = true;
+        const dstIdx = dstRow + destX * 4;
+        out[dstIdx] = srcRgba[srcIdx];
+        out[dstIdx + 1] = srcRgba[srcIdx + 1];
+        out[dstIdx + 2] = srcRgba[srcIdx + 2];
+        out[dstIdx + 3] = a;
+      } else {
+        hasTransparency = true;
+      }
+    }
+  }
+
+  return { rgba: out, hasPixels, hasTransparency };
+}
+
+function mapPsdAdjustmentToConfig(
+  adj: AgPsdLayer['adjustment']
+): { config?: LayerAdjustmentConfig; label: string; compatible: boolean } {
+  if (!adj) return { label: '', compatible: true };
+  const base: LayerAdjustmentConfig = {
+    hue: 0,
+    saturation: 0,
+    brightness: 0,
+    contrast: 0,
+    posterize: 0,
+    invert: false,
+    grayscale: false,
+    sepia: false,
+    tintColor: '#ffffff',
+    tintAmount: 0,
+  };
+  switch (adj.type) {
+    case 'hue/saturation':
+      return {
+        config: {
+          ...base,
+          hue: Math.max(-180, Math.min(180, Math.round(adj.master?.hue || 0))),
+          saturation: Math.max(-100, Math.min(100, Math.round(adj.master?.saturation || 0))),
+          brightness: Math.max(-100, Math.min(100, Math.round(adj.master?.lightness || 0))),
+        },
+        label: 'Tono/Saturación',
+        compatible: true,
+      };
+    case 'brightness/contrast':
+      return {
+        config: {
+          ...base,
+          brightness: Math.max(-100, Math.min(100, Math.round(adj.brightness || 0))),
+          contrast: Math.max(-100, Math.min(100, Math.round(adj.contrast || 0))),
+        },
+        label: 'Brillo/Contraste',
+        compatible: true,
+      };
+    case 'invert':
+      return {
+        config: { ...base, invert: true },
+        label: 'Invertir',
+        compatible: true,
+      };
+    case 'posterize':
+      return {
+        config: { ...base, posterize: Math.max(2, Math.min(16, Math.round(adj.levels || 4))) },
+        label: 'Posterizar',
+        compatible: true,
+      };
+    case 'black & white':
+      return {
+        config: { ...base, grayscale: true },
+        label: 'Blanco y Negro',
+        compatible: true,
+      };
+    default:
+      return {
+        label: String(adj.type || 'Ajuste Photoshop'),
+        compatible: false,
+      };
+  }
+}
+
+function compositeRgbaOver(dst: Uint8ClampedArray, src: Uint8ClampedArray, opacity: number): void {
+  const len = Math.min(dst.length, src.length);
+  for (let i = 0; i < len; i += 4) {
+    const sa = (src[i + 3] / 255) * opacity;
+    if (sa <= 0.001) continue;
+    const da = dst[i + 3] / 255;
+    const outA = sa + da * (1 - sa);
+    if (outA <= 0.001) continue;
+    dst[i] = Math.round((src[i] * sa + dst[i] * da * (1 - sa)) / outA);
+    dst[i + 1] = Math.round((src[i + 1] * sa + dst[i + 1] * da * (1 - sa)) / outA);
+    dst[i + 2] = Math.round((src[i + 2] * sa + dst[i + 2] * da * (1 - sa)) / outA);
+    dst[i + 3] = Math.round(outA * 255);
+  }
+}
+
+function formatPsdReadError(
+  err: unknown,
+  file: File,
+  header: PsdHeaderInspection
+): FileLoadError {
+  const rawMsg = err instanceof Error ? err.message : String(err || 'Error desconocido al analizar PSD');
+  const lower = rawMsg.toLowerCase();
+
+  let code = 'PSD_IMPORT_109';
+  let userMsg = `No se pudo decodificar la estructura interna del archivo PSD (${rawMsg}).`;
+  let incompatibleElement = 'Estructura binaria PSD';
+
+  if (lower.includes('invalid signature') || lower.includes('not a psd')) {
+    code = 'PSD_IMPORT_101';
+    userMsg = 'Cabecera o sección interna PSD corrupta (firma binaria "8BPS"/"8BIM" inválida).';
+    incompatibleElement = 'Cabecera o firma de bloque PSD';
+  } else if (lower.includes('color mode') || lower.includes('channel')) {
+    code = 'PSD_IMPORT_103';
+    userMsg = `Modo de color o canal no compatible directamente (${header.colorModeLabel}, ${header.bitsPerChannel} bits).`;
+    incompatibleElement = `Modo de color ${header.colorModeLabel} (${header.bitsPerChannel} bits)`;
+  } else if (lower.includes('bit') || lower.includes('compression') || lower.includes('zip') || lower.includes('rle')) {
+    code = 'PSD_IMPORT_103';
+    userMsg = `Compresión de capa o profundidad de bits no compatible (${rawMsg}).`;
+    incompatibleElement = `Compresión / ${header.bitsPerChannel}-bit por canal`;
+  } else if (lower.includes('memory') || lower.includes('limit') || lower.includes('size') || lower.includes('bounds')) {
+    code = 'PSD_IMPORT_104';
+    userMsg = `El tamaño de capa o consumo de memoria del PSD excede el límite seguro (${rawMsg}).`;
+    incompatibleElement = `${header.width}×${header.height} px / Límites de capa`;
+  } else if (lower.includes('end of file') || lower.includes('offset is outside') || lower.includes('rangeerror')) {
+    code = 'PSD_IMPORT_101';
+    userMsg = 'El archivo PSD está truncado o incompleto (se alcanzó el final antes de terminar de leer las capas).';
+    incompatibleElement = 'Flujo binario incompleto (EOF inesperado)';
+  } else if (lower.includes('layer') || lower.includes('mask') || lower.includes('resource')) {
+    code = 'PSD_IMPORT_102';
+    userMsg = `Elemento de capa o recurso incompatible dentro del PSD (${rawMsg}).`;
+    incompatibleElement = 'Metadatos de capa / recursos Photoshop';
+  }
+
+  return new FileLoadError(userMsg, file.name, 'Photoshop (.PSD)', err instanceof Error ? err.stack || rawMsg : rawMsg, {
+    errorCode: code,
+    moduleName: 'PSD Importer',
+    fileSizeBytes: file.size,
+    psdVersion: header.psdVersionLabel,
+    incompatibleElement,
+    canOfferPsdRecovery: header.isPsdSignature,
+  });
+}
+
+export async function importPsd(
+  file: File,
+  options?: { recoveryMode?: PsdRecoveryMode }
+): Promise<ImportResult> {
+  const recoveryMode: PsdRecoveryMode = options?.recoveryMode || 'normal';
+  const buffer = await file.arrayBuffer();
+  const header = inspectPsdHeader(buffer);
+
+  if (!header.isPsdSignature || !header.headerValid) {
+    throw new FileLoadError(
+      header.headerError || 'El archivo no tiene una cabecera PSD/PSB ("8BPS") válida.',
+      file.name,
+      'Photoshop (.PSD)',
+      `Signature=${header.signatureText} Version=${header.versionNumber} Size=${header.width}x${header.height} Depth=${header.bitsPerChannel} ColorMode=${header.colorModeLabel}`,
+      {
+        errorCode: 'PSD_IMPORT_101',
+        moduleName: 'PSD Importer',
+        fileSizeBytes: file.size,
+        psdVersion: header.psdVersionLabel,
+        incompatibleElement: header.headerError || 'Cabecera PSD inválida',
+        canOfferPsdRecovery: false,
+      }
+    );
+  }
+
+  const readPasses: AgPsdReadOptions[] =
+    recoveryMode === 'merged_composite'
+      ? [
+          {
+            useImageData: true,
+            skipLayerImageData: true,
+            skipThumbnail: true,
+            skipLinkedFilesData: true,
+          },
+          {
+            useImageData: true,
+            useRawData: true,
+            skipCompositeImageData: true,
+            skipThumbnail: true,
+            skipLinkedFilesData: true,
+            imageResourcesWhitelist: ['resolutionInfo', 'alphaChannelNames', 'transparencyIndex'],
+          },
+        ]
+      : [
+          {
+            useImageData: true,
+            useRawData: true,
+            skipCompositeImageData: false,
+            skipThumbnail: true,
+            skipLinkedFilesData: true,
+          },
+          {
+            useImageData: true,
+            useRawData: true,
+            skipCompositeImageData: false,
+            skipThumbnail: true,
+            skipLinkedFilesData: true,
+            imageResourcesWhitelist: ['resolutionInfo', 'alphaChannelNames', 'transparencyIndex'],
+          },
+          {
+            useImageData: true,
+            useRawData: true,
+            skipCompositeImageData: true,
+            skipThumbnail: true,
+            skipLinkedFilesData: true,
+            imageResourcesWhitelist: [],
+          },
+        ];
+
+  let psd: AgPsd | null = null;
+  let lastParseError: unknown = null;
+  let strippedResourcesFallback = false;
+
+  for (let passIdx = 0; passIdx < readPasses.length; passIdx++) {
+    try {
+      psd = readPsd(buffer, readPasses[passIdx]);
+      if (passIdx > 0 && recoveryMode !== 'merged_composite') {
+        strippedResourcesFallback = true;
+      }
+      break;
+    } catch (err) {
+      lastParseError = err;
+    }
+  }
+
+  if (!psd) {
+    throw formatPsdReadError(lastParseError, file, header);
+  }
+
+  const width = psd.width || header.width;
+  const height = psd.height || header.height;
+  if (!width || !height || width <= 0 || height <= 0) {
+    throw new FileLoadError(
+      'El archivo PSD no contiene dimensiones válidas.',
+      file.name,
+      'Photoshop (.PSD)',
+      `Parsed dimensions: ${width}x${height}`,
+      {
+        errorCode: 'PSD_IMPORT_101',
+        moduleName: 'PSD Importer',
+        fileSizeBytes: file.size,
+        psdVersion: header.psdVersionLabel,
+        incompatibleElement: 'Dimensiones 0×0',
+        canOfferPsdRecovery: false,
+      }
+    );
+  }
+
+  const dpi = extractPsdDpi(psd);
+  const sourceSoftware = detectPsdSourceSoftware(psd.imageResources);
+  const useTiled = shouldUseTiledStorage(width, height);
+  const stamp = Date.now();
+  const baseDocName = file.name.replace(/\.[^/.]+$/, '');
+
+  // Helper to convert raw RGBA + optional mask plane into a PixelClash Layer
+  const makeRasterLayerFromBuffer = (
+    id: string,
+    name: string,
+    rgba: Uint8ClampedArray,
+    opts: {
+      visible: boolean;
+      locked: boolean;
+      opacity: number;
+      blendMode: LayerBlendMode;
+      groupId?: string | null;
+      clippingMask?: boolean;
+      layerType?: Layer['layerType'];
+      smartSourceName?: string;
+      maskInfo?: ReturnType<typeof buildCombinedPsdMaskPlane>;
+    }
+  ): Layer => {
+    if (useTiled) {
+      const store = new TiledLayerStore(width, height);
+      const bufferToLoad = new Uint8ClampedArray(rgba);
+      if (opts.maskInfo?.plane && !opts.maskInfo.disabled) {
+        const mPlane = opts.maskInfo.plane;
+        for (let p = 0; p < mPlane.length; p++) {
+          bufferToLoad[p * 4 + 3] = Math.round((bufferToLoad[p * 4 + 3] * mPlane[p]) / 255);
+        }
+      }
+      store.loadFromRgbaBuffer(bufferToLoad, width, height);
+      const tiledStoreId = registerTiledStore(store);
+      return {
+        id,
+        name,
+        visible: opts.visible,
+        locked: opts.locked,
+        opacity: opts.opacity,
+        fillOpacity: 1,
+        blendMode: opts.blendMode,
+        clippingMask: opts.clippingMask,
+        layerType: opts.layerType || 'raster',
+        smartSourceName: opts.smartSourceName,
+        groupId: opts.groupId ?? null,
+        pixels: [],
+        tiledStoreId,
+        tiledRevision: 1,
+      };
+    }
+
+    const { grid } = rgbaBufferToPixelGrid(rgba, width, height);
+    const layerMask =
+      opts.maskInfo?.plane
+        ? maskPlaneToLayerMask(
+            opts.maskInfo.plane,
+            width,
+            height,
+            opts.maskInfo.disabled,
+            opts.maskInfo.isVectorMask
+          )
+        : null;
+
+    return {
+      id,
+      name,
+      visible: opts.visible,
+      locked: opts.locked,
+      opacity: opts.opacity,
+      fillOpacity: 1,
+      blendMode: opts.blendMode,
+      clippingMask: opts.clippingMask,
+      mask: layerMask,
+      layerType: opts.layerType || 'raster',
+      smartSourceName: opts.smartSourceName,
+      groupId: opts.groupId ?? null,
+      pixels: grid,
+    };
+  };
+
+  // Compatibility telemetry counters
+  let totalSourceLayers = 0;
+  let importedLayers = 0;
+  let importedGroups = 0;
+  let skippedLayers = 0;
+  let rasterizedLayers = 0;
+  let hasAnyTransparency = false;
+  let hasAdvancedMasks = false;
+  let smartObjectsFound = 0;
+  let smartObjectsRasterized = 0;
+  let adjustmentsCompatible = 0;
+  let adjustmentsUnsupported = 0;
+  let textLayersFound = 0;
+  let effectsLayersFound = 0;
+  let failedLayerDecodes = 0;
+  let firstIncompatibleElement: string | undefined;
+  const unsupportedBlendModes = new Set<string>();
+  const extraNotes: string[] = [];
+
+  if (strippedResourcesFallback) {
+    extraNotes.push('Metadatos auxiliares (ICC/XMP) omitidos para evitar errores de análisis.');
+  }
+
+  // =========================================================================
+  // RECOVERY MODE: MERGED COMPOSITE ("Abrir imagen fusionada")
+  // =========================================================================
+  if (recoveryMode === 'merged_composite') {
+    let compositeRgba: Uint8ClampedArray | null = null;
+
+    let compImageData = psd.imageData;
+    if (!compImageData && psd.rawCompositeData && psd.rawCompositeDataInfo) {
+      try {
+        compImageData = getCompositeImageData(psd);
+      } catch {
+        compImageData = undefined;
+      }
+    }
+    if (compImageData && compImageData.width > 0 && compImageData.height > 0) {
+      const converted = pixelDataToUint8ClampedRgba(compImageData);
+      if (compImageData.width === width && compImageData.height === height) {
+        compositeRgba = converted;
+      }
+    }
+
+    // Fallback: flatten decodable visible layers if PSD was saved without composite image
+    if (!compositeRgba && psd.children && psd.children.length > 0) {
+      const flat = new Uint8ClampedArray(width * height * 4);
+      const flattenChildren = (list: AgPsdLayer[]) => {
+        for (const child of list) {
+          if (child.hidden) continue;
+          if (child.children) {
+            flattenChildren(child.children);
+            continue;
+          }
+          totalSourceLayers++;
+          try {
+            if (child.rawData) decodeLayerPixels(child, true);
+            const built = buildCanvasRgbaBufferFromPsdLayer(child, width, height);
+            if (built) {
+              const maskInfo = buildCombinedPsdMaskPlane(child, width, height);
+              if (maskInfo.plane && !maskInfo.disabled) {
+                for (let p = 0; p < maskInfo.plane.length; p++) {
+                  built.rgba[p * 4 + 3] = Math.round((built.rgba[p * 4 + 3] * maskInfo.plane[p]) / 255);
+                }
+              }
+              compositeRgbaOver(flat, built.rgba, child.opacity ?? 1);
+            }
+          } catch {
+            skippedLayers++;
+          }
+        }
+      };
+      flattenChildren(psd.children);
+      compositeRgba = flat;
+    }
+
+    if (!compositeRgba) {
+      throw new FileLoadError(
+        'El archivo PSD no incluye una vista previa compuesta válida y ninguna capa pudo acoplarse.',
+        file.name,
+        'Photoshop (.PSD)',
+        undefined,
+        {
+          errorCode: 'PSD_IMPORT_105',
+          moduleName: 'PSD Importer',
+          fileSizeBytes: file.size,
+          psdVersion: header.psdVersionLabel,
+          incompatibleElement: 'Sin imagen compuesta ni capas válidas',
+          canOfferPsdRecovery: true,
+        }
+      );
+    }
+
+    const mergedLayer = makeRasterLayerFromBuffer(
+      `layer-psd-merged-${stamp}`,
+      'Imagen Fusionada (PSD)',
+      compositeRgba,
+      {
+        visible: true,
+        locked: false,
+        opacity: 1,
+        blendMode: 'normal',
+      }
+    );
+
+    const report: PsdCompatibilityReport = {
+      fileName: file.name,
+      sourceSoftware,
+      psdVersion: header.psdVersionLabel,
+      colorModeLabel: header.colorModeLabel,
+      bitsPerChannel: header.bitsPerChannel,
+      width,
+      height,
+      dpi,
+      totalSourceLayers: Math.max(1, totalSourceLayers),
+      importedLayers: 1,
+      importedGroups: 0,
+      skippedLayers,
+      rasterizedLayers: 1,
+      recoveryModeUsed: 'merged_composite',
+      hasWarnings: true,
+      items: [
+        { key: 'layers', label: 'Capas', status: 'partial', detail: 'Acopladas en imagen fusionada' },
+        { key: 'groups', label: 'Grupos', status: 'partial', detail: 'Aplanados en modo recuperación' },
+        { key: 'transparency', label: 'Transparencia', status: 'compatible', detail: 'Preservada' },
+        { key: 'masks', label: 'Máscaras avanzadas', status: 'partial', detail: 'Aplicadas al compuesto' },
+        { key: 'smart_objects', label: 'Objetos inteligentes', status: 'partial', detail: 'Rasterizados en vista fusionada' },
+        { key: 'adjustments', label: 'Ajustes Photoshop', status: 'partial', detail: 'Horneados en vista fusionada' },
+      ],
+      notes: ['Abierto mediante modo de recuperación: Imagen Fusionada.'],
+    };
+
+    return validateImportResult(
+      {
+        name: baseDocName,
+        width,
+        height,
+        dpi,
+        layerGroups: [],
+        frames: [
+          {
+            id: `frame-psd-${stamp}`,
+            name: 'Fotograma #1',
+            durationTicks: 4,
+            phase: 'neutral',
+            layers: [mergedLayer],
+            hitboxes: [],
+          },
+        ],
+        psdCompatibilityReport: report,
+        usedRecoveryMode: 'merged_composite',
+        stats: {
+          formatLabel: `${header.isPsb ? 'PSB' : 'PSD'} Fusionado`,
+          fileFormat: 'psd',
+          frameCount: 1,
+          layerCount: 1,
+          nonEmptyPixelCount: 0,
+          hasTransparency: true,
+          isAnimated: false,
+          originalWidth: width,
+          originalHeight: height,
+          dpi,
+          usesTiledEngine: useTiled,
+        },
+      },
+      file.name,
+      header.isPsb ? 'PSB Fusionado' : 'PSD Fusionado'
+    );
+  }
+
+  // =========================================================================
+  // FRAME FOLDERS ANIMATION DETECTION ([Frame #N])
+  // =========================================================================
   const hasFrameFolders =
     psd.children &&
     psd.children.length > 0 &&
@@ -2348,36 +3065,197 @@ export async function importPsd(file: File): Promise<ImportResult> {
       (c) => Array.isArray(c.children) && c.children.length > 0 && /^\[Frame #\d+\]/i.test(c.name || '')
     );
 
+  const decodeSinglePsdChild = (
+    child: AgPsdLayer,
+    idxSeed: number,
+    parentGroupId: string | null
+  ): Layer | null => {
+    totalSourceLayers++;
+
+    if (recoveryMode === 'visible_only' && child.hidden) {
+      skippedLayers++;
+      return null;
+    }
+
+    const isSmart = Boolean(child.placedLayer);
+    const isText = Boolean(child.text);
+    const isVector = Boolean(child.vectorMask || child.vectorFill || child.vectorStroke);
+    const isAdjustment = Boolean(child.adjustment);
+    const hasEffects = Boolean(child.effects && !child.effects.disabled);
+
+    if (isSmart) smartObjectsFound++;
+    if (isText) textLayersFound++;
+    if (hasEffects) effectsLayersFound++;
+
+    const blendMapped = mapPsdBlendMode(child.blendMode);
+    if (!blendMapped.supported && child.blendMode) {
+      unsupportedBlendModes.add(child.blendMode);
+    }
+
+    // Adjustment layer handling
+    if (isAdjustment && child.adjustment) {
+      const adjInfo = mapPsdAdjustmentToConfig(child.adjustment);
+      if (adjInfo.compatible && adjInfo.config && recoveryMode !== 'rasterize_incompatible') {
+        adjustmentsCompatible++;
+        // Check if mask is present on the adjustment layer
+        try {
+          if (child.rawData) decodeLayerPixels(child, true);
+        } catch {
+          // Adjustment mask failed, still try base adjustment
+        }
+        const maskInfo = buildCombinedPsdMaskPlane(child, width, height);
+        if (maskInfo.hasAdvancedMask) hasAdvancedMasks = true;
+        const maskObj =
+          maskInfo.plane && !useTiled
+            ? maskPlaneToLayerMask(
+                maskInfo.plane,
+                width,
+                height,
+                maskInfo.disabled,
+                maskInfo.isVectorMask
+              )
+            : null;
+        importedLayers++;
+        return {
+          id: `layer-psd-adj-${stamp}-${idxSeed}-${Math.random().toString(36).slice(2, 6)}`,
+          name: child.name || `Ajuste (${adjInfo.label})`,
+          visible: !child.hidden,
+          locked: Boolean(child.transparencyProtected),
+          opacity: child.opacity !== undefined ? child.opacity : 1,
+          fillOpacity: child.fillOpacity !== undefined ? child.fillOpacity : 1,
+          blendMode: blendMapped.blendMode,
+          clippingMask: Boolean(child.clipping),
+          mask: maskObj,
+          layerType: 'adjustment',
+          adjustment: adjInfo.config,
+          groupId: parentGroupId,
+          pixels: createEmptyGrid(width, height),
+        };
+      }
+
+      // Unsupported Photoshop adjustment or rasterize_incompatible requested
+      adjustmentsUnsupported++;
+      firstIncompatibleElement = firstIncompatibleElement || `Capa de ajuste "${adjInfo.label}"`;
+      if (recoveryMode === 'ignore_incompatible') {
+        skippedLayers++;
+        return null;
+      }
+      // Try decoding cached pixels if Photoshop/Krita embedded them
+      try {
+        if (child.rawData) decodeLayerPixels(child, true);
+        const built = buildCanvasRgbaBufferFromPsdLayer(child, width, height);
+        if (built && built.hasPixels) {
+          rasterizedLayers++;
+          importedLayers++;
+          if (built.hasTransparency) hasAnyTransparency = true;
+          const maskInfo = buildCombinedPsdMaskPlane(child, width, height);
+          if (maskInfo.hasAdvancedMask) hasAdvancedMasks = true;
+          return makeRasterLayerFromBuffer(
+            `layer-psd-adjr-${stamp}-${idxSeed}-${Math.random().toString(36).slice(2, 6)}`,
+            `${child.name || adjInfo.label} (Rasterizado)`,
+            built.rgba,
+            {
+              visible: !child.hidden,
+              locked: Boolean(child.transparencyProtected),
+              opacity: child.opacity !== undefined ? child.opacity : 1,
+              blendMode: blendMapped.blendMode,
+              groupId: parentGroupId,
+              clippingMask: Boolean(child.clipping),
+              layerType: 'raster',
+              maskInfo,
+            }
+          );
+        }
+      } catch {
+        // Ignore adjustment decode failure
+      }
+      skippedLayers++;
+      return null;
+    }
+
+    // Decode raster channels (normal raster, smart object cached bitmap, text cached bitmap, vector cached bitmap)
+    try {
+      if (child.rawData) {
+        decodeLayerPixels(child, true);
+      }
+    } catch (decodeErr: unknown) {
+      failedLayerDecodes++;
+      const msg = decodeErr instanceof Error ? decodeErr.message : String(decodeErr);
+      firstIncompatibleElement =
+        firstIncompatibleElement || `Capa "${child.name || 'Sin nombre'}" (${msg})`;
+
+      if (recoveryMode === 'ignore_incompatible' || recoveryMode === 'rasterize_incompatible' || recoveryMode === 'normal') {
+        skippedLayers++;
+        extraNotes.push(`Se omitió la capa "${child.name || `Capa ${idxSeed + 1}`}" por error de decodificación (${msg}).`);
+        return null;
+      }
+    }
+
+    const maskInfo = buildCombinedPsdMaskPlane(child, width, height);
+    if (maskInfo.hasAdvancedMask) {
+      hasAdvancedMasks = true;
+    }
+
+    const built = buildCanvasRgbaBufferFromPsdLayer(child, width, height);
+    if (!built) {
+      // Empty raster / vector-without-cache / smart-without-cache
+      if (isSmart || isVector || isText) {
+        firstIncompatibleElement =
+          firstIncompatibleElement ||
+          `${isSmart ? 'Objeto inteligente' : isText ? 'Capa de texto' : 'Capa vectorial'} "${child.name || 'Sin nombre'}" sin caché ráster`;
+      }
+      skippedLayers++;
+      return null;
+    }
+
+    if (built.hasTransparency) hasAnyTransparency = true;
+    if (isSmart) {
+      smartObjectsRasterized++;
+      rasterizedLayers++;
+    } else if (isText || isVector) {
+      rasterizedLayers++;
+    }
+
+    importedLayers++;
+    const resolvedLayerType: Layer['layerType'] =
+      recoveryMode === 'rasterize_incompatible'
+        ? 'raster'
+        : isSmart
+        ? 'smart'
+        : 'raster';
+
+    return makeRasterLayerFromBuffer(
+      `layer-psd-${stamp}-${idxSeed}-${Math.random().toString(36).slice(2, 7)}`,
+      child.name || 'Capa PSD',
+      built.rgba,
+      {
+        visible: !child.hidden,
+        locked: Boolean(child.transparencyProtected),
+        opacity: child.opacity !== undefined ? child.opacity : 1,
+        blendMode: blendMapped.blendMode,
+        groupId: parentGroupId,
+        clippingMask: Boolean(child.clipping),
+        layerType: resolvedLayerType,
+        smartSourceName: isSmart ? child.name || 'Smart Object PSD' : undefined,
+        maskInfo,
+      }
+    );
+  };
+
   if (hasFrameFolders && psd.children) {
     const importedFrames: Frame[] = [];
     psd.children.forEach((folder, fIdx) => {
       if (!folder.children || folder.children.length === 0) return;
+      if (recoveryMode === 'visible_only' && folder.hidden) return;
       const frameLayers: Layer[] = [];
-      for (const child of folder.children) {
-        if (child.canvas) {
-          frameLayers.push({
-            id: `layer-psd-${fIdx}-${Math.random().toString(36).slice(2, 7)}`,
-            name: child.name || 'Capa PSD',
-            visible: !child.hidden,
-            locked: !!child.transparencyProtected,
-            opacity: child.opacity !== undefined ? child.opacity : 1,
-            fillOpacity: 1,
-            blendMode: mapPsdBlendMode(child.blendMode),
-            layerType: 'raster',
-            pixels: psdLayerCanvasToGrid(
-              child.canvas,
-              width,
-              height,
-              child.left || 0,
-              child.top || 0
-            ),
-          });
-        }
-      }
+      folder.children.forEach((child, cIdx) => {
+        const layer = decodeSinglePsdChild(child, fIdx * 1000 + cIdx, null);
+        if (layer) frameLayers.push(layer);
+      });
       if (frameLayers.length > 0) {
         const cleanName = (folder.name || `Frame ${fIdx + 1}`).replace(/^\[Frame #\d+\]\s*/i, '');
         importedFrames.push({
-          id: `frame-psd-${Date.now()}-${fIdx}`,
+          id: `frame-psd-${stamp}-${fIdx}`,
           name: cleanName || `Fotograma ${fIdx + 1}`,
           durationTicks: 4,
           phase: 'neutral',
@@ -2388,24 +3266,56 @@ export async function importPsd(file: File): Promise<ImportResult> {
     });
 
     if (importedFrames.length > 0) {
+      const report = buildPsdCompatibilityReport({
+        fileName: file.name,
+        sourceSoftware,
+        header,
+        width,
+        height,
+        dpi,
+        totalSourceLayers,
+        importedLayers,
+        importedGroups: 0,
+        skippedLayers,
+        rasterizedLayers,
+        hasAnyTransparency,
+        hasAdvancedMasks,
+        smartObjectsFound,
+        smartObjectsRasterized,
+        adjustmentsCompatible,
+        adjustmentsUnsupported,
+        textLayersFound,
+        effectsLayersFound,
+        unsupportedBlendModes: Array.from(unsupportedBlendModes),
+        recoveryMode,
+        notes: extraNotes,
+      });
+
       return validateImportResult(
         {
-          name: file.name.replace(/\.[^/.]+$/, ''),
+          name: baseDocName,
           width,
           height,
+          dpi,
           frames: importedFrames,
+          psdCompatibilityReport: report,
+          usedRecoveryMode: recoveryMode,
           stats: {
-            formatLabel: 'Photoshop (.PSD)',
+            formatLabel: `${header.isPsb ? 'PSB' : 'Photoshop'} (.PSD)`,
             fileFormat: 'psd',
             frameCount: importedFrames.length,
             layerCount: importedFrames[0].layers.length,
             nonEmptyPixelCount: 0,
             hasTransparency: true,
             isAnimated: importedFrames.length > 1,
+            originalWidth: width,
+            originalHeight: height,
+            dpi,
+            usesTiledEngine: useTiled,
           },
         },
         file.name,
-        'PSD'
+        header.isPsb ? 'Photoshop (.PSB)' : 'Photoshop (.PSD)'
       );
     }
   }
@@ -2413,82 +3323,125 @@ export async function importPsd(file: File): Promise<ImportResult> {
   const layers: Layer[] = [];
   const layerGroups: LayerGroup[] = [];
   const groupColors = ['#3b82f6', '#a855f7', '#10b981', '#f59e0b', '#ec4899'];
+  let layerSeq = 0;
 
-  const collectPsdLayers = (children: typeof psd.children, parentGroupId: string | null = null) => {
+  const collectPsdLayers = (children: AgPsdLayer[] | undefined, parentGroupId: string | null = null) => {
     if (!children) return;
     for (const child of children) {
-      if (child.children && child.children.length > 0) {
-        const grpId = `group-psd-${layerGroups.length}-${Date.now()}`;
+      if (child.children !== undefined) {
+        if (recoveryMode === 'visible_only' && child.hidden) {
+          skippedLayers++;
+          continue;
+        }
+        const grpId = `group-psd-${layerGroups.length}-${stamp}`;
+        const grpBlend = mapPsdBlendMode(child.blendMode);
+        if (!grpBlend.supported && child.blendMode) {
+          unsupportedBlendModes.add(child.blendMode);
+        }
+        importedGroups++;
         layerGroups.push({
           id: grpId,
           name: child.name || `Grupo PSD ${layerGroups.length + 1}`,
           color: groupColors[layerGroups.length % groupColors.length],
           frameIndices: [0],
-          collapsed: !child.opened,
+          collapsed: child.opened === false,
           visible: !child.hidden,
-          locked: false,
+          locked: Boolean(child.transparencyProtected),
           opacity: child.opacity !== undefined ? child.opacity : 1,
-          blendMode: mapPsdBlendMode(child.blendMode),
+          blendMode: grpBlend.blendMode,
           parentGroupId,
         });
         collectPsdLayers(child.children, grpId);
-      } else if (child.canvas) {
-        layers.push({
-          id: `layer-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-          name: child.name || 'Capa PSD',
-          visible: !child.hidden,
-          locked: !!child.transparencyProtected,
-          opacity: child.opacity !== undefined ? child.opacity : 1,
-          fillOpacity: 1,
-          blendMode: mapPsdBlendMode(child.blendMode),
-          layerType: 'raster',
-          groupId: parentGroupId,
-          pixels: psdLayerCanvasToGrid(
-            child.canvas,
-            width,
-            height,
-            child.left || 0,
-            child.top || 0
-          ),
-        });
+      } else {
+        const layer = decodeSinglePsdChild(child, layerSeq++, parentGroupId);
+        if (layer) {
+          layers.push(layer);
+        }
       }
     }
   };
 
   collectPsdLayers(psd.children);
 
-  if (layers.length === 0 && psd.canvas) {
-    const grid = canvasToPixelGrid(psd.canvas, width, height);
-    layers.push({
-      id: 'layer-composite',
-      name: 'Photoshop Composite',
-      visible: true,
-      locked: false,
-      opacity: 1,
-      fillOpacity: 1,
-      blendMode: 'normal',
-      layerType: 'raster',
-      pixels: grid,
-    });
+  // Fallback to merged composite image if no individual layers were usable
+  if (layers.length === 0) {
+    let compImageData = psd.imageData;
+    if (!compImageData && psd.rawCompositeData && psd.rawCompositeDataInfo) {
+      try {
+        compImageData = getCompositeImageData(psd);
+      } catch {
+        compImageData = undefined;
+      }
+    }
+    if (compImageData && compImageData.width === width && compImageData.height === height) {
+      const compRgba = pixelDataToUint8ClampedRgba(compImageData);
+      layers.push(
+        makeRasterLayerFromBuffer(`layer-psd-comp-${stamp}`, 'Imagen Compuesta (PSD)', compRgba, {
+          visible: true,
+          locked: false,
+          opacity: 1,
+          blendMode: 'normal',
+        })
+      );
+      importedLayers = 1;
+      extraNotes.push('No se detectaron capas individuales con contenido; se cargó la vista compuesta del PSD.');
+    }
   }
 
   if (layers.length === 0) {
     throw new FileLoadError(
-      'El archivo PSD no contiene capas de imagen ni vista compuesta decodificable.',
+      failedLayerDecodes > 0
+        ? `No se pudo decodificar ninguna capa del PSD (${failedLayerDecodes} capa(s) con error de compresión o formato).`
+        : 'El archivo PSD no contiene capas con píxeles ni imagen compuesta decodificable.',
       file.name,
-      'PSD'
+      'Photoshop (.PSD)',
+      firstIncompatibleElement,
+      {
+        errorCode: failedLayerDecodes > 0 ? 'PSD_IMPORT_102' : 'PSD_IMPORT_105',
+        moduleName: 'PSD Importer',
+        fileSizeBytes: file.size,
+        psdVersion: header.psdVersionLabel,
+        incompatibleElement: firstIncompatibleElement || 'Sin capas ráster decodificables',
+        canOfferPsdRecovery: true,
+      }
     );
   }
 
+  const report = buildPsdCompatibilityReport({
+    fileName: file.name,
+    sourceSoftware,
+    header,
+    width,
+    height,
+    dpi,
+    totalSourceLayers: Math.max(totalSourceLayers, importedLayers),
+    importedLayers,
+    importedGroups,
+    skippedLayers,
+    rasterizedLayers,
+    hasAnyTransparency,
+    hasAdvancedMasks,
+    smartObjectsFound,
+    smartObjectsRasterized,
+    adjustmentsCompatible,
+    adjustmentsUnsupported,
+    textLayersFound,
+    effectsLayersFound,
+    unsupportedBlendModes: Array.from(unsupportedBlendModes),
+    recoveryMode,
+    notes: extraNotes,
+  });
+
   return validateImportResult(
     {
-      name: file.name.replace(/\.[^/.]+$/, ''),
+      name: baseDocName,
       width,
       height,
+      dpi,
       layerGroups,
       frames: [
         {
-          id: `frame-${Date.now()}`,
+          id: `frame-psd-${stamp}`,
           name: 'Fotograma #1',
           durationTicks: 4,
           phase: 'neutral',
@@ -2496,19 +3449,158 @@ export async function importPsd(file: File): Promise<ImportResult> {
           hitboxes: [],
         },
       ],
+      psdCompatibilityReport: report,
+      usedRecoveryMode: recoveryMode,
       stats: {
-        formatLabel: 'Photoshop (.PSD)',
+        formatLabel: header.isPsb ? 'Photoshop (.PSB)' : 'Photoshop (.PSD)',
         fileFormat: 'psd',
         frameCount: 1,
         layerCount: layers.length,
         nonEmptyPixelCount: 0,
-        hasTransparency: true,
+        hasTransparency: hasAnyTransparency || true,
         isAnimated: false,
+        originalWidth: width,
+        originalHeight: height,
+        dpi,
+        usesTiledEngine: useTiled,
       },
     },
     file.name,
-    'PSD'
+    header.isPsb ? 'Photoshop (.PSB)' : 'Photoshop (.PSD)'
   );
+}
+
+function buildPsdCompatibilityReport(input: {
+  fileName: string;
+  sourceSoftware: string;
+  header: PsdHeaderInspection;
+  width: number;
+  height: number;
+  dpi: number;
+  totalSourceLayers: number;
+  importedLayers: number;
+  importedGroups: number;
+  skippedLayers: number;
+  rasterizedLayers: number;
+  hasAnyTransparency: boolean;
+  hasAdvancedMasks: boolean;
+  smartObjectsFound: number;
+  smartObjectsRasterized: number;
+  adjustmentsCompatible: number;
+  adjustmentsUnsupported: number;
+  textLayersFound: number;
+  effectsLayersFound: number;
+  unsupportedBlendModes: string[];
+  recoveryMode: PsdRecoveryMode;
+  notes: string[];
+}): PsdCompatibilityReport {
+  const items: PsdCompatibilityCheckItem[] = [
+    {
+      key: 'layers',
+      label: 'Capas',
+      status: input.skippedLayers > 0 ? 'partial' : 'compatible',
+      detail:
+        input.skippedLayers > 0
+          ? `${input.importedLayers} importadas, ${input.skippedLayers} omitidas`
+          : `${input.importedLayers} capa(s) importadas 1:1`,
+    },
+    {
+      key: 'groups',
+      label: 'Grupos',
+      status: 'compatible',
+      detail:
+        input.importedGroups > 0
+          ? `${input.importedGroups} carpeta(s) / grupo(s) preservados`
+          : 'Sin carpetas de grupo',
+    },
+    {
+      key: 'transparency',
+      label: 'Transparencia',
+      status: 'compatible',
+      detail: input.hasAnyTransparency ? 'Canal alfa RGBA intacto (sin pérdida premultiplicada)' : 'Opacidad 100% preservada',
+    },
+    {
+      key: 'masks',
+      label: 'Máscaras avanzadas',
+      status: input.hasAdvancedMasks ? 'warning' : 'compatible',
+      detail: input.hasAdvancedMasks
+        ? 'Máscaras ráster importadas (pluma/vector complejo convertido)'
+        : 'Compatible',
+    },
+    {
+      key: 'smart_objects',
+      label: 'Objetos inteligentes',
+      status: input.smartObjectsFound > 0 ? 'warning' : 'compatible',
+      detail:
+        input.smartObjectsFound > 0
+          ? `${input.smartObjectsRasterized}/${input.smartObjectsFound} rasterizados desde caché PSD`
+          : 'Sin objetos inteligentes',
+    },
+    {
+      key: 'adjustments',
+      label: 'Ajustes Photoshop',
+      status:
+        input.adjustmentsUnsupported > 0
+          ? 'warning'
+          : input.adjustmentsCompatible > 0
+          ? 'partial'
+          : 'compatible',
+      detail:
+        input.adjustmentsUnsupported > 0
+          ? `${input.adjustmentsCompatible} nativo(s), ${input.adjustmentsUnsupported} exclusivo(s) de Photoshop`
+          : input.adjustmentsCompatible > 0
+          ? `${input.adjustmentsCompatible} ajuste(s) convertido(s)`
+          : 'Sin capas de ajuste incompatibles',
+    },
+  ];
+
+  const notes = [...input.notes];
+  if (input.textLayersFound > 0) {
+    notes.push(`${input.textLayersFound} capa(s) de texto rasterizada(s) preservando su apariencia exacta.`);
+  }
+  if (input.effectsLayersFound > 0) {
+    notes.push(`${input.effectsLayersFound} capa(s) contienen estilos/efectos de Photoshop (solo el contenido ráster base se importa).`);
+  }
+  if (input.unsupportedBlendModes.length > 0) {
+    notes.push(`Modos de fusión convertidos a Normal: ${input.unsupportedBlendModes.join(', ')}.`);
+  }
+  if (input.header.colorModeCode === 4) {
+    notes.push('Documento CMYK convertido automáticamente a sRGB preservando dimensiones exactas.');
+  }
+  if (input.header.bitsPerChannel > 8) {
+    notes.push(`Canal de ${input.header.bitsPerChannel} bits normalizado a 8-bit por componente sin reescalado.`);
+  }
+
+  const hasWarnings =
+    input.recoveryMode !== 'normal' ||
+    input.skippedLayers > 0 ||
+    input.hasAdvancedMasks ||
+    input.smartObjectsFound > 0 ||
+    input.adjustmentsUnsupported > 0 ||
+    input.textLayersFound > 0 ||
+    input.effectsLayersFound > 0 ||
+    input.unsupportedBlendModes.length > 0 ||
+    notes.length > 0;
+
+  return {
+    fileName: input.fileName,
+    sourceSoftware: input.sourceSoftware,
+    psdVersion: input.header.psdVersionLabel,
+    colorModeLabel: input.header.colorModeLabel,
+    bitsPerChannel: input.header.bitsPerChannel,
+    width: input.width,
+    height: input.height,
+    dpi: input.dpi,
+    totalSourceLayers: input.totalSourceLayers,
+    importedLayers: input.importedLayers,
+    importedGroups: input.importedGroups,
+    skippedLayers: input.skippedLayers,
+    rasterizedLayers: input.rasterizedLayers,
+    recoveryModeUsed: input.recoveryMode,
+    hasWarnings,
+    items,
+    notes,
+  };
 }
 
 // =========================================================================
@@ -2560,7 +3652,12 @@ export async function importAseprite(file: File): Promise<ImportResult> {
   const view = new DataView(buffer);
 
   if (buffer.byteLength < 128) {
-    throw new FileLoadError('Archivo Aseprite inválido o demasiado pequeño.', file.name, 'Aseprite');
+    throw new FileLoadError('Archivo Aseprite inválido o demasiado pequeño.', file.name, 'Aseprite', undefined, {
+      errorCode: 'ASE_IMPORT_201',
+      moduleName: 'Aseprite Importer',
+      fileSizeBytes: file.size,
+      incompatibleElement: 'Cabecera Aseprite truncada (<128 bytes)',
+    });
   }
 
   const magic = view.getUint16(4, true);
@@ -2568,7 +3665,14 @@ export async function importAseprite(file: File): Promise<ImportResult> {
     throw new FileLoadError(
       'Cabecera Aseprite no reconocida (el archivo puede estar dañado o tener otra extensión).',
       file.name,
-      'Aseprite'
+      'Aseprite',
+      `Magic=${magic.toString(16)}`,
+      {
+        errorCode: 'ASE_IMPORT_202',
+        moduleName: 'Aseprite Importer',
+        fileSizeBytes: file.size,
+        incompatibleElement: 'Firma mágica 0xA5E0 ausente',
+      }
     );
   }
 
@@ -2576,7 +3680,12 @@ export async function importAseprite(file: File): Promise<ImportResult> {
   const width = view.getUint16(8, true);
   const height = view.getUint16(10, true);
   if (width <= 0 || height <= 0) {
-    throw new FileLoadError('Dimensiones inválidas en archivo Aseprite.', file.name, 'Aseprite');
+    throw new FileLoadError('Dimensiones inválidas en archivo Aseprite.', file.name, 'Aseprite', undefined, {
+      errorCode: 'ASE_IMPORT_203',
+      moduleName: 'Aseprite Importer',
+      fileSizeBytes: file.size,
+      incompatibleElement: `Dimensiones ${width}×${height}`,
+    });
   }
 
   const colorDepth = view.getUint16(12, true); // 32=RGBA, 16=Grayscale, 8=Indexed
@@ -2922,7 +4031,14 @@ export async function importPcs(file: File): Promise<ImportResult> {
       throw new FileLoadError(
         'Archivo .pcs corrupto: falta el descriptor interno project.json.',
         file.name,
-        'PixelClash (.PCS)'
+        'PixelClash (.PCS)',
+        undefined,
+        {
+          errorCode: 'PCS_IMPORT_301',
+          moduleName: 'PCS Project Loader',
+          fileSizeBytes: file.size,
+          incompatibleElement: 'Entrada zip project.json ausente',
+        }
       );
     }
     projectJsonText = await projectEntry.async('string');
@@ -2938,7 +4054,13 @@ export async function importPcs(file: File): Promise<ImportResult> {
       'No se pudo analizar el contenido interno del archivo .pcs (JSON dañado).',
       file.name,
       'PixelClash (.PCS)',
-      err?.message
+      err?.message,
+      {
+        errorCode: 'PCS_IMPORT_302',
+        moduleName: 'PCS Project Loader',
+        fileSizeBytes: file.size,
+        incompatibleElement: 'Descriptor project.json malformado',
+      }
     );
   }
 
@@ -2946,7 +4068,14 @@ export async function importPcs(file: File): Promise<ImportResult> {
     throw new FileLoadError(
       'Estructura de proyecto .pcs inválida o sin fotogramas.',
       file.name,
-      'PixelClash (.PCS)'
+      'PixelClash (.PCS)',
+      undefined,
+      {
+        errorCode: 'PCS_IMPORT_303',
+        moduleName: 'PCS Project Loader',
+        fileSizeBytes: file.size,
+        incompatibleElement: 'Estructura frames[] / dimensiones inválidas',
+      }
     );
   }
 
@@ -2985,7 +4114,13 @@ export async function importProjectJson(file: File): Promise<ImportResult> {
       'El archivo JSON está dañado o no tiene sintaxis JSON válida.',
       file.name,
       'Proyecto JSON',
-      err?.message
+      err?.message,
+      {
+        errorCode: 'JSON_IMPORT_301',
+        moduleName: 'JSON Project Loader',
+        fileSizeBytes: file.size,
+        incompatibleElement: 'Sintaxis JSON inválida',
+      }
     );
   }
 
@@ -2993,7 +4128,14 @@ export async function importProjectJson(file: File): Promise<ImportResult> {
     throw new FileLoadError(
       'El archivo JSON no corresponde a un proyecto válido de PixelClash Studio (faltan dimensiones o fotogramas).',
       file.name,
-      'Proyecto JSON'
+      'Proyecto JSON',
+      undefined,
+      {
+        errorCode: 'JSON_IMPORT_302',
+        moduleName: 'JSON Project Loader',
+        fileSizeBytes: file.size,
+        incompatibleElement: 'Esquema de proyecto PixelClash incompleto',
+      }
     );
   }
 
@@ -3482,12 +4624,26 @@ export function validateImportResult(
 // UNIVERSAL UNIFIED FILE IMPORTER
 // Used across: Archivo -> Abrir, Abrir Recientes, Importar & Drag & Drop
 // =========================================================================
-export async function importGraphicFile(file: File): Promise<ImportResult> {
+export interface ImportGraphicFileOptions {
+  psdRecoveryMode?: PsdRecoveryMode;
+}
+
+export async function importGraphicFile(
+  file: File,
+  options?: ImportGraphicFileOptions
+): Promise<ImportResult> {
   if (!file || file.size === 0) {
     throw new FileLoadError(
       'El archivo está vacío (0 bytes) o no pudo leerse.',
       file?.name || 'archivo',
-      'Desconocido'
+      'Desconocido',
+      undefined,
+      {
+        errorCode: 'FILE_EMPTY_001',
+        moduleName: 'File Loader',
+        fileSizeBytes: file?.size ?? 0,
+        incompatibleElement: 'Archivo vacío (0 bytes)',
+      }
     );
   }
 
@@ -3500,8 +4656,8 @@ export async function importGraphicFile(file: File): Promise<ImportResult> {
     if (ext === 'json') {
       return await importProjectJson(file);
     }
-    if (ext === 'psd') {
-      return await importPsd(file);
+    if (ext === 'psd' || ext === 'psb') {
+      return await importPsd(file, { recoveryMode: options?.psdRecoveryMode });
     }
     if (ext === 'ase' || ext === 'aseprite') {
       return await importAseprite(file);
@@ -3532,19 +4688,64 @@ export async function importGraphicFile(file: File): Promise<ImportResult> {
     }
 
     throw new FileLoadError(
-      `Formato ".${ext || 'desconocido'}" no soportado. Formatos válidos: PNG, JPG, JPEG, WEBP, GIF, BMP, TIFF, TGA, ICO, ASE, ASEPRITE, PSD, PCS y JSON.`,
+      `Formato ".${ext || 'desconocido'}" no soportado. Formatos válidos: PNG, JPG, JPEG, WEBP, GIF, BMP, TIFF, TGA, ICO, ASE, ASEPRITE, PSD, PSB, PCS y JSON.`,
       file.name,
-      ext ? `.${ext.toUpperCase()}` : 'Desconocido'
+      ext ? `.${ext.toUpperCase()}` : 'Desconocido',
+      undefined,
+      {
+        errorCode: 'FORMAT_UNSUPPORTED_415',
+        moduleName: 'File Dispatcher',
+        fileSizeBytes: file.size,
+        incompatibleElement: ext ? `Extensión .${ext}` : 'Tipo de archivo desconocido',
+      }
     );
   } catch (err: any) {
     if (err instanceof FileLoadError) {
+      if (err.fileSizeBytes === undefined) {
+        throw new FileLoadError(err.message, err.fileName, err.formatLabel, err.technicalDetails, {
+          errorCode: err.errorCode,
+          moduleName: err.moduleName,
+          fileSizeBytes: file.size,
+          psdVersion: err.psdVersion,
+          incompatibleElement: err.incompatibleElement,
+          canOfferPsdRecovery: err.canOfferPsdRecovery,
+        });
+      }
       throw err;
     }
+    const moduleMap: Record<string, string> = {
+      psd: 'PSD Importer',
+      psb: 'PSD Importer',
+      ase: 'Aseprite Importer',
+      aseprite: 'Aseprite Importer',
+      pcs: 'PCS Project Loader',
+      json: 'JSON Project Loader',
+      gif: 'GIF Decoder',
+      tif: 'TIFF Decoder',
+      tiff: 'TIFF Decoder',
+    };
+    const codeMap: Record<string, string> = {
+      psd: 'PSD_IMPORT_109',
+      psb: 'PSD_IMPORT_109',
+      ase: 'ASE_IMPORT_201',
+      aseprite: 'ASE_IMPORT_201',
+      pcs: 'PCS_IMPORT_301',
+      json: 'JSON_IMPORT_302',
+      gif: 'GIF_DECODE_202',
+      tif: 'TIFF_DECODE_203',
+      tiff: 'TIFF_DECODE_203',
+    };
     throw new FileLoadError(
       err?.message || 'Error al decodificar el archivo seleccionado.',
       file.name,
       ext ? `.${ext.toUpperCase()}` : 'Archivo',
-      err?.stack || String(err)
+      err?.stack || String(err),
+      {
+        errorCode: codeMap[ext] || 'IMG_DECODE_201',
+        moduleName: moduleMap[ext] || 'Raster Image Decoder',
+        fileSizeBytes: file.size,
+        canOfferPsdRecovery: ext === 'psd' || ext === 'psb',
+      }
     );
   }
 }
