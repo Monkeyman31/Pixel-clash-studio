@@ -2999,7 +2999,7 @@ export async function importProjectJson(file: File): Promise<ImportResult> {
 
   return validateImportResult(
     {
-      name: parsed.name || file.name.replace(/(\.pixelclash)?\.json$/i, ''),
+      name: parsed.name || file.name.replace(/(\.pixelclash|\.pcsanim)?\.json$/i, ''),
       width: parsed.width,
       height: parsed.height,
       frames: parsed.frames,

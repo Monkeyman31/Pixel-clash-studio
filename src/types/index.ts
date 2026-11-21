@@ -19,7 +19,8 @@ export type ToolType =
   | 'hitbox'
   | 'hand'
   | 'zoom'
-  | 'shading';
+  | 'shading'
+  | 'tile';
 
 export type CanvasEditAnchor =
   | 'center'
@@ -657,6 +658,8 @@ export interface Layer {
   offCanvasPixels?: Record<string, string>; // Non-destructive off-canvas pixel cache ("x,y" -> color)
   parallaxSpeed?: number; // Stage work-mode horizontal parallax scroll multiplier (e.g. 0.2, 0.5, 1.0, 1.35)
   stagePlane?: string; // Semantic plane tag for Stage mode (e.g. 'sky', 'far', 'mid', 'near', 'ground', 'fg', 'fx')
+  stageRole?: StageBuilderRole; // Modular Stage Builder role ('fondo' | 'tiles' | 'objetos' | 'decoracion' | 'parallax' | 'fx')
+  tileMapData?: Record<string, string>; // "tileX,tileY" -> "tilesetId:tileId" metadata for autotiling & replace
   fxRecipe?: EditableFxRecipe | null; // Editable FX metadata so generated FX layers can be reopened and regenerated
   /** ID referencing an on-demand 256×256 sparse RGBA TiledLayerStore for large canvases/spritesheets */
   tiledStoreId?: string;
@@ -1373,6 +1376,9 @@ export interface NewProjectConfig {
   createInitialLayer: boolean;
   createInitialGroup: boolean;
   enableAnimationMode: boolean;
+  workMode?: ProjectWorkMode;
+  fightingProfileId?: FightingGameProfileId;
+  stagePresetId?: string;
 }
 
 export type RecentProjectFileFormat =
@@ -2152,6 +2158,7 @@ export type PerformanceMode = 'quality' | 'balanced' | 'performance';
 
 export type SaveAsFormatId =
   | 'pcs'
+  | 'animation'
   | 'png'
   | 'jpg'
   | 'webp'
@@ -2197,3 +2204,84 @@ export interface StartupPreferences {
   mascotSheetRows?: number;
   mascotSheetFps?: number;
 }
+
+// =========================================================
+// SYSTEM 12: STAGE BUILDER, TILES TOOL, TILESETS & FIGHTING PROFILES
+// =========================================================
+export type StageBuilderRole =
+  | 'fondo'
+  | 'tiles'
+  | 'objetos'
+  | 'decoracion'
+  | 'parallax'
+  | 'fx';
+
+export type TileCategoryId =
+  | 'suelo'
+  | 'cesped'
+  | 'tierra'
+  | 'roca'
+  | 'arena'
+  | 'agua'
+  | 'lava'
+  | 'cielo'
+  | 'nubes'
+  | 'edificios'
+  | 'decoracion';
+
+export type TileToolMode = 'draw' | 'place' | 'replace' | 'erase' | 'select';
+
+export type TilePaintPatternMode = 'single' | 'area' | 'repeat' | 'smart_fill';
+
+export interface TileItem {
+  id: string;
+  name: string;
+  category: TileCategoryId;
+  groupId?: string | null;
+  width: number;
+  height: number;
+  pixels: (string | null)[][];
+  autotileSupported?: boolean;
+  tags?: string[];
+}
+
+export interface TileGroup {
+  id: string;
+  name: string;
+  color: string;
+  collapsed?: boolean;
+}
+
+export interface TilesetCollection {
+  id: string;
+  name: string;
+  tileSize: number;
+  description?: string;
+  createdAt: string;
+  groups: TileGroup[];
+  tiles: TileItem[];
+}
+
+export interface TileToolConfig {
+  mode: TileToolMode;
+  paintMode: TilePaintPatternMode;
+  autotile: boolean;
+  continuousDraw: boolean;
+  autoRepeat: boolean;
+  tileSize: number; // 8, 16, 24, 32, 48, 64
+  activeTilesetId: string;
+  activeTileId: string;
+}
+
+export type FightingGameProfileId =
+  | 'custom'
+  | 'kof'
+  | 'sfa'
+  | 'darkstalkers'
+  | 'garou'
+  | 'guilty_gear'
+  | 'blazblue'
+  | 'mvc'
+  | 'skullgirls'
+  | 'dbfz';
+

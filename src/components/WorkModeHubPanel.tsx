@@ -7,10 +7,12 @@ import {
   Flame,
   Grid,
   Layers,
+  LayoutGrid,
   LayoutTemplate,
   Mountain,
   Pause,
   Play,
+  Plus,
   RotateCcw,
   ShieldAlert,
   Sliders,
@@ -22,12 +24,15 @@ import {
 } from 'lucide-react';
 import {
   EditableFxRecipe,
+  FightingGameProfileId,
   GuidesConfig,
   GuidesModalTab,
   Layer,
   ProjectWorkMode,
+  StageBuilderRole,
   StageParallaxConfig,
   TilesetWorkspaceConfig,
+  ToolType,
 } from '../types';
 import {
   analyzeTilesetSeams,
@@ -35,7 +40,25 @@ import {
   WORK_MODE_ORDER,
   WORK_MODES_REGISTRY,
 } from '../utils/workModesEngine';
+import {
+  FIGHTING_GAME_PROFILE_ORDER,
+  FIGHTING_GAME_PROFILES,
+} from '../utils/fightingGameProfiles';
 import { StudioSlider } from './StudioSlider';
+
+const STAGE_BUILDER_ROLES: {
+  id: StageBuilderRole;
+  label: string;
+  speed: number;
+  accent: string;
+}[] = [
+  { id: 'fondo', label: 'Fondo', speed: 0.15, accent: '#38bdf8' },
+  { id: 'tiles', label: 'Tiles', speed: 1.0, accent: '#10b981' },
+  { id: 'objetos', label: 'Objetos', speed: 0.75, accent: '#14b8a6' },
+  { id: 'decoracion', label: 'Decoración', speed: 1.35, accent: '#f43f5e' },
+  { id: 'parallax', label: 'Parallax', speed: 0.45, accent: '#6366f1' },
+  { id: 'fx', label: 'Efectos ambientales', speed: 1.15, accent: '#22d3ee' },
+];
 
 interface WorkModeHubPanelProps {
   workMode: ProjectWorkMode;
@@ -65,6 +88,12 @@ interface WorkModeHubPanelProps {
   guidesConfig?: GuidesConfig;
   onChangeGuidesConfig?: (next: GuidesConfig) => void;
   onOpenGuidesModal?: (tab?: GuidesModalTab) => void;
+  // Stage Builder + Tiles + Optional Fighting Profile
+  activeFightingProfile?: FightingGameProfileId;
+  onApplyFightingProfile?: (id: FightingGameProfileId) => void;
+  onAddStageRoleLayer?: (role: StageBuilderRole) => void;
+  onSelectTool?: (tool: ToolType) => void;
+  onFocusTilesetsPanel?: () => void;
 }
 
 const MODE_ICON_MAP: Record<ProjectWorkMode, React.FC<{ className?: string }>> = {
@@ -101,6 +130,11 @@ export const WorkModeHubPanel: React.FC<WorkModeHubPanelProps> = ({
   guidesConfig,
   onChangeGuidesConfig,
   onOpenGuidesModal,
+  activeFightingProfile = 'custom',
+  onApplyFightingProfile,
+  onAddStageRoleLayer,
+  onSelectTool,
+  onFocusTilesetsPanel,
 }) => {
   const modeDef = WORK_MODES_REGISTRY[workMode];
   const repeatCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -303,6 +337,73 @@ export const WorkModeHubPanel: React.FC<WorkModeHubPanelProps> = ({
       {/* ===================== STAGE MODE CONTROLS ===================== */}
       {workMode === 'stage' && (
         <div className="flex flex-col gap-3 pt-2 border-t" style={{ borderColor: 'var(--studio-border)' }}>
+          {/* Stage Builder Modular by Roles + Quick Tiles Launch */}
+          <div
+            className="p-2.5 rounded-lg border flex flex-col gap-2"
+            style={{ borderColor: 'var(--studio-border)', backgroundColor: 'var(--studio-bg-elevated)' }}
+          >
+            <div className="flex items-center justify-between gap-1">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400">
+                Stage Builder Modular
+              </span>
+              <span className="text-[10px] font-mono tabular-nums opacity-70">
+                {layers.length} capas
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-1">
+              {STAGE_BUILDER_ROLES.map((role) => {
+                const count = layers.filter((l) => l.stageRole === role.id).length;
+                return (
+                  <button
+                    key={role.id}
+                    type="button"
+                    onClick={() => onAddStageRoleLayer?.(role.id)}
+                    title={`Añadir capa modular de ${role.label} (Parallax ${role.speed.toFixed(2)}×)`}
+                    className="h-7 px-2 rounded border text-[10px] font-medium flex items-center justify-between gap-1 hover:bg-white/5 transition-colors"
+                    style={{
+                      borderColor: count > 0 ? role.accent : 'var(--studio-border)',
+                      backgroundColor: 'var(--studio-bg-card)',
+                    }}
+                  >
+                    <span className="truncate">{role.label}</span>
+                    <span className="font-mono tabular-nums text-[9px] opacity-80 flex items-center gap-0.5 shrink-0">
+                      {count > 0 ? `${count}·` : ''}+
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="grid grid-cols-2 gap-1.5 pt-1 border-t" style={{ borderColor: 'var(--studio-border)' }}>
+              <button
+                type="button"
+                onClick={() => onSelectTool?.('tile')}
+                className="h-7 px-2 rounded border text-[10px] font-semibold flex items-center justify-center gap-1 whitespace-nowrap hover:bg-white/5"
+                style={{
+                  borderColor: 'rgba(16,185,129,0.45)',
+                  backgroundColor: 'rgba(16,185,129,0.14)',
+                  color: '#6ee7b7',
+                }}
+              >
+                <LayoutGrid className="w-3 h-3" />
+                <span>Herramienta Tiles</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onFocusTilesetsPanel?.()}
+                className="h-7 px-2 rounded border text-[10px] font-semibold flex items-center justify-center gap-1 whitespace-nowrap hover:bg-white/5"
+                style={{
+                  borderColor: 'var(--studio-border-strong)',
+                  backgroundColor: 'var(--studio-bg-card)',
+                }}
+              >
+                <Grid className="w-3 h-3 text-sky-400" />
+                <span>Panel Tilesets</span>
+              </button>
+            </div>
+          </div>
+
           {/* Parallax Controller */}
           <div className="p-2.5 rounded-lg border flex flex-col gap-2" style={{ borderColor: 'var(--studio-border)', backgroundColor: 'var(--studio-bg-elevated)' }}>
             <div className="flex items-center justify-between">
@@ -955,6 +1056,55 @@ export const WorkModeHubPanel: React.FC<WorkModeHubPanelProps> = ({
           </div>
         </div>
       )}
+
+      {/* Optional Fighting Game Profile Quick Configurator */}
+      {(workMode === 'fighter' || workMode === 'stage' || workMode === 'fx') &&
+        onApplyFightingProfile && (
+          <div
+            className="p-2.5 rounded-lg border flex flex-col gap-1.5"
+            style={{ borderColor: 'var(--studio-border)', backgroundColor: 'var(--studio-bg-elevated)' }}
+          >
+            <div className="flex items-center justify-between gap-1">
+              <span className="text-[10px] font-bold uppercase tracking-wider opacity-80">
+                Perfil Juego de Pelea
+              </span>
+              <span className="text-[9px] font-mono tabular-nums opacity-70">
+                {FIGHTING_GAME_PROFILES[activeFightingProfile]?.fighterLayout.recommendedFps || 12} FPS
+              </span>
+            </div>
+            <div className="flex items-center gap-1">
+              <select
+                value={activeFightingProfile}
+                onChange={(e) => onApplyFightingProfile(e.target.value as FightingGameProfileId)}
+                className="flex-1 h-7 px-2 rounded border text-[10px] font-medium outline-none min-w-0"
+                style={{
+                  backgroundColor: 'var(--studio-bg-card)',
+                  borderColor: 'var(--studio-border-strong)',
+                  color: 'var(--studio-text)',
+                }}
+              >
+                {FIGHTING_GAME_PROFILE_ORDER.map((pid) => (
+                  <option key={pid} value={pid} style={{ backgroundColor: '#131722' }}>
+                    {FIGHTING_GAME_PROFILES[pid].shortName}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={() => onApplyFightingProfile(activeFightingProfile)}
+                className="h-7 px-2 rounded border text-[10px] font-semibold whitespace-nowrap shrink-0 hover:bg-white/5"
+                style={{
+                  borderColor: FIGHTING_GAME_PROFILES[activeFightingProfile]?.accentColor || 'var(--studio-accent)',
+                  backgroundColor: 'var(--studio-bg-card)',
+                }}
+                title="Aplicar paleta, FPS y guías del perfil seleccionado sin borrar el dibujo"
+              >
+                <Plus className="w-3 h-3 inline mr-0.5" />
+                Aplicar
+              </button>
+            </div>
+          </div>
+        )}
 
       {/* Mode-Specialized Export Button */}
       <div className="pt-2 border-t" style={{ borderColor: 'var(--studio-border)' }}>

@@ -526,6 +526,27 @@ export async function exportProjectToFormat(
     };
   }
 
+  if (format === 'animation') {
+    const animationPayload = {
+      ...project,
+      format: 'pixelclash-animation-project',
+      version: 1,
+      animationMeta: {
+        fps: project.fps || 12,
+        playbackMode: project.playbackMode || 'loop',
+        frameCount: project.frames.length,
+        clips: project.clips || [],
+        actionTags: project.actionTags || [],
+        cameraKeyframes: project.cameraKeyframes || [],
+      },
+    };
+    return {
+      blob: new Blob([JSON.stringify(animationPayload, null, 2)], { type: 'application/json' }),
+      filename: `${stem}.pcsanim.json`,
+      mimeType: 'application/json',
+    };
+  }
+
   if (format === 'json') {
     return {
       blob: new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' }),

@@ -40,6 +40,7 @@ import {
   Star,
   ArrowRight,
   Shapes,
+  LayoutGrid,
 } from 'lucide-react';
 import {
   BrushSettings,
@@ -157,6 +158,7 @@ const TOOLS: {
   { id: 'pencil', label: 'Lápiz / Pincel Universal (Dithering · Smear · Cel Shade en Pinceles)', icon: Pencil, hotkey: 'B' },
   { id: 'eraser', label: 'Borrador Pixel', icon: Eraser, hotkey: 'E' },
   { id: 'bucket', label: 'Bote de Pintura (Relleno / Degradado / Degradado con Dithering)', icon: PaintBucket, hotkey: 'G', flyoutGroup: 'bucket' },
+  { id: 'tile', label: 'Tiles (Dibujar / Colocar / Reemplazar / Borrar / Seleccionar · Autotile)', icon: LayoutGrid, hotkey: 'Shift+T' },
   { id: 'line', label: 'Línea / Curva Vectorial (Mantén Ctrl → Selección Directa)', icon: Slash, hotkey: 'L' },
   { id: 'rectangle', label: 'Forma Paramétrica (Rectángulo / Elipse / Polígono / Estrella / Flecha / Personalizada)', icon: Square, hotkey: 'U', flyoutGroup: 'shape' },
   { id: 'text', label: 'Texto Pixel / Arcade', icon: Type, hotkey: 'T' },

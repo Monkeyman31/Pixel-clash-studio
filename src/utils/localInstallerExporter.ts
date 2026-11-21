@@ -502,14 +502,53 @@ export async function generateWindowsExeBuilderZip(
   const icoBytes = await generatePixelClashIcoBytes();
   root.file('assets/pixelclash.ico', icoBytes);
 
-  // 2. Native Electron main & preload runtime (no browser bar, desktop window)
+  // 2. Native Electron main & preload runtime (custom integrated frameless desktop window)
   const electronMain = `const { app, BrowserWindow, Menu, shell, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
 let mainWindow = null;
+let hasUnsavedChanges = false;
+let forceCloseConfirmed = false;
 
 function registerDesktopFileIpc() {
+  ipcMain.handle('desktop:window-minimize', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.minimize();
+    return { ok: true };
+  });
+
+  ipcMain.handle('desktop:window-toggle-maximize', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return { maximized: false };
+    if (mainWindow.isMaximized()) {
+      mainWindow.unmaximize();
+    } else {
+      mainWindow.maximize();
+    }
+    return { maximized: mainWindow.isMaximized() };
+  });
+
+  ipcMain.handle('desktop:window-is-maximized', () => {
+    return { maximized: Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isMaximized()) };
+  });
+
+  ipcMain.handle('desktop:window-close', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close();
+    return { ok: true };
+  });
+
+  ipcMain.handle('desktop:set-unsaved-state', (_event, dirtyFlag) => {
+    hasUnsavedChanges = Boolean(dirtyFlag);
+    return { ok: true };
+  });
+
+  ipcMain.handle('desktop:confirm-app-close', () => {
+    forceCloseConfirmed = true;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.close();
+    }
+    return { ok: true };
+  });
+
   ipcMain.handle('desktop:open-file-dialog', async (_event, options = {}) => {
     const res = await dialog.showOpenDialog(mainWindow || undefined, {
       title: options.title || 'Abrir archivo en ${cfg.appName}',
@@ -585,13 +624,20 @@ function registerDesktopFileIpc() {
 }
 
 function createWindow() {
+  forceCloseConfirmed = false;
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
     minWidth: 1080,
     minHeight: 680,
+    frame: false,
+    titleBarStyle: 'hidden',
+    thickFrame: true,
+    resizable: true,
+    maximizable: true,
+    minimizable: true,
     title: '${cfg.appName} ${cfg.version}',
-    backgroundColor: '#0d0f14',
+    backgroundColor: '#12101e',
     icon: path.join(__dirname, '..', 'assets', 'pixelclash.ico'),
     autoHideMenuBar: true,
     webPreferences: {
@@ -604,6 +650,25 @@ function createWindow() {
 
   Menu.setApplicationMenu(null);
   mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
+
+  mainWindow.on('maximize', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('desktop:window-maximize-change', true);
+    }
+  });
+
+  mainWindow.on('unmaximize', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('desktop:window-maximize-change', false);
+    }
+  });
+
+  mainWindow.on('close', (e) => {
+    if (hasUnsavedChanges && !forceCloseConfirmed && mainWindow && !mainWindow.isDestroyed()) {
+      e.preventDefault();
+      mainWindow.webContents.send('desktop:request-app-close');
+    }
+  });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
@@ -635,6 +700,22 @@ contextBridge.exposeInMainWorld('pixelClashDesktop', {
   platform: process.platform,
   version: '${cfg.version}',
   isNativeDesktop: true,
+  windowMinimize: () => ipcRenderer.invoke('desktop:window-minimize'),
+  windowToggleMaximize: () => ipcRenderer.invoke('desktop:window-toggle-maximize'),
+  isWindowMaximized: () => ipcRenderer.invoke('desktop:window-is-maximized'),
+  windowClose: () => ipcRenderer.invoke('desktop:window-close'),
+  onWindowMaximizeChange: (cb) => {
+    const listener = (_event, isMax) => cb(Boolean(isMax));
+    ipcRenderer.on('desktop:window-maximize-change', listener);
+    return () => ipcRenderer.removeListener('desktop:window-maximize-change', listener);
+  },
+  setUnsavedState: (hasUnsaved) => ipcRenderer.invoke('desktop:set-unsaved-state', Boolean(hasUnsaved)),
+  onRequestAppClose: (cb) => {
+    const listener = () => cb();
+    ipcRenderer.on('desktop:request-app-close', listener);
+    return () => ipcRenderer.removeListener('desktop:request-app-close', listener);
+  },
+  confirmAppClose: () => ipcRenderer.invoke('desktop:confirm-app-close'),
   openFileDialog: (options) => ipcRenderer.invoke('desktop:open-file-dialog', options),
   checkFileExists: (filePath) => ipcRenderer.invoke('desktop:check-file-exists', filePath),
   readFileAtPath: (filePath) => ipcRenderer.invoke('desktop:read-file-at-path', filePath),

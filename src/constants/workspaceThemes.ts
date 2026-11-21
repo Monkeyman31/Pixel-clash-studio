@@ -30,7 +30,8 @@ export type RightPanelId =
   | 'vector_editor'
   | 'masks'
   | 'project_explorer'
-  | 'workmode';
+  | 'workmode'
+  | 'tilesets';
 
 export type PanelDockZone = 'top' | 'bottom' | 'left-main' | 'left-mini' | 'right-mini' | 'right-main';
 export type DockOrientation = 'vertical' | 'horizontal' | 'mixed';
@@ -80,6 +81,7 @@ export const PANEL_REGISTRY: PanelRegistryMeta[] = [
   { id: 'combat', title: 'Fighting Game Studio', shortLabel: 'Combat', category: 'Producción', defaultVisible: true, defaultExpanded: false, defaultDock: 'right-mini', description: 'Hitboxes, hurtboxes, ventaja de frames y test de combate.' },
   { id: 'stage', title: 'Escenario & Sparring', shortLabel: 'Stage', category: 'Producción', defaultVisible: true, defaultExpanded: false, defaultDock: 'right-mini', description: 'Fondo de entrenamiento, suelo y dummy rival.' },
   { id: 'workmode', title: 'Modo de Trabajo & Estudio', shortLabel: 'Modo', category: 'Producción', defaultVisible: true, defaultExpanded: false, defaultDock: 'right-mini', description: 'Modos Fighter, Stage (Parallax), HUD/UI, FX Lab, Tileset 3×3, Portrait y Cutscene.' },
+  { id: 'tilesets', title: 'Tilesets y Tiles de Escenario', shortLabel: 'Tilesets', category: 'Producción', defaultVisible: true, defaultExpanded: false, defaultDock: 'right-mini', description: 'Crear, importar, exportar, organizar y agrupar tiles con categorías y autotile.' },
   { id: 'timeline', title: 'Línea de Tiempo', shortLabel: 'Timeline', category: 'Animación', defaultVisible: true, defaultExpanded: true, defaultDock: 'bottom', minWidth: 260, minHeight: 110, description: 'Línea de tiempo acoplable arriba, abajo, costados o flotante con redimensionamiento total.' },
   { id: 'preview', title: 'Vista Previa Animada', shortLabel: 'Preview', category: 'Animación', defaultVisible: false, defaultExpanded: true, defaultDock: 'left-main', description: 'Visor independiente de bucle animado y zoom.' },
   { id: 'navigator', title: 'Navegador de Lienzo', shortLabel: 'Nav', category: 'Core', defaultVisible: false, defaultExpanded: true, defaultDock: 'left-main', description: 'Minimapa general del sprite con control de zoom rápido.' },
@@ -167,6 +169,8 @@ export interface WorkspaceLayoutConfig {
   timelineSectionOrder: TimelineSectionId[];
   showTopBar: boolean;
   showMiniPlayer: boolean;
+  windowDragZones?: 'topbar_only' | 'topbar_and_empty_bars';
+  integratedTitlebarTabs?: boolean;
   rightPanels: RightPanelConfig[];
   tabGroups?: TabbedPanelGroup[];
   floatingPanels?: Record<string, FloatingPanelState>;
@@ -310,6 +314,7 @@ export const DEFAULT_TOOL_ORDER: ToolType[] = [
   'pencil',
   'eraser',
   'bucket',
+  'tile',
   'line',
   'rectangle',
   'text',
@@ -356,6 +361,8 @@ export const DEFAULT_WORKSPACE_LAYOUT: WorkspaceLayoutConfig = {
   timelineSectionOrder: ['tags', 'ruler', 'frames', 'transport'],
   showTopBar: true,
   showMiniPlayer: true,
+  windowDragZones: 'topbar_and_empty_bars',
+  integratedTitlebarTabs: true,
   rightPanels: DEFAULT_RIGHT_PANELS,
   tabGroups: DEFAULT_TAB_GROUPS,
   floatingPanels: {},
@@ -676,6 +683,7 @@ export const WORKSPACE_TEMPLATES: WorkspaceTemplate[] = [
       timelineHeight: 158,
       bottomDockHeight: 158,
       rightPanels: mapPanelsWithOverrides({
+        tilesets: { dock: 'left-main', expanded: true, visible: true },
         library: { dock: 'left-main', expanded: true, visible: true },
         textures: { dock: 'left-main', expanded: true, visible: true },
         stage: { dock: 'left-mini', expanded: true, visible: true },

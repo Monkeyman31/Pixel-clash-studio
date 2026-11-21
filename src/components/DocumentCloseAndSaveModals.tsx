@@ -2,12 +2,14 @@ import React, { useEffect, useState } from 'react';
 import {
   AlertTriangle,
   CheckSquare,
+  Clapperboard,
   FileArchive,
   FileCode2,
   Film,
   Image as ImageIcon,
   Layers,
   LayoutGrid,
+  ListChecks,
   Save,
   Square,
   X,
@@ -15,7 +17,7 @@ import {
 import { SaveAsFormatId } from '../types';
 
 // =============================================================================
-// 1. SINGLE MODIFIED DOCUMENT CLOSE / REPLACE DIALOG
+// 1. SINGLE / SEQUENTIAL MODIFIED DOCUMENT CLOSE / REPLACE DIALOG
 // =============================================================================
 interface UnsavedDocumentCloseModalProps {
   isOpen: boolean;
@@ -23,7 +25,9 @@ interface UnsavedDocumentCloseModalProps {
   width: number;
   height: number;
   isNewUnsaved: boolean;
+  hasSavedLocation?: boolean;
   actionContext?: 'close' | 'replace';
+  reviewProgress?: { index: number; total: number } | null;
   onSave: () => void;
   onDiscard: () => void;
   onCancel: () => void;
@@ -35,7 +39,9 @@ export const UnsavedDocumentCloseModal: React.FC<UnsavedDocumentCloseModalProps>
   width,
   height,
   isNewUnsaved,
+  hasSavedLocation = false,
   actionContext = 'close',
+  reviewProgress = null,
   onSave,
   onDiscard,
   onCancel,
@@ -54,13 +60,23 @@ export const UnsavedDocumentCloseModal: React.FC<UnsavedDocumentCloseModalProps>
 
   if (!isOpen) return null;
 
-  const title = isNewUnsaved
+  const isReviewMode = Boolean(reviewProgress);
+
+  const title = isReviewMode
+    ? isNewUnsaved
+      ? '¿Desea guardar este documento antes de cerrarlo?'
+      : `¿Desea guardar: ${documentName}?`
+    : isNewUnsaved
     ? '¿Desea guardar este documento?'
     : actionContext === 'replace'
     ? 'Cambios sin guardar en el proyecto actual'
     : 'Este proyecto contiene cambios sin guardar.';
 
-  const subtitle = isNewUnsaved
+  const subtitle = isReviewMode
+    ? isNewUnsaved
+      ? `"${documentName}" es un documento nuevo sin guardar. Si elige Guardar se abrirá Guardar como... para elegir nombre y formato.`
+      : `"${documentName}" tiene cambios sin guardar antes de cerrar la aplicación.`
+    : isNewUnsaved
     ? `"${documentName}" es un documento nuevo sin ubicación de guardado. Si cierra sin guardar, perderá el contenido actual.`
     : actionContext === 'replace'
     ? `"${documentName}" tiene modificaciones pendientes. ¿Desea guardar antes de continuar?`
@@ -73,16 +89,34 @@ export const UnsavedDocumentCloseModal: React.FC<UnsavedDocumentCloseModalProps>
         if (e.target === e.currentTarget) onCancel();
       }}
     >
-      <div className="w-full max-w-md rounded-lg border border-slate-700/80 bg-[#12161f] text-slate-100 shadow-2xl overflow-hidden">
-        <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-800 bg-[#0d1017]">
-          <div className="flex items-center gap-2.5">
+      <div
+        className="w-full max-w-md rounded-lg border shadow-2xl overflow-hidden"
+        style={{
+          backgroundColor: 'var(--studio-bg-panel, #141224)',
+          borderColor: 'var(--studio-border-strong, #332e54)',
+          color: 'var(--studio-text, #f1f5f9)',
+        }}
+      >
+        <div
+          className="flex items-center justify-between px-5 py-3.5 border-b"
+          style={{
+            backgroundColor: 'var(--studio-bg-header, #100e1d)',
+            borderColor: 'var(--studio-border, #262242)',
+          }}
+        >
+          <div className="flex items-center gap-2.5 min-w-0">
             <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
-            <h2 className="text-sm font-semibold text-slate-100">Confirmar cierre</h2>
+            <h2 className="text-sm font-semibold truncate">
+              {reviewProgress
+                ? `Revisión de documento (${reviewProgress.index + 1} de ${reviewProgress.total})`
+                : 'Confirmar cierre'}
+            </h2>
           </div>
           <button
             type="button"
             onClick={onCancel}
-            className="p-1 rounded text-slate-400 hover:text-slate-100 hover:bg-slate-800 transition-colors"
+            className="p-1 rounded hover:bg-white/10 transition-colors shrink-0"
+            style={{ color: 'var(--studio-text-muted, #94a3b8)' }}
             title="Cancelar"
           >
             <X className="w-4 h-4" />
@@ -90,35 +124,69 @@ export const UnsavedDocumentCloseModal: React.FC<UnsavedDocumentCloseModalProps>
         </div>
 
         <div className="p-5 space-y-3">
-          <div className="text-sm font-medium text-slate-100 leading-snug">{title}</div>
-          <p className="text-xs text-slate-300 leading-relaxed">{subtitle}</p>
-          <div className="px-3 py-2 rounded border border-slate-800 bg-[#0d1017] text-xs text-slate-300 flex items-center justify-between gap-2">
-            <span className="font-medium text-slate-100 truncate">{documentName} *</span>
-            <span className="text-[11px] text-slate-400 tabular-nums shrink-0">
+          <div className="text-sm font-semibold leading-snug">{title}</div>
+          <p className="text-xs leading-relaxed" style={{ color: 'var(--studio-text-muted, #cbd5e1)' }}>
+            {subtitle}
+          </p>
+          <div
+            className="px-3 py-2 rounded border text-xs flex items-center justify-between gap-2"
+            style={{
+              backgroundColor: 'var(--studio-bg-bar, #0e0c1a)',
+              borderColor: 'var(--studio-border, #262242)',
+            }}
+          >
+            <div className="min-w-0">
+              <div className="font-medium truncate">
+                {documentName} <span className="text-amber-400 font-bold">*</span>
+              </div>
+              <div className="text-[11px]" style={{ color: 'var(--studio-text-muted, #94a3b8)' }}>
+                {!hasSavedLocation
+                  ? 'Sin ubicación · Al guardar se abrirá Guardar como...'
+                  : 'Modificado · Listo para guardar'}
+              </div>
+            </div>
+            <span
+              className="text-[11px] tabular-nums shrink-0"
+              style={{ color: 'var(--studio-text-muted, #94a3b8)' }}
+            >
               {width} × {height} px
             </span>
           </div>
         </div>
 
-        <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-slate-800 bg-[#0d1017]">
+        <div
+          className="flex items-center justify-end gap-2 px-5 py-3 border-t"
+          style={{
+            backgroundColor: 'var(--studio-bg-header, #100e1d)',
+            borderColor: 'var(--studio-border, #262242)',
+          }}
+        >
           <button
             type="button"
             onClick={onCancel}
-            className="px-3 py-1.5 rounded text-xs font-medium text-slate-300 border border-slate-700 hover:bg-slate-800 transition-colors"
+            className="px-3 py-1.5 rounded text-xs font-medium border hover:bg-white/10 transition-colors whitespace-nowrap shrink-0"
+            style={{
+              borderColor: 'var(--studio-border-strong, #332e54)',
+              color: 'var(--studio-text, #e2e8f0)',
+            }}
           >
             Cancelar
           </button>
           <button
             type="button"
             onClick={onDiscard}
-            className="px-3 py-1.5 rounded text-xs font-medium text-rose-300 border border-rose-500/40 bg-rose-950/30 hover:bg-rose-900/50 transition-colors"
+            className="px-3 py-1.5 rounded text-xs font-medium text-rose-300 border border-rose-500/40 bg-rose-950/35 hover:bg-rose-900/50 transition-colors whitespace-nowrap shrink-0"
           >
             No Guardar
           </button>
           <button
             type="button"
             onClick={onSave}
-            className="px-4 py-1.5 rounded text-xs font-semibold bg-amber-500 hover:bg-amber-400 text-slate-950 transition-colors"
+            className="px-4 py-1.5 rounded text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
+            style={{
+              backgroundColor: 'var(--studio-accent, #fbbf24)',
+              color: 'var(--studio-accent-text, #0f172a)',
+            }}
           >
             Guardar
           </button>
@@ -129,7 +197,7 @@ export const UnsavedDocumentCloseModal: React.FC<UnsavedDocumentCloseModalProps>
 };
 
 // =============================================================================
-// 2. MULTI-DOCUMENT APPLICATION CLOSE / EXIT CHECKLIST MODAL
+// 2. MULTI-DOCUMENT GLOBAL APPLICATION CLOSE / EXIT CHECKLIST MODAL
 // =============================================================================
 export interface ModifiedDocumentSummary {
   id: string;
@@ -137,6 +205,7 @@ export interface ModifiedDocumentSummary {
   width: number;
   height: number;
   isNewUnsaved: boolean;
+  hasSavedLocation?: boolean;
 }
 
 interface UnsavedAppCloseModalProps {
@@ -144,6 +213,7 @@ interface UnsavedAppCloseModalProps {
   modifiedDocuments: ModifiedDocumentSummary[];
   isProcessing?: boolean;
   onSaveSelected: (selectedIds: string[]) => void;
+  onReviewOneByOne: (docIds: string[]) => void;
   onDiscardAll: () => void;
   onCancel: () => void;
 }
@@ -153,6 +223,7 @@ export const UnsavedAppCloseModal: React.FC<UnsavedAppCloseModalProps> = ({
   modifiedDocuments,
   isProcessing = false,
   onSaveSelected,
+  onReviewOneByOne,
   onDiscardAll,
   onCancel,
 }) => {
@@ -187,6 +258,10 @@ export const UnsavedAppCloseModal: React.FC<UnsavedAppCloseModalProps> = ({
     );
   };
 
+  const docsWithoutLocationCount = modifiedDocuments.filter(
+    (d) => selectedIds.includes(d.id) && !d.hasSavedLocation
+  ).length;
+
   return (
     <div
       className="fixed inset-0 z-[10120] flex items-center justify-center bg-black/80 p-4"
@@ -194,45 +269,62 @@ export const UnsavedAppCloseModal: React.FC<UnsavedAppCloseModalProps> = ({
         if (e.target === e.currentTarget && !isProcessing) onCancel();
       }}
     >
-      <div className="w-full max-w-lg rounded-lg border border-slate-700/80 bg-[#12161f] text-slate-100 shadow-2xl overflow-hidden">
-        <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-800 bg-[#0d1017]">
+      <div
+        className="w-full max-w-xl rounded-lg border shadow-2xl overflow-hidden"
+        style={{
+          backgroundColor: 'var(--studio-bg-panel, #141224)',
+          borderColor: 'var(--studio-border-strong, #332e54)',
+          color: 'var(--studio-text, #f1f5f9)',
+        }}
+      >
+        <div
+          className="flex items-center justify-between px-5 py-3.5 border-b"
+          style={{
+            backgroundColor: 'var(--studio-bg-header, #100e1d)',
+            borderColor: 'var(--studio-border, #262242)',
+          }}
+        >
           <div className="flex items-center gap-2.5">
             <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
-            <h2 className="text-sm font-semibold text-slate-100">
-              Documentos con cambios sin guardar
-            </h2>
+            <h2 className="text-sm font-semibold">Se han detectado documentos sin guardar.</h2>
           </div>
           <button
             type="button"
             disabled={isProcessing}
             onClick={onCancel}
-            className="p-1 rounded text-slate-400 hover:text-slate-100 hover:bg-slate-800 disabled:opacity-40 transition-colors"
-            title="Cancelar cierre"
+            className="p-1 rounded hover:bg-white/10 disabled:opacity-40 transition-colors"
+            style={{ color: 'var(--studio-text-muted, #94a3b8)' }}
+            title="Cancelar"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
         <div className="p-5 space-y-3">
-          <p className="text-xs text-slate-300 leading-relaxed">
-            Los siguientes proyectos contienen cambios sin guardar. Seleccione los que desea guardar antes de cerrar:
-          </p>
-
-          <div className="flex items-center justify-between text-[11px] text-slate-400">
-            <span>{modifiedDocuments.length} documento(s) modificados</span>
-            <button
-              type="button"
-              disabled={isProcessing}
-              onClick={() =>
-                setSelectedIds(allSelected ? [] : modifiedDocuments.map((d) => d.id))
-              }
-              className="text-amber-400 hover:text-amber-300 transition-colors"
-            >
-              {allSelected ? 'Desmarcar todos' : 'Seleccionar todos'}
-            </button>
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-xs font-semibold">Documentos pendientes:</span>
+            <div className="flex items-center gap-3 text-[11px]" style={{ color: 'var(--studio-text-muted, #94a3b8)' }}>
+              <span className="tabular-nums">{modifiedDocuments.length} pendiente(s)</span>
+              <button
+                type="button"
+                disabled={isProcessing}
+                onClick={() =>
+                  setSelectedIds(allSelected ? [] : modifiedDocuments.map((d) => d.id))
+                }
+                className="text-amber-400 hover:text-amber-300 transition-colors whitespace-nowrap"
+              >
+                {allSelected ? 'Desmarcar todos' : 'Seleccionar todos'}
+              </button>
+            </div>
           </div>
 
-          <div className="max-h-56 overflow-y-auto divide-y divide-slate-800/80 rounded-md border border-slate-800 bg-[#0d1017]">
+          <div
+            className="max-h-60 overflow-y-auto divide-y rounded-md border"
+            style={{
+              backgroundColor: 'var(--studio-bg-bar, #0e0c1a)',
+              borderColor: 'var(--studio-border, #262242)',
+            }}
+          >
             {modifiedDocuments.map((doc) => {
               const checked = selectedIds.includes(doc.id);
               return (
@@ -241,7 +333,8 @@ export const UnsavedAppCloseModal: React.FC<UnsavedAppCloseModalProps> = ({
                   type="button"
                   disabled={isProcessing}
                   onClick={() => toggleDoc(doc.id)}
-                  className="w-full flex items-center justify-between gap-3 px-3.5 py-2.5 text-left hover:bg-slate-800/40 transition-colors"
+                  className="w-full flex items-center justify-between gap-3 px-3.5 py-2.5 text-left hover:bg-white/5 transition-colors border-b last:border-b-0"
+                  style={{ borderColor: 'var(--studio-border, #262242)' }}
                 >
                   <div className="flex items-center gap-2.5 min-w-0">
                     {checked ? (
@@ -250,48 +343,101 @@ export const UnsavedAppCloseModal: React.FC<UnsavedAppCloseModalProps> = ({
                       <Square className="w-4 h-4 text-slate-500 shrink-0" />
                     )}
                     <div className="min-w-0">
-                      <div className="text-xs font-medium text-slate-100 truncate">
-                        {doc.name} <span className="text-amber-400">*</span>
+                      <div className="text-xs font-medium truncate">
+                        {doc.name} <span className="text-amber-400 font-bold">*</span>
                       </div>
-                      <div className="text-[11px] text-slate-400">
-                        {doc.isNewUnsaved ? 'Documento nuevo sin guardar' : 'Modificaciones pendientes'}
+                      <div className="text-[11px]" style={{ color: 'var(--studio-text-muted, #94a3b8)' }}>
+                        {doc.isNewUnsaved
+                          ? 'Documento nuevo sin guardar'
+                          : !doc.hasSavedLocation
+                          ? 'Modificado · Sin archivo asignado'
+                          : 'Modificado · Cambios pendientes'}
                       </div>
                     </div>
                   </div>
-                  <span className="text-[11px] text-slate-400 tabular-nums shrink-0">
+                  <span
+                    className="text-[11px] tabular-nums shrink-0"
+                    style={{ color: 'var(--studio-text-muted, #94a3b8)' }}
+                  >
                     {doc.width} × {doc.height} px
                   </span>
                 </button>
               );
             })}
           </div>
+
+          {docsWithoutLocationCount > 0 && (
+            <p className="text-[11px] text-amber-300/90 leading-snug">
+              {docsWithoutLocationCount === 1
+                ? '1 documento aún no tiene ruta ni formato asignado: al guardar se abrirá "Guardar como...".'
+                : `${docsWithoutLocationCount} documentos aún no tienen ruta ni formato asignado: al guardar se abrirá "Guardar como..." para cada uno.`}
+            </p>
+          )}
         </div>
 
-        <div className="flex flex-wrap items-center justify-end gap-2 px-5 py-3 border-t border-slate-800 bg-[#0d1017]">
+        <div
+          className="flex flex-wrap items-center justify-between gap-2 px-5 py-3 border-t"
+          style={{
+            backgroundColor: 'var(--studio-bg-header, #100e1d)',
+            borderColor: 'var(--studio-border, #262242)',
+          }}
+        >
           <button
             type="button"
             disabled={isProcessing}
-            onClick={onCancel}
-            className="px-3 py-1.5 rounded text-xs font-medium text-slate-300 border border-slate-700 hover:bg-slate-800 disabled:opacity-40 transition-colors"
+            onClick={() =>
+              onReviewOneByOne(
+                selectedIds.length > 0 ? selectedIds : modifiedDocuments.map((d) => d.id)
+              )
+            }
+            className="px-3 py-1.5 rounded text-xs font-medium border hover:bg-white/10 disabled:opacity-40 transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
+            style={{
+              borderColor: 'var(--studio-border-strong, #332e54)',
+              color: 'var(--studio-text, #e2e8f0)',
+            }}
           >
-            Cancelar cierre
+            <ListChecks className="w-3.5 h-3.5 text-amber-400" />
+            <span>Revisar Uno a Uno</span>
           </button>
-          <button
-            type="button"
-            disabled={isProcessing}
-            onClick={onDiscardAll}
-            className="px-3 py-1.5 rounded text-xs font-medium text-rose-300 border border-rose-500/40 bg-rose-950/30 hover:bg-rose-900/50 disabled:opacity-40 transition-colors"
-          >
-            No guardar
-          </button>
-          <button
-            type="button"
-            disabled={isProcessing || selectedIds.length === 0}
-            onClick={() => onSaveSelected(selectedIds)}
-            className="px-4 py-1.5 rounded text-xs font-semibold bg-amber-500 hover:bg-amber-400 disabled:opacity-40 text-slate-950 transition-colors"
-          >
-            {isProcessing ? 'Guardando...' : `Guardar seleccionados (${selectedIds.length})`}
-          </button>
+
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <button
+              type="button"
+              disabled={isProcessing}
+              onClick={onCancel}
+              className="px-3 py-1.5 rounded text-xs font-medium border hover:bg-white/10 disabled:opacity-40 transition-colors whitespace-nowrap shrink-0"
+              style={{
+                borderColor: 'var(--studio-border-strong, #332e54)',
+                color: 'var(--studio-text, #e2e8f0)',
+              }}
+            >
+              Cancelar
+            </button>
+            <button
+              type="button"
+              disabled={isProcessing}
+              onClick={onDiscardAll}
+              className="px-3 py-1.5 rounded text-xs font-medium text-rose-300 border border-rose-500/40 bg-rose-950/35 hover:bg-rose-900/50 disabled:opacity-40 transition-colors whitespace-nowrap shrink-0"
+            >
+              No Guardar
+            </button>
+            <button
+              type="button"
+              disabled={isProcessing || selectedIds.length === 0}
+              onClick={() => onSaveSelected(selectedIds)}
+              className="px-4 py-1.5 rounded text-xs font-semibold disabled:opacity-40 transition-colors whitespace-nowrap shrink-0"
+              style={{
+                backgroundColor: 'var(--studio-accent, #fbbf24)',
+                color: 'var(--studio-accent-text, #0f172a)',
+              }}
+            >
+              {isProcessing
+                ? 'Guardando...'
+                : allSelected
+                ? 'Guardar Todo'
+                : `Guardar (${selectedIds.length})`}
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -318,6 +464,14 @@ const SAVE_FORMAT_ENTRIES: SaveFormatEntry[] = [
     description: 'Formato nativo completo: conserva capas, grupos, frames, hitboxes y vectores.',
     supportsScale: false,
     icon: <FileArchive className="w-4 h-4 text-amber-400" />,
+  },
+  {
+    id: 'animation',
+    label: 'Proyecto de animación',
+    extension: '.pcsanim.json',
+    description: 'Proyecto completo de animación 2D: fotogramas, tiempos, clips, etiquetas y cámara.',
+    supportsScale: false,
+    icon: <Clapperboard className="w-4 h-4 text-fuchsia-400" />,
   },
   {
     id: 'png',
@@ -393,6 +547,7 @@ interface SaveAsFormatModalProps {
   height: number;
   framesCount: number;
   isSaving?: boolean;
+  queueLabel?: string | null;
   onConfirm: (options: {
     fileName: string;
     format: SaveAsFormatId;
@@ -410,6 +565,7 @@ export const SaveAsFormatModal: React.FC<SaveAsFormatModalProps> = ({
   height,
   framesCount,
   isSaving = false,
+  queueLabel = null,
   onConfirm,
   onCancel,
 }) => {
@@ -462,18 +618,32 @@ export const SaveAsFormatModal: React.FC<SaveAsFormatModalProps> = ({
     >
       <form
         onSubmit={handleSubmit}
-        className="w-full max-w-2xl rounded-lg border border-slate-700/80 bg-[#12161f] text-slate-100 shadow-2xl overflow-hidden"
+        className="w-full max-w-2xl rounded-lg border shadow-2xl overflow-hidden"
+        style={{
+          backgroundColor: 'var(--studio-bg-panel, #141224)',
+          borderColor: 'var(--studio-border-strong, #332e54)',
+          color: 'var(--studio-text, #f1f5f9)',
+        }}
       >
-        <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-800 bg-[#0d1017]">
-          <div className="flex items-center gap-2.5">
+        <div
+          className="flex items-center justify-between px-5 py-3.5 border-b"
+          style={{
+            backgroundColor: 'var(--studio-bg-header, #100e1d)',
+            borderColor: 'var(--studio-border, #262242)',
+          }}
+        >
+          <div className="flex items-center gap-2.5 min-w-0">
             <Save className="w-4 h-4 text-amber-400 shrink-0" />
-            <h2 className="text-sm font-semibold text-slate-100">Guardar como...</h2>
+            <h2 className="text-sm font-semibold truncate">
+              {queueLabel ? `Guardar como... · ${queueLabel}` : 'Guardar como...'}
+            </h2>
           </div>
           <button
             type="button"
             disabled={isSaving}
             onClick={onCancel}
-            className="p-1 rounded text-slate-400 hover:text-slate-100 hover:bg-slate-800 disabled:opacity-40 transition-colors"
+            className="p-1 rounded hover:bg-white/10 disabled:opacity-40 transition-colors shrink-0"
+            style={{ color: 'var(--studio-text-muted, #94a3b8)' }}
             title="Cancelar"
           >
             <X className="w-4 h-4" />
@@ -484,14 +654,23 @@ export const SaveAsFormatModal: React.FC<SaveAsFormatModalProps> = ({
           {/* File name row */}
           <div className="space-y-1.5">
             <div className="flex items-center justify-between text-xs">
-              <label htmlFor="pcs-save-as-name" className="text-slate-300 font-medium">
+              <label htmlFor="pcs-save-as-name" className="font-medium">
                 Nombre del archivo
               </label>
-              <span className="text-[11px] text-slate-400 tabular-nums">
+              <span
+                className="text-[11px] tabular-nums"
+                style={{ color: 'var(--studio-text-muted, #94a3b8)' }}
+              >
                 {width} × {height} px · {framesCount} frame{framesCount === 1 ? '' : 's'}
               </span>
             </div>
-            <div className="flex items-center rounded-md border border-slate-700 bg-[#0d1017] focus-within:border-amber-500/80 overflow-hidden">
+            <div
+              className="flex items-center rounded-md border focus-within:border-amber-400 overflow-hidden"
+              style={{
+                backgroundColor: 'var(--studio-bg-bar, #0e0c1a)',
+                borderColor: 'var(--studio-border-strong, #332e54)',
+              }}
+            >
               <input
                 id="pcs-save-as-name"
                 type="text"
@@ -499,9 +678,15 @@ export const SaveAsFormatModal: React.FC<SaveAsFormatModalProps> = ({
                 onChange={(e) => setFileName(e.target.value)}
                 autoFocus
                 placeholder="Nombre del proyecto"
-                className="flex-1 bg-transparent px-3 py-2 text-xs text-slate-100 focus:outline-none"
+                className="flex-1 bg-transparent px-3 py-2 text-xs focus:outline-none"
               />
-              <span className="px-3 py-2 text-xs font-mono text-amber-400 border-l border-slate-800 bg-[#151a25]">
+              <span
+                className="px-3 py-2 text-xs font-mono text-amber-400 border-l shrink-0"
+                style={{
+                  backgroundColor: 'var(--studio-bg-card, #19162e)',
+                  borderColor: 'var(--studio-border, #262242)',
+                }}
+              >
                 {activeEntry.extension}
               </span>
             </div>
@@ -509,7 +694,10 @@ export const SaveAsFormatModal: React.FC<SaveAsFormatModalProps> = ({
 
           {/* Format selector grid */}
           <div>
-            <div className="text-[11px] uppercase tracking-wider text-slate-400 font-medium mb-2">
+            <div
+              className="text-[11px] uppercase tracking-wider font-medium mb-2"
+              style={{ color: 'var(--studio-text-muted, #94a3b8)' }}
+            >
               Formato de salida
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-72 overflow-y-auto pr-1">
@@ -520,23 +708,31 @@ export const SaveAsFormatModal: React.FC<SaveAsFormatModalProps> = ({
                     key={entry.id}
                     type="button"
                     onClick={() => setFormat(entry.id)}
-                    className={`flex items-start gap-2.5 text-left px-3 py-2.5 rounded-md border transition-colors ${
-                      selected
-                        ? 'border-amber-500/80 bg-amber-500/10'
-                        : 'border-slate-800 bg-[#0f131b] hover:border-slate-700 hover:bg-slate-800/40'
-                    }`}
+                    className="flex items-start gap-2.5 text-left px-3 py-2.5 rounded-md border transition-colors"
+                    style={{
+                      backgroundColor: selected
+                        ? 'var(--studio-bg-selection, rgba(251, 191, 36, 0.14))'
+                        : 'var(--studio-bg-bar, #0e0c1a)',
+                      borderColor: selected
+                        ? 'var(--studio-accent, #fbbf24)'
+                        : 'var(--studio-border, #262242)',
+                    }}
                   >
                     <div className="mt-0.5 shrink-0">{entry.icon}</div>
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center justify-between gap-2">
-                        <span className="text-xs font-medium text-slate-100 truncate">
-                          {entry.label}
-                        </span>
-                        <span className="text-[11px] font-mono text-slate-400 shrink-0">
+                        <span className="text-xs font-medium truncate">{entry.label}</span>
+                        <span
+                          className="text-[11px] font-mono shrink-0"
+                          style={{ color: 'var(--studio-text-muted, #94a3b8)' }}
+                        >
                           {entry.extension}
                         </span>
                       </div>
-                      <p className="text-[11px] text-slate-400 leading-snug mt-0.5">
+                      <p
+                        className="text-[11px] leading-snug mt-0.5"
+                        style={{ color: 'var(--studio-text-muted, #94a3b8)' }}
+                      >
                         {entry.description}
                       </p>
                     </div>
@@ -548,40 +744,59 @@ export const SaveAsFormatModal: React.FC<SaveAsFormatModalProps> = ({
 
           {/* Format-specific export controls */}
           {(activeEntry.supportsScale || format === 'jpg') && (
-            <div className="flex flex-wrap items-center justify-between gap-4 border-t border-slate-800 pt-3 text-xs">
+            <div
+              className="flex flex-wrap items-center justify-between gap-4 border-t pt-3 text-xs"
+              style={{ borderColor: 'var(--studio-border, #262242)' }}
+            >
               {activeEntry.supportsScale && (
                 <div className="flex items-center gap-2.5">
-                  <span className="text-slate-300">Escala de exportación</span>
-                  <div className="inline-flex rounded border border-slate-700 overflow-hidden">
+                  <span style={{ color: 'var(--studio-text-muted, #cbd5e1)' }}>
+                    Escala de exportación
+                  </span>
+                  <div
+                    className="inline-flex rounded border overflow-hidden"
+                    style={{ borderColor: 'var(--studio-border-strong, #332e54)' }}
+                  >
                     {[1, 2, 4].map((s) => (
                       <button
                         key={s}
                         type="button"
                         onClick={() => setScale(s)}
-                        className={`px-2.5 py-1 text-xs tabular-nums transition-colors ${
-                          scale === s
-                            ? 'bg-amber-500 text-slate-950 font-semibold'
-                            : 'bg-[#0d1017] text-slate-300 hover:bg-slate-800'
-                        }`}
+                        className="px-2.5 py-1 text-xs tabular-nums transition-colors"
+                        style={{
+                          backgroundColor:
+                            scale === s
+                              ? 'var(--studio-accent, #fbbf24)'
+                              : 'var(--studio-bg-bar, #0e0c1a)',
+                          color:
+                            scale === s
+                              ? 'var(--studio-accent-text, #0f172a)'
+                              : 'var(--studio-text, #e2e8f0)',
+                          fontWeight: scale === s ? 600 : 400,
+                        }}
                       >
                         {s}×
                       </button>
                     ))}
                   </div>
-                  <span className="text-[11px] text-slate-400 tabular-nums">
+                  <span
+                    className="text-[11px] tabular-nums"
+                    style={{ color: 'var(--studio-text-muted, #94a3b8)' }}
+                  >
                     ({width * scale} × {height * scale} px)
                   </span>
                 </div>
               )}
 
               {format === 'jpg' && (
-                <label className="flex items-center gap-2 text-slate-300">
+                <label className="flex items-center gap-2">
                   <span>Fondo JPG</span>
                   <input
                     type="color"
                     value={jpgBg}
                     onChange={(e) => setJpgBg(e.target.value)}
-                    className="h-6 w-8 rounded border border-slate-700 bg-transparent cursor-pointer"
+                    className="h-6 w-8 rounded border bg-transparent cursor-pointer"
+                    style={{ borderColor: 'var(--studio-border-strong, #332e54)' }}
                   />
                 </label>
               )}
@@ -589,19 +804,33 @@ export const SaveAsFormatModal: React.FC<SaveAsFormatModalProps> = ({
           )}
         </div>
 
-        <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-slate-800 bg-[#0d1017]">
+        <div
+          className="flex items-center justify-end gap-2 px-5 py-3 border-t"
+          style={{
+            backgroundColor: 'var(--studio-bg-header, #100e1d)',
+            borderColor: 'var(--studio-border, #262242)',
+          }}
+        >
           <button
             type="button"
             disabled={isSaving}
             onClick={onCancel}
-            className="px-3.5 py-1.5 rounded text-xs font-medium text-slate-300 border border-slate-700 hover:bg-slate-800 disabled:opacity-40 transition-colors"
+            className="px-3.5 py-1.5 rounded text-xs font-medium border hover:bg-white/10 disabled:opacity-40 transition-colors whitespace-nowrap shrink-0"
+            style={{
+              borderColor: 'var(--studio-border-strong, #332e54)',
+              color: 'var(--studio-text, #e2e8f0)',
+            }}
           >
             Cancelar
           </button>
           <button
             type="submit"
             disabled={isSaving}
-            className="px-4 py-1.5 rounded text-xs font-semibold bg-amber-500 hover:bg-amber-400 disabled:opacity-40 text-slate-950 transition-colors"
+            className="px-4 py-1.5 rounded text-xs font-semibold disabled:opacity-40 transition-colors whitespace-nowrap shrink-0"
+            style={{
+              backgroundColor: 'var(--studio-accent, #fbbf24)',
+              color: 'var(--studio-accent-text, #0f172a)',
+            }}
           >
             {isSaving ? 'Guardando...' : `Guardar (${activeEntry.extension})`}
           </button>

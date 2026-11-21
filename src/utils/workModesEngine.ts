@@ -3,6 +3,7 @@ import {
   LayerBlendMode,
   LayerType,
   ProjectWorkMode,
+  StageBuilderRole,
   StageParallaxConfig,
   TilesetWorkspaceConfig,
   ToolType,
@@ -14,6 +15,7 @@ export interface SuggestedModeLayer {
   blendMode?: LayerBlendMode;
   parallaxSpeed?: number;
   stagePlane?: string;
+  stageRole?: StageBuilderRole;
   colorTag?: string;
   opacity?: number;
 }
@@ -119,37 +121,40 @@ export const WORK_MODES_REGISTRY: Record<ProjectWorkMode, WorkModeDefinition> = 
     autoRulers: true,
     autoGuides: true,
     autoGrid: true,
-    prioritizedTools: ['pencil', 'bucket', 'dither', 'rectangle', 'line', 'move'],
-    recommendedPanels: ['workmode', 'layers', 'color', 'brushes', 'ai'],
+    prioritizedTools: ['tile', 'pencil', 'bucket', 'dither', 'rectangle', 'line', 'move'],
+    recommendedPanels: ['workmode', 'tilesets', 'layers', 'color', 'brushes', 'ai'],
     suggestedLayers: [
-      { name: 'Cielo', parallaxSpeed: 0.1, stagePlane: 'sky', colorTag: '#38bdf8' },
-      { name: 'Fondo lejano', parallaxSpeed: 0.25, stagePlane: 'far', colorTag: '#6366f1' },
-      { name: 'Fondo medio', parallaxSpeed: 0.5, stagePlane: 'mid', colorTag: '#8b5cf6' },
-      { name: 'Fondo cercano', parallaxSpeed: 0.75, stagePlane: 'near', colorTag: '#14b8a6' },
-      { name: 'Elementos decorativos', parallaxSpeed: 0.9, stagePlane: 'props', colorTag: '#f59e0b' },
-      { name: 'Suelo', parallaxSpeed: 1.0, stagePlane: 'ground', colorTag: '#10b981' },
-      { name: 'Primer plano', parallaxSpeed: 1.35, stagePlane: 'fg', colorTag: '#ef4444' },
-      { name: 'Efectos ambientales', parallaxSpeed: 1.15, stagePlane: 'fx', blendMode: 'screen', colorTag: '#22d3ee', opacity: 0.85 },
+      { name: 'Cielo', parallaxSpeed: 0.1, stagePlane: 'sky', stageRole: 'fondo', colorTag: '#38bdf8' },
+      { name: 'Fondo lejano', parallaxSpeed: 0.25, stagePlane: 'far', stageRole: 'parallax', colorTag: '#6366f1' },
+      { name: 'Fondo medio', parallaxSpeed: 0.5, stagePlane: 'mid', stageRole: 'parallax', colorTag: '#8b5cf6' },
+      { name: 'Fondo cercano', parallaxSpeed: 0.75, stagePlane: 'near', stageRole: 'objetos', colorTag: '#14b8a6' },
+      { name: 'Suelo', parallaxSpeed: 1.0, stagePlane: 'ground', stageRole: 'tiles', colorTag: '#10b981' },
+      { name: 'Primer plano', parallaxSpeed: 1.35, stagePlane: 'fg', stageRole: 'decoracion', colorTag: '#ef4444' },
+      { name: 'Efectos ambientales', parallaxSpeed: 1.15, stagePlane: 'fx', stageRole: 'fx', blendMode: 'screen', colorTag: '#22d3ee', opacity: 0.85 },
     ],
     templates: [
-      { id: 'stage_forest', name: 'Bosque Ancestral', subtitle: '4 planos parallax', category: 'Bosques' },
-      { id: 'stage_city', name: 'Ciudad Neón', subtitle: 'Skyline cyberpunk', category: 'Ciudades' },
-      { id: 'stage_castle', name: 'Castillo Gótico', subtitle: 'Luna y murallas', category: 'Castillos' },
-      { id: 'stage_ruins', name: 'Ruinas Antiguas', subtitle: 'Columnas y arena', category: 'Ruinas' },
-      { id: 'stage_interior', name: 'Dojo Interior', subtitle: 'Tatami y shoji', category: 'Interiores' },
-      { id: 'stage_lab', name: 'Laboratorio', subtitle: 'Cápsulas y monitores', category: 'Laboratorios' },
-      { id: 'stage_scifi', name: 'Estación Futurista', subtitle: 'Bahía espacial', category: 'Futurista' },
-      { id: 'stage_arena', name: 'Arena de Combate', subtitle: 'Coliseo arcade', category: 'Combate' },
+      { id: 'stage_forest', name: 'Bosque', subtitle: '4 planos parallax', category: 'Bosque' },
+      { id: 'stage_city', name: 'Ciudad', subtitle: 'Skyline neón urbano', category: 'Ciudad' },
+      { id: 'stage_castle', name: 'Castillo', subtitle: 'Luna y murallas', category: 'Castillo' },
+      { id: 'stage_temple', name: 'Templo', subtitle: 'Pagoda / Columnas', category: 'Templo' },
+      { id: 'stage_lab', name: 'Laboratorio', subtitle: 'Cápsulas y acero', category: 'Laboratorio' },
+      { id: 'stage_desert', name: 'Desierto', subtitle: 'Dunas y crepúsculo', category: 'Desierto' },
+      { id: 'stage_beach', name: 'Playa', subtitle: 'Océano y palmeras', category: 'Playa' },
+      { id: 'stage_mountain', name: 'Montaña', subtitle: 'Cumbres y niebla', category: 'Montaña' },
+      { id: 'stage_space', name: 'Espacio', subtitle: 'Estación orbital', category: 'Espacio' },
+      { id: 'stage_arena', name: 'Arena de combate', subtitle: 'Coliseo arcade', category: 'Combate' },
     ],
     aiCategories: [
-      { id: 'forest', label: 'Bosques', promptHint: 'pixel art enchanted twilight forest fighting stage with parallax trees and mossy ground' },
-      { id: 'city', label: 'Ciudades', promptHint: 'pixel art retro neon city street rooftop stage at night with skyscrapers' },
-      { id: 'castle', label: 'Castillos', promptHint: 'pixel art gothic stone castle rampart stage under full moon with torches' },
-      { id: 'ruins', label: 'Ruinas', promptHint: 'pixel art ancient temple ruins stage with broken marble pillars and desert sunset' },
-      { id: 'interior', label: 'Interiores', promptHint: 'pixel art traditional wooden martial arts dojo interior with shoji screens and lanterns' },
-      { id: 'lab', label: 'Laboratorios', promptHint: 'pixel art sci-fi biotech laboratory stage with glowing containment tubes and steel floor' },
-      { id: 'futuristic', label: 'Escenarios futuristas', promptHint: 'pixel art futuristic cyber orbital dock stage with holographic signs and metal catwalk' },
-      { id: 'combat_arena', label: 'Escenarios de combate', promptHint: 'pixel art grand tournament fighting arena colosseum with spotlights and cheering crowd' },
+      { id: 'forest', label: 'Bosque', promptHint: 'pixel art enchanted twilight forest fighting stage with parallax trees and mossy ground' },
+      { id: 'city', label: 'Ciudad', promptHint: 'pixel art retro neon city street rooftop stage at night with skyscrapers' },
+      { id: 'castle', label: 'Castillo', promptHint: 'pixel art gothic stone castle rampart stage under full moon with torches' },
+      { id: 'temple', label: 'Templo', promptHint: 'pixel art ancient martial arts mountain temple stage with stone lantern pillars' },
+      { id: 'lab', label: 'Laboratorio', promptHint: 'pixel art sci-fi biotech laboratory stage with glowing containment tubes and steel floor' },
+      { id: 'desert', label: 'Desierto', promptHint: 'pixel art golden desert canyon and sandstone ruins stage under fiery sunset' },
+      { id: 'beach', label: 'Playa', promptHint: 'pixel art tropical coastal pier beach fighting stage with waves and sunset' },
+      { id: 'mountain', label: 'Montaña', promptHint: 'pixel art misty alpine mountain summit dojo bridge fighting stage' },
+      { id: 'space', label: 'Espacio', promptHint: 'pixel art orbital space station deck stage overlooking planet nebula' },
+      { id: 'combat_arena', label: 'Arena de combate', promptHint: 'pixel art grand tournament fighting arena colosseum with spotlights and cheering crowd' },
     ],
   },
   hud_ui: {
@@ -749,35 +754,49 @@ export function buildModeTemplateLayers(
   if (templateId.startsWith('stage_')) {
     const palettes: Record<
       string,
-      { skyTop: string; skyBot: string; far: string; mid: string; ground: string; groundHi: string; accent: string; title: string }
+      { skyTop: string; skyBot: string; far: string; mid: string; near: string; ground: string; groundHi: string; accent: string; title: string }
     > = {
-      stage_forest: { skyTop: '#0f172a', skyBot: '#1e3a5f', far: '#14532d', mid: '#166534', ground: '#3f2e21', groundHi: '#4d7c0f', accent: '#fde047', title: 'Bosque Ancestral' },
-      stage_city: { skyTop: '#090d1f', skyBot: '#311042', far: '#1e1b4b', mid: '#312e81', ground: '#1f2937', groundHi: '#374151', accent: '#ec4899', title: 'Ciudad Neón' },
-      stage_castle: { skyTop: '#0c0a1d', skyBot: '#2e1065', far: '#334155', mid: '#475569', ground: '#1e293b', groundHi: '#64748b', accent: '#f59e0b', title: 'Castillo Gótico' },
-      stage_ruins: { skyTop: '#7c2d12', skyBot: '#ea580c', far: '#9a3412', mid: '#b45309', ground: '#78350f', groundHi: '#d97706', accent: '#fef08a', title: 'Ruinas Antiguas' },
-      stage_interior: { skyTop: '#451a03', skyBot: '#78350f', far: '#92400e', mid: '#d6d3d1', ground: '#854d0e', groundHi: '#ca8a04', accent: '#ef4444', title: 'Dojo Interior' },
-      stage_lab: { skyTop: '#082f49', skyBot: '#0f172a', far: '#1e293b', mid: '#334155', ground: '#0f172a', groundHi: '#06b6d4', accent: '#22d3ee', title: 'Laboratorio' },
-      stage_scifi: { skyTop: '#020617', skyBot: '#172554', far: '#1e3a8a', mid: '#1e293b', ground: '#334155', groundHi: '#38bdf8', accent: '#a855f7', title: 'Estación Futurista' },
-      stage_arena: { skyTop: '#1c1917', skyBot: '#44403c', far: '#57534e', mid: '#78716c', ground: '#a16207', groundHi: '#eab308', accent: '#ef4444', title: 'Arena de Combate' },
+      stage_forest: { skyTop: '#0f172a', skyBot: '#1e3a5f', far: '#14532d', mid: '#166534', near: '#15803d', ground: '#3f2e21', groundHi: '#4d7c0f', accent: '#fde047', title: 'Bosque' },
+      stage_city: { skyTop: '#090d1f', skyBot: '#311042', far: '#1e1b4b', mid: '#312e81', near: '#4338ca', ground: '#1f2937', groundHi: '#374151', accent: '#ec4899', title: 'Ciudad' },
+      stage_castle: { skyTop: '#0c0a1d', skyBot: '#2e1065', far: '#334155', mid: '#475569', near: '#1e293b', ground: '#1e293b', groundHi: '#64748b', accent: '#f59e0b', title: 'Castillo' },
+      stage_temple: { skyTop: '#31102f', skyBot: '#9a3412', far: '#581c87', mid: '#7c2d12', near: '#92400e', ground: '#57534e', groundHi: '#d6d3d1', accent: '#facc15', title: 'Templo' },
+      stage_ruins: { skyTop: '#7c2d12', skyBot: '#ea580c', far: '#9a3412', mid: '#b45309', near: '#78350f', ground: '#78350f', groundHi: '#d97706', accent: '#fef08a', title: 'Templo / Ruinas' },
+      stage_interior: { skyTop: '#451a03', skyBot: '#78350f', far: '#92400e', mid: '#d6d3d1', near: '#a8a29e', ground: '#854d0e', groundHi: '#ca8a04', accent: '#ef4444', title: 'Dojo Interior' },
+      stage_lab: { skyTop: '#082f49', skyBot: '#0f172a', far: '#1e293b', mid: '#334155', near: '#475569', ground: '#0f172a', groundHi: '#06b6d4', accent: '#22d3ee', title: 'Laboratorio' },
+      stage_desert: { skyTop: '#450a0a', skyBot: '#ea580c', far: '#b45309', mid: '#d97706', near: '#92400e', ground: '#ca8a04', groundHi: '#fde047', accent: '#fef08a', title: 'Desierto' },
+      stage_beach: { skyTop: '#0284c7', skyBot: '#bae6fd', far: '#0369a1', mid: '#0ea5e9', near: '#16a34a', ground: '#eab308', groundHi: '#fef08a', accent: '#ffffff', title: 'Playa' },
+      stage_mountain: { skyTop: '#0f172a', skyBot: '#475569', far: '#334155', mid: '#1e293b', near: '#0f172a', ground: '#475569', groundHi: '#cbd5e1', accent: '#38bdf8', title: 'Montaña' },
+      stage_space: { skyTop: '#020617', skyBot: '#090d1f', far: '#1e1b4b', mid: '#172554', near: '#334155', ground: '#1e293b', groundHi: '#38bdf8', accent: '#a855f7', title: 'Espacio' },
+      stage_scifi: { skyTop: '#020617', skyBot: '#172554', far: '#1e3a8a', mid: '#1e293b', near: '#334155', ground: '#334155', groundHi: '#38bdf8', accent: '#a855f7', title: 'Espacio' },
+      stage_arena: { skyTop: '#1c1917', skyBot: '#44403c', far: '#57534e', mid: '#78716c', near: '#44403c', ground: '#a16207', groundHi: '#eab308', accent: '#ef4444', title: 'Arena de combate' },
     };
     const p = palettes[templateId] || palettes.stage_city;
     const sky = makeGrid(w, h);
     const far = makeGrid(w, h);
     const mid = makeGrid(w, h);
+    const near = makeGrid(w, h);
     const ground = makeGrid(w, h);
+    const fxLayer = makeGrid(w, h);
     const horizon = Math.floor(h * 0.5);
     const floorY = Math.floor(h * 0.8);
 
-    // Sky gradient + celestial orb
+    // Sky gradient + celestial orb / stars
     for (let y = 0; y < floorY; y++) {
       const col = y < horizon * 0.6 ? p.skyTop : p.skyBot;
-      for (let x = 0; x < w; x++) sky[y][x] = col;
+      for (let x = 0; x < w; x++) {
+        if (templateId === 'stage_space' && ((x * 73 + y * 139) % 197 === 0)) {
+          sky[y][x] = '#f8fafc';
+        } else {
+          sky[y][x] = col;
+        }
+      }
     }
     drawFilledCircle(sky, Math.floor(w * 0.72), Math.floor(h * 0.22), Math.max(2, Math.floor(Math.min(w, h) * 0.08)), p.accent);
 
-    // Far silhouettes (seamless periodic hills/towers)
+    // Far silhouettes (seamless periodic hills/peaks/towers)
     for (let x = 0; x < w; x++) {
-      const wave = Math.floor(Math.sin((x / w) * Math.PI * 4) * (h * 0.12) + Math.cos((x / w) * Math.PI * 8) * (h * 0.04));
+      const amp = templateId === 'stage_mountain' ? 0.18 : 0.11;
+      const wave = Math.floor(Math.sin((x / w) * Math.PI * 4) * (h * amp) + Math.cos((x / w) * Math.PI * 8) * (h * 0.04));
       const topY = Math.max(2, horizon - Math.floor(h * 0.1) + wave);
       for (let y = topY; y < floorY; y++) far[y][x] = p.far;
     }
@@ -790,8 +809,14 @@ export function buildModeTemplateLayers(
       const bw = Math.max(3, Math.floor(span * 0.45));
       const bh = Math.floor(h * (0.28 + (i % 2) * 0.12));
       fillRect(mid, bx, floorY - bh, bw, bh, p.mid);
-      // Lit windows / lanterns
       fillRect(mid, bx + 1, floorY - bh + 2, Math.max(1, bw - 2), 2, p.accent);
+    }
+
+    // Near prop accents (posts / lanterns / pillars)
+    const nearStep = Math.max(10, Math.floor(w / 3));
+    for (let x = Math.floor(nearStep * 0.3); x < w; x += nearStep) {
+      fillRect(near, x, floorY - Math.max(6, Math.floor(h * 0.16)), Math.max(2, Math.floor(w * 0.025)), Math.max(6, Math.floor(h * 0.16)), p.near);
+      fillRect(near, x, floorY - Math.max(6, Math.floor(h * 0.16)), Math.max(2, Math.floor(w * 0.025)), 2, p.accent);
     }
 
     // Ground plane
@@ -801,13 +826,22 @@ export function buildModeTemplateLayers(
       fillRect(ground, x, floorY + 2, 1, h - floorY - 2, p.groundHi);
     }
 
+    // Ambient atmosphere glow specks
+    for (let i = 0; i < 8; i++) {
+      const fxX = Math.floor(((i * 97 + 13) % 100) * 0.01 * w);
+      const fxY = Math.floor(((i * 53 + 19) % 75) * 0.01 * h);
+      if (fxY < h && fxX < w) fxLayer[fxY][fxX] = p.accent;
+    }
+
     return {
       title: p.title,
       layers: [
         { name: 'Cielo', pixels: sky, parallaxSpeed: 0.1, stagePlane: 'sky', colorTag: '#38bdf8' },
-        { name: 'Fondo lejano', pixels: far, parallaxSpeed: 0.3, stagePlane: 'far', colorTag: '#6366f1' },
-        { name: 'Fondo medio', pixels: mid, parallaxSpeed: 0.6, stagePlane: 'mid', colorTag: '#8b5cf6' },
+        { name: 'Fondo lejano', pixels: far, parallaxSpeed: 0.25, stagePlane: 'far', colorTag: '#6366f1' },
+        { name: 'Fondo medio', pixels: mid, parallaxSpeed: 0.5, stagePlane: 'mid', colorTag: '#8b5cf6' },
+        { name: 'Fondo cercano', pixels: near, parallaxSpeed: 0.75, stagePlane: 'near', colorTag: '#14b8a6' },
         { name: 'Suelo', pixels: ground, parallaxSpeed: 1.0, stagePlane: 'ground', colorTag: '#10b981' },
+        { name: 'Efectos ambientales', pixels: fxLayer, parallaxSpeed: 1.15, stagePlane: 'fx', colorTag: '#22d3ee', opacity: 0.85 },
       ],
     };
   }

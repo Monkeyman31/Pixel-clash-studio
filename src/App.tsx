@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { FileText, Plus, X, Upload } from 'lucide-react';
+import { FileText, Plus, X, Upload, Maximize2 } from 'lucide-react';
 import { TopBar } from './components/TopBar';
+import { PixelClashLogoIcon } from './components/PixelClashLogoIcon';
 import { MenuBar, ImportMenuMode } from './components/MenuBar';
 import { ToolOptionsBar } from './components/ToolOptionsBar';
 import { SmartImportDestination, SmartImportFitMode, SmartImportModal } from './components/SmartImportModal';
@@ -105,6 +106,7 @@ import {
   EditableFxRecipe,
   EraserToolOptions,
   EyedropperConfig,
+  FightingGameProfileId,
   Frame,
   FramePhase,
   GradientConfig,
@@ -155,11 +157,14 @@ import {
   ShortcutBinding,
   ShortcutProfileId,
   SmartDeleteCandidate,
+  StageBuilderRole,
   StageParallaxConfig,
   StageType,
   StartupPreferences,
   SymmetryConfig,
+  TilesetCollection,
   TilesetWorkspaceConfig,
+  TileToolConfig,
   TimelineMarker,
   ToolType,
   TransformActionId,
@@ -174,6 +179,15 @@ import {
   ZoomCommand,
   ZoomToolMode
 } from './types';
+import {
+  FIGHTING_GAME_PROFILES,
+  buildFightingProfileGuides,
+} from './utils/fightingGameProfiles';
+import {
+  captureTilePixelsFromGrid,
+  createDefaultTilesetLibrary,
+  DEFAULT_TILE_TOOL_CONFIG,
+} from './utils/tilesetEngine';
 import {
   DEFAULT_STAGE_PARALLAX_CONFIG,
   DEFAULT_TILESET_CONFIG,
@@ -411,6 +425,11 @@ interface PixelClashDesktopBridge {
   setUnsavedState?: (hasUnsaved: boolean) => Promise<{ ok: boolean }> | void;
   onRequestAppClose?: (cb: () => void) => () => void;
   confirmAppClose?: () => Promise<{ ok: boolean }> | void;
+  windowMinimize?: () => Promise<{ ok: boolean }>;
+  windowToggleMaximize?: () => Promise<{ maximized: boolean }>;
+  isWindowMaximized?: () => Promise<{ maximized: boolean }>;
+  windowClose?: () => Promise<{ ok: boolean }>;
+  onWindowMaximizeChange?: (cb: (isMax: boolean) => void) => () => void;
 }
 
 function getDesktopBridge(): PixelClashDesktopBridge | null {
@@ -913,6 +932,9 @@ export default function App() {
     DEFAULT_STAGE_PARALLAX_CONFIG
   );
   const [tilesetConfig, setTilesetConfig] = useState<TilesetWorkspaceConfig>(DEFAULT_TILESET_CONFIG);
+  const [activeFightingProfile, setActiveFightingProfile] = useState<FightingGameProfileId>('kof');
+  const [tilesets, setTilesets] = useState<TilesetCollection[]>(() => createDefaultTilesetLibrary(16));
+  const [tileToolConfig, setTileToolConfig] = useState<TileToolConfig>(DEFAULT_TILE_TOOL_CONFIG);
   const [fxStudioModalOpen, setFxStudioModalOpen] = useState<boolean>(false);
   const [fxStudioTab, setFxStudioTab] = useState<'generator' | 'lab' | 'library'>('generator');
   const [fxStudioInitialRecipe, setFxStudioInitialRecipe] = useState<EditableFxRecipe | null>(null);
@@ -1047,6 +1069,8 @@ export default function App() {
   const [newProjectModalOpen, setNewProjectModalOpen] = useState<boolean>(false);
   const [newProjectInitialCategory, setNewProjectInitialCategory] =
     useState<NewProjectTemplateCategory>('Todas');
+  const [newProjectInitialFightingProfileId, setNewProjectInitialFightingProfileId] =
+    useState<FightingGameProfileId>('custom');
   const [documentDpi, setDocumentDpi] = useState<number>(72);
   const [startupPreferences, setStartupPreferences] = useState<StartupPreferences>(() =>
     loadStartupPreferences()
@@ -1237,13 +1261,27 @@ export default function App() {
   const [unsavedAppCloseModalOpen, setUnsavedAppCloseModalOpen] = useState<boolean>(false);
   const [isAppClosingFromElectron, setIsAppClosingFromElectron] = useState<boolean>(false);
   const [isBatchSavingDocs, setIsBatchSavingDocs] = useState<boolean>(false);
+  const [reviewCloseSession, setReviewCloseSession] = useState<{
+    docIds: string[];
+    currentIndex: number;
+    fromElectronExit: boolean;
+  } | null>(null);
+  const [batchSaveAsQueue, setBatchSaveAsQueue] = useState<{
+    remainingDocIds: string[];
+    savedCount: number;
+    totalNewLocationCount: number;
+    fromElectronExit: boolean;
+  } | null>(null);
   const [saveAsModalState, setSaveAsModalState] = useState<{
     docId: string;
     initialName: string;
     initialFormat: SaveAsFormatId;
-    afterSaveAction?: 'close_doc' | null;
+    afterSaveAction?: 'close_doc' | 'batch_close_queue' | 'review_next' | null;
+    queueLabel?: string | null;
   } | null>(null);
   const [isSavingAs, setIsSavingAs] = useState<boolean>(false);
+  const [isWindowMaximized, setIsWindowMaximized] = useState<boolean>(false);
+  const [isWindowMinimized, setIsWindowMinimized] = useState<boolean>(false);
 
   // Dedicated Import Into Project State + Smart Import Modal + External OS Drop Overlay
   const [pendingImportMode, setPendingImportMode] = useState<ImportMenuMode | null>(null);
@@ -2149,6 +2187,36 @@ export default function App() {
       pushHistorySnapshot({ frames: updated });
     },
     [currentFrameIndex, pushHistorySnapshot, syncGlobalLayerAcrossFrames]
+  );
+
+  // Commit Tiles tool paint / erase / replace / autotile edit atomically (pixels + tileMapData)
+  const handleCommitTileLayerEdit = useCallback(
+    (newPixels: (string | null)[][], tileMapData: Record<string, string>) => {
+      const prevFrames = framesRef.current;
+      let editedLayer: Layer | null = null;
+      let updated = prevFrames.map((f, fIdx) => {
+        if (fIdx !== currentFrameIndex) return f;
+        return {
+          ...f,
+          layers: f.layers.map((l, lIdx) => {
+            if (lIdx !== currentLayerIndex) return l;
+            editedLayer = {
+              ...l,
+              pixels: newPixels,
+              tileMapData,
+            };
+            return editedLayer;
+          }),
+        };
+      });
+      if (editedLayer && (editedLayer as Layer).isGlobal) {
+        updated = syncGlobalLayerAcrossFrames(updated, editedLayer);
+      }
+      framesRef.current = updated;
+      setFrames(updated);
+      pushHistorySnapshot({ frames: updated });
+    },
+    [currentFrameIndex, currentLayerIndex, pushHistorySnapshot, syncGlobalLayerAcrossFrames]
   );
 
   // Update hitboxes of current frame
@@ -3178,9 +3246,25 @@ export default function App() {
       const nextDpi = Math.max(1, Math.round(cfg.dpi || 72));
       const finalName = (cfg.name || '').trim() || 'Nuevo Proyecto';
 
-      if (cfg.initialPaletteId) {
-        const pal = FIGHTING_GAME_PALETTES.find((p) => p.id === cfg.initialPaletteId);
+      const effectiveWorkMode: ProjectWorkMode = cfg.workMode || workMode;
+      const profileId = cfg.fightingProfileId;
+      const profileSpec =
+        profileId && profileId !== 'custom' ? FIGHTING_GAME_PROFILES[profileId] : null;
+      const nextFps = profileSpec ? profileSpec.fighterLayout.recommendedFps : animationFps;
+
+      if (profileId) {
+        setActiveFightingProfile(profileId);
+      }
+      if (profileSpec) {
+        setAnimationFps(nextFps);
+      }
+
+      const resolvedPaletteId = cfg.initialPaletteId || profileSpec?.paletteId;
+      let nextPaletteColors = activePaletteColors;
+      if (resolvedPaletteId) {
+        const pal = FIGHTING_GAME_PALETTES.find((p) => p.id === resolvedPaletteId);
         if (pal && pal.colors.length > 0) {
+          nextPaletteColors = pal.colors;
           setActivePaletteColors(pal.colors);
           setPrimaryColor(pal.colors[0]);
           if (pal.colors[1]) setSecondaryColor(pal.colors[1]);
@@ -3218,37 +3302,71 @@ export default function App() {
               visible: true,
               locked: false,
               playbackMode: 'loop',
-              fps: 12,
+              fps: nextFps,
             },
           ]
         : [];
 
-      const layers: Layer[] = cfg.createInitialLayer
-        ? [
-            {
-              id: 'layer-base',
-              name: cfg.backgroundMode === 'solid' ? 'Fondo Sólido' : 'Capa 1',
-              visible: true,
-              locked: false,
-              opacity: 1,
-              pixels: initialPixels,
-              tiledStoreId: initialTiledStoreId,
-              tiledRevision: initialTiledStoreId ? 1 : undefined,
-              groupId: cfg.createInitialGroup ? 'group-main' : undefined,
-            },
-          ]
-        : [
-            {
-              id: 'layer-base',
-              name: 'Capa 1',
-              visible: true,
-              locked: false,
-              opacity: 1,
-              pixels: useTiled ? [] : createEmptyGrid(newW, newH),
-              tiledStoreId: useTiled ? registerTiledStore(new TiledLayerStore(newW, newH)) : undefined,
-              tiledRevision: useTiled ? 1 : undefined,
-            },
-          ];
+      let layers: Layer[];
+      if (effectiveWorkMode === 'stage' && cfg.createInitialLayer) {
+        const stageSpecs = WORK_MODES_REGISTRY.stage.suggestedLayers;
+        layers = stageSpecs.map((spec, idx) => {
+          const isSkyLayer = idx === 0;
+          const layerStoreId = useTiled
+            ? isSkyLayer && initialTiledStoreId
+              ? initialTiledStoreId
+              : registerTiledStore(new TiledLayerStore(newW, newH))
+            : undefined;
+          return {
+            id: `layer-stage-${Date.now()}-${idx}`,
+            name: spec.name,
+            visible: true,
+            locked: false,
+            opacity: spec.opacity ?? 1,
+            fillOpacity: 1,
+            blendMode: spec.blendMode || 'normal',
+            pixels: useTiled ? [] : isSkyLayer ? initialPixels : createEmptyGrid(newW, newH),
+            tiledStoreId: layerStoreId,
+            tiledRevision: layerStoreId ? 1 : undefined,
+            groupId: cfg.createInitialGroup ? 'group-main' : undefined,
+            colorTag: spec.colorTag,
+            parallaxSpeed: spec.parallaxSpeed,
+            stagePlane: spec.stagePlane,
+            stageRole: spec.stageRole,
+          };
+        });
+      } else {
+        layers = cfg.createInitialLayer
+          ? [
+              {
+                id: 'layer-base',
+                name: cfg.backgroundMode === 'solid' ? 'Fondo Sólido' : 'Capa 1',
+                visible: true,
+                locked: false,
+                opacity: 1,
+                pixels: initialPixels,
+                tiledStoreId: initialTiledStoreId,
+                tiledRevision: initialTiledStoreId ? 1 : undefined,
+                groupId: cfg.createInitialGroup ? 'group-main' : undefined,
+              },
+            ]
+          : [
+              {
+                id: 'layer-base',
+                name: 'Capa 1',
+                visible: true,
+                locked: false,
+                opacity: 1,
+                pixels: useTiled ? [] : createEmptyGrid(newW, newH),
+                tiledStoreId: useTiled ? registerTiledStore(new TiledLayerStore(newW, newH)) : undefined,
+                tiledRevision: useTiled ? 1 : undefined,
+              },
+            ];
+      }
+
+      const initialGuides: CanvasGuide[] = profileSpec
+        ? buildFightingProfileGuides(profileSpec.id, newW, newH)
+        : [];
 
       const newFrames: Frame[] = [
         {
@@ -3343,6 +3461,30 @@ export default function App() {
       setCanvasWidth(newW);
       setCanvasHeight(newH);
       setDocumentDpi(nextDpi);
+      setWorkMode(effectiveWorkMode);
+      if (effectiveWorkMode === 'stage') {
+        setStageParallaxConfig((prev) => ({
+          ...prev,
+          enabled: true,
+          horizonPct: profileSpec ? profileSpec.stageLayout.horizonPct : prev.horizonPct,
+          playableFloorPct: profileSpec ? profileSpec.stageLayout.floorPct : prev.playableFloorPct,
+          jumpHeightPct: profileSpec ? profileSpec.stageLayout.jumpHeightPct : prev.jumpHeightPct,
+        }));
+        setGuidesConfig((prev) => ({
+          ...prev,
+          showRulers: true,
+          showGuides: true,
+          stageDepth: {
+            ...prev.stageDepth,
+            enabled: true,
+          },
+        }));
+      }
+      if (initialGuides.length > 0) {
+        guidesRef.current = initialGuides;
+        setGuides(initialGuides);
+        setGuidesConfig((prev) => ({ ...prev, showGuides: true, showRulers: true }));
+      }
       setHomeScreenOpen(false);
       setNewProjectModalOpen(false);
       layerGroupsRef.current = nextGroups;
@@ -3382,6 +3524,7 @@ export default function App() {
         layerGroups: nextGroups,
         currentFrameIndex: 0,
         currentLayerIndex: 0,
+        ...(initialGuides.length > 0 ? { guides: initialGuides } : {}),
       });
       suppressDirtyMarkRef.current = false;
 
@@ -3401,15 +3544,15 @@ export default function App() {
         globalPivot: { x: Math.floor(newW / 2), y: Math.floor(newH * 0.8) },
         actionTags: [],
         playbackMode: 'loop',
-        fps: animationFps,
+        fps: nextFps,
         references: [],
         referenceGroups: [],
         timelineMarkers: [],
         cameraShake: { ...cameraShake },
         cameraKeyframes: [],
-        activePaletteColors: [...activePaletteColors],
-        guides: [],
-        workMode,
+        activePaletteColors: [...nextPaletteColors],
+        guides: initialGuides,
+        workMode: effectiveWorkMode,
       };
       const entry: RecentProjectEntry = {
         id: entryId,
@@ -7715,6 +7858,7 @@ export default function App() {
           colorTag: spec.colorTag,
           parallaxSpeed: spec.parallaxSpeed,
           stagePlane: spec.stagePlane,
+          stageRole: spec.stageRole,
         });
       });
       if (layersToAdd.length === 0) {
@@ -7756,6 +7900,15 @@ export default function App() {
       const built = buildModeTemplateLayers(templateId, canvasWidth, canvasHeight);
       if (!built || built.layers.length === 0) return;
       const stamp = Date.now();
+      const mapPlaneToRole = (plane?: string): StageBuilderRole | undefined => {
+        if (plane === 'sky') return 'fondo';
+        if (plane === 'far' || plane === 'mid') return 'parallax';
+        if (plane === 'near') return 'objetos';
+        if (plane === 'ground') return 'tiles';
+        if (plane === 'fg') return 'decoracion';
+        if (plane === 'fx') return 'fx';
+        return undefined;
+      };
       const newLayers: Layer[] = built.layers.map((spec, idx) => ({
         id: `layer-tpl-${stamp}-${idx}`,
         name: spec.name,
@@ -7769,6 +7922,7 @@ export default function App() {
         colorTag: spec.colorTag,
         parallaxSpeed: spec.parallaxSpeed,
         stagePlane: spec.stagePlane,
+        stageRole: mapPlaneToRole(spec.stagePlane),
       }));
       const updated = framesRef.current.map((f, fIdx) =>
         fIdx === currentFrameIndex ? { ...f, layers: [...f.layers, ...newLayers] } : f
@@ -7802,6 +7956,127 @@ export default function App() {
       setFrames(updated);
     },
     [currentFrameIndex]
+  );
+
+  const handleAddStageRoleLayer = useCallback(
+    (role: StageBuilderRole) => {
+      const roleSpec: Record<
+        StageBuilderRole,
+        {
+          label: string;
+          parallaxSpeed: number;
+          stagePlane: string;
+          colorTag: string;
+          blendMode?: 'normal' | 'screen';
+          opacity?: number;
+        }
+      > = {
+        fondo: { label: 'Fondo', parallaxSpeed: 0.15, stagePlane: 'sky', colorTag: '#38bdf8' },
+        parallax: { label: 'Parallax', parallaxSpeed: 0.45, stagePlane: 'mid', colorTag: '#6366f1' },
+        objetos: { label: 'Objetos', parallaxSpeed: 0.75, stagePlane: 'near', colorTag: '#14b8a6' },
+        tiles: { label: 'Tiles', parallaxSpeed: 1.0, stagePlane: 'ground', colorTag: '#10b981' },
+        decoracion: { label: 'Decoración', parallaxSpeed: 1.35, stagePlane: 'fg', colorTag: '#f43f5e' },
+        fx: {
+          label: 'Efectos ambientales',
+          parallaxSpeed: 1.15,
+          stagePlane: 'fx',
+          colorTag: '#22d3ee',
+          blendMode: 'screen',
+          opacity: 0.85,
+        },
+      };
+      const meta = roleSpec[role];
+      const curFrame = framesRef.current[currentFrameIndex];
+      if (!curFrame) return;
+      const sameRoleCount = curFrame.layers.filter((l) => l.stageRole === role).length;
+      const newLayer: Layer = {
+        id: `layer-stage-role-${role}-${Date.now()}`,
+        name: sameRoleCount > 0 ? `${meta.label} #${sameRoleCount + 1}` : meta.label,
+        visible: true,
+        locked: false,
+        opacity: meta.opacity ?? 1,
+        fillOpacity: 1,
+        blendMode: meta.blendMode || 'normal',
+        pixels: createEmptyGrid(canvasWidth, canvasHeight),
+        groupId: null,
+        colorTag: meta.colorTag,
+        parallaxSpeed: meta.parallaxSpeed,
+        stagePlane: meta.stagePlane,
+        stageRole: role,
+      };
+      const updated = framesRef.current.map((f, fIdx) =>
+        fIdx === currentFrameIndex ? { ...f, layers: [...f.layers, newLayer] } : f
+      );
+      framesRef.current = updated;
+      setFrames(updated);
+      setCurrentLayerIndex(updated[currentFrameIndex].layers.length - 1);
+      pushHistorySnapshot({ frames: updated });
+      if (role === 'tiles') {
+        handleSelectTool('tile');
+      }
+      setImportNotification(`Capa Stage Builder añadida: ${newLayer.name} (${meta.parallaxSpeed.toFixed(2)}×).`);
+      setTimeout(() => setImportNotification(null), 2400);
+    },
+    [canvasWidth, canvasHeight, currentFrameIndex, pushHistorySnapshot, handleSelectTool]
+  );
+
+  const handleApplyFightingProfile = useCallback(
+    (profileId: FightingGameProfileId) => {
+      setActiveFightingProfile(profileId);
+      const spec = FIGHTING_GAME_PROFILES[profileId] || FIGHTING_GAME_PROFILES.custom;
+      const pal = FIGHTING_GAME_PALETTES.find((p) => p.id === spec.paletteId);
+      if (pal && pal.colors.length > 0) {
+        setActivePaletteColors(pal.colors);
+        setPrimaryColor(pal.colors[0]);
+        if (pal.colors[1]) setSecondaryColor(pal.colors[1]);
+      }
+      setAnimationFps(spec.fighterLayout.recommendedFps);
+      setPixelPerfect(spec.fighterLayout.pixelPerfect);
+      setBrushSettings((prev) => ({ ...prev, pixelPerfect: spec.fighterLayout.pixelPerfect }));
+
+      const nextGuides = buildFightingProfileGuides(profileId, canvasWidth, canvasHeight);
+      const filteredOld = guidesRef.current.filter((g) => !g.id.startsWith('fg-guide-'));
+      const mergedGuides = [...filteredOld, ...nextGuides];
+      guidesRef.current = mergedGuides;
+      setGuides(mergedGuides);
+      handleChangeGuidesConfig({
+        ...guidesConfig,
+        showGuides: true,
+        showRulers: true,
+        stageDepth: {
+          ...guidesConfig.stageDepth,
+          enabled: workMode === 'stage' ? true : guidesConfig.stageDepth.enabled,
+        },
+      });
+      if (workMode === 'stage') {
+        setStageParallaxConfig((prev) => ({
+          ...prev,
+          enabled: true,
+          horizonPct: spec.stageLayout.horizonPct,
+          playableFloorPct: spec.stageLayout.floorPct,
+          jumpHeightPct: spec.stageLayout.jumpHeightPct,
+        }));
+      }
+      pushHistorySnapshot({ guides: mergedGuides });
+      setImportNotification(`Perfil aplicado: ${spec.name} (${spec.fighterLayout.recommendedFps} FPS · ${nextGuides.length} guías).`);
+      setTimeout(() => setImportNotification(null), 2800);
+    },
+    [canvasWidth, canvasHeight, workMode, guidesConfig, handleChangeGuidesConfig, pushHistorySnapshot]
+  );
+
+  const handleCaptureTileFromCanvas = useCallback(
+    (tileSize: number): (string | null)[][] | null => {
+      const layer = framesRef.current[currentFrameIndex]?.layers[currentLayerIndex];
+      if (!layer || !layer.pixels || layer.pixels.length === 0) return null;
+      const startX =
+        selection && selection.active ? Math.min(selection.startX, selection.endX) : 0;
+      const startY =
+        selection && selection.active ? Math.min(selection.startY, selection.endY) : 0;
+      const captured = captureTilePixelsFromGrid(layer.pixels, startX, startY, tileSize);
+      const hasAnyPixel = captured.some((row) => row.some((c) => Boolean(c)));
+      return hasAnyPixel ? captured : null;
+    },
+    [currentFrameIndex, currentLayerIndex, selection]
   );
 
   const handleTriggerModeAi = useCallback(
@@ -8848,7 +9123,7 @@ export default function App() {
         markDocumentSaved(docId, format, cleanTitle);
 
         const recFmt: RecentProjectFileFormat =
-          format === 'spritesheet' ? 'png' : format;
+          format === 'spritesheet' ? 'png' : format === 'animation' ? 'json' : format;
         const snapForRec: OpenDocumentSnapshot =
           doc.id === activeDocumentIdRef.current
             ? { ...buildCurrentDocumentSnapshot(), name: cleanTitle }
@@ -8883,7 +9158,11 @@ export default function App() {
   );
 
   const handleOpenSaveAsModal = useCallback(
-    (docId?: string, afterSaveAction: 'close_doc' | null = null) => {
+    (
+      docId?: string,
+      afterSaveAction: 'close_doc' | 'batch_close_queue' | 'review_next' | null = null,
+      queueLabel: string | null = null
+    ) => {
       const targetId = docId || activeDocumentIdRef.current;
       const doc = openDocumentsRef.current.find((d) => d.id === targetId);
       const nameToUse = doc ? doc.name : projectName;
@@ -8893,6 +9172,7 @@ export default function App() {
         initialName: nameToUse,
         initialFormat: fmtToUse,
         afterSaveAction,
+        queueLabel,
       });
     },
     [projectName]
@@ -8915,85 +9195,199 @@ export default function App() {
     }
   }, [handleOpenSaveAsModal, handleSaveProjectPcs, handleSaveDocumentInFormat]);
 
+  const completeAllDocumentsClose = useCallback(
+    (overrideElectronExit?: boolean) => {
+      setUnsavedAppCloseModalOpen(false);
+      setReviewCloseSession(null);
+      setBatchSaveAsQueue(null);
+      const useElectronExit =
+        typeof overrideElectronExit === 'boolean'
+          ? overrideElectronExit
+          : isAppClosingFromElectron;
+      setIsAppClosingFromElectron(false);
+
+      const bridge = getDesktopBridge();
+      if (useElectronExit && bridge?.confirmAppClose) {
+        void bridge.confirmAppClose();
+        return;
+      }
+
+      const blankSnap = createFreshBlankDocumentSnapshot('Proyecto 1', 48, 48);
+      const freshId = `doc-blank-${Date.now()}`;
+      setOpenDocuments([
+        {
+          id: freshId,
+          name: blankSnap.name,
+          width: blankSnap.width,
+          height: blankSnap.height,
+          snapshot: null,
+          isDirty: false,
+          isNewUnsaved: true,
+          hasSavedLocation: false,
+        },
+      ]);
+      activeDocumentIdRef.current = freshId;
+      setActiveDocumentId(freshId);
+      applyDocumentSnapshot(blankSnap);
+      setHomeScreenOpen(true);
+      setImportNotification('Todos los documentos cerrados de forma segura.');
+      setTimeout(() => setImportNotification(null), 2800);
+    },
+    [isAppClosingFromElectron, applyDocumentSnapshot, createFreshBlankDocumentSnapshot]
+  );
+
   const handleRequestCloseAllDocuments = useCallback(
-    (fromElectronExit: boolean = false) => {
+    (fromElectronExit: boolean = Boolean(getDesktopBridge()?.isNativeDesktop)) => {
       const dirtyDocs = openDocumentsRef.current.filter((d) => d.isDirty);
       if (dirtyDocs.length === 0) {
-        if (fromElectronExit) {
-          void getDesktopBridge()?.confirmAppClose?.();
-        } else {
-          const blankSnap = createFreshBlankDocumentSnapshot('Proyecto 1', 48, 48);
-          const freshId = `doc-blank-${Date.now()}`;
-          setOpenDocuments([
-            {
-              id: freshId,
-              name: blankSnap.name,
-              width: blankSnap.width,
-              height: blankSnap.height,
-              snapshot: null,
-              isDirty: false,
-              isNewUnsaved: true,
-              hasSavedLocation: false,
-            },
-          ]);
-          activeDocumentIdRef.current = freshId;
-          setActiveDocumentId(freshId);
-          applyDocumentSnapshot(blankSnap);
-          setImportNotification('Todos los documentos han sido cerrados.');
-          setTimeout(() => setImportNotification(null), 2600);
-        }
+        completeAllDocumentsClose(fromElectronExit);
         return;
       }
       setIsAppClosingFromElectron(fromElectronExit);
       setUnsavedAppCloseModalOpen(true);
     },
-    [applyDocumentSnapshot, createFreshBlankDocumentSnapshot]
+    [completeAllDocumentsClose]
   );
 
-  const completeAllDocumentsClose = useCallback(() => {
-    setUnsavedAppCloseModalOpen(false);
-    if (isAppClosingFromElectron) {
-      setIsAppClosingFromElectron(false);
-      void getDesktopBridge()?.confirmAppClose?.();
-      return;
-    }
-    const blankSnap = createFreshBlankDocumentSnapshot('Proyecto 1', 48, 48);
-    const freshId = `doc-blank-${Date.now()}`;
-    setOpenDocuments([
-      {
-        id: freshId,
-        name: blankSnap.name,
-        width: blankSnap.width,
-        height: blankSnap.height,
-        snapshot: null,
-        isDirty: false,
-        isNewUnsaved: true,
-        hasSavedLocation: false,
-      },
-    ]);
-    activeDocumentIdRef.current = freshId;
-    setActiveDocumentId(freshId);
-    applyDocumentSnapshot(blankSnap);
-  }, [isAppClosingFromElectron, applyDocumentSnapshot, createFreshBlankDocumentSnapshot]);
+  const handleStartReviewOneByOne = useCallback(
+    (docIds: string[]) => {
+      const cleanIds = docIds.filter((id) =>
+        openDocumentsRef.current.some((d) => d.id === id && d.isDirty)
+      );
+      setUnsavedAppCloseModalOpen(false);
+      if (cleanIds.length === 0) {
+        completeAllDocumentsClose();
+        return;
+      }
+      setReviewCloseSession({
+        docIds: cleanIds,
+        currentIndex: 0,
+        fromElectronExit: isAppClosingFromElectron,
+      });
+    },
+    [completeAllDocumentsClose, isAppClosingFromElectron]
+  );
 
   const handleBatchSaveSelectedAndClose = useCallback(
     async (selectedIds: string[]) => {
+      if (selectedIds.length === 0) {
+        completeAllDocumentsClose();
+        return;
+      }
       setIsBatchSavingDocs(true);
       try {
+        const docsWithLoc: string[] = [];
+        const docsWithoutLoc: string[] = [];
         for (const docId of selectedIds) {
           const doc = openDocumentsRef.current.find((d) => d.id === docId);
           if (!doc) continue;
-          await handleSaveDocumentInFormat(docId, doc.savedFormat || 'pcs', { silent: true });
+          if (doc.hasSavedLocation) docsWithLoc.push(docId);
+          else docsWithoutLoc.push(docId);
         }
-        setImportNotification(`${selectedIds.length} documento(s) guardados antes de cerrar.`);
-        setTimeout(() => setImportNotification(null), 3200);
-        completeAllDocumentsClose();
+
+        let savedNow = 0;
+        for (const docId of docsWithLoc) {
+          const doc = openDocumentsRef.current.find((d) => d.id === docId);
+          if (!doc) continue;
+          const ok = await handleSaveDocumentInFormat(docId, doc.savedFormat || 'pcs', {
+            silent: true,
+          });
+          if (ok) savedNow++;
+        }
+
+        if (docsWithoutLoc.length === 0) {
+          setImportNotification(`${savedNow} documento(s) guardados antes de cerrar.`);
+          setTimeout(() => setImportNotification(null), 3200);
+          completeAllDocumentsClose();
+          return;
+        }
+
+        // Documents without path/location -> open Guardar Como... automatically one by one
+        const firstId = docsWithoutLoc[0];
+        const firstDoc = openDocumentsRef.current.find((d) => d.id === firstId);
+        setUnsavedAppCloseModalOpen(false);
+        setBatchSaveAsQueue({
+          remainingDocIds: docsWithoutLoc.slice(1),
+          savedCount: savedNow,
+          totalNewLocationCount: docsWithoutLoc.length,
+          fromElectronExit: isAppClosingFromElectron,
+        });
+        handleOpenSaveAsModal(
+          firstId,
+          'batch_close_queue',
+          `${firstDoc?.name || 'Documento'} (1 de ${docsWithoutLoc.length})`
+        );
       } finally {
         setIsBatchSavingDocs(false);
       }
     },
-    [handleSaveDocumentInFormat, completeAllDocumentsClose]
+    [
+      handleSaveDocumentInFormat,
+      completeAllDocumentsClose,
+      handleOpenSaveAsModal,
+      isAppClosingFromElectron,
+    ]
   );
+
+  const handleMinimizeWindow = useCallback(() => {
+    const bridge = getDesktopBridge();
+    if (bridge?.windowMinimize) {
+      void bridge.windowMinimize();
+      return;
+    }
+    setIsWindowMinimized(true);
+  }, []);
+
+  const handleToggleMaximizeWindow = useCallback(() => {
+    const bridge = getDesktopBridge();
+    if (bridge?.windowToggleMaximize) {
+      void Promise.resolve(bridge.windowToggleMaximize()).then((res) => {
+        if (typeof res?.maximized === 'boolean') {
+          setIsWindowMaximized(res.maximized);
+        }
+      });
+      return;
+    }
+    if (!document.fullscreenElement) {
+      document.documentElement
+        .requestFullscreen?.()
+        .then(() => setIsWindowMaximized(true))
+        .catch(() => setIsWindowMaximized((v) => !v));
+    } else {
+      document
+        .exitFullscreen?.()
+        .then(() => setIsWindowMaximized(false))
+        .catch(() => setIsWindowMaximized((v) => !v));
+    }
+  }, []);
+
+  const handleCloseApplicationWindow = useCallback(() => {
+    const bridge = getDesktopBridge();
+    handleRequestCloseAllDocuments(Boolean(bridge?.isNativeDesktop));
+  }, [handleRequestCloseAllDocuments]);
+
+  useEffect(() => {
+    const bridge = getDesktopBridge();
+    let unsubMax: (() => void) | undefined;
+    if (bridge?.isWindowMaximized) {
+      void Promise.resolve(bridge.isWindowMaximized()).then((res) => {
+        if (typeof res?.maximized === 'boolean') setIsWindowMaximized(res.maximized);
+      });
+    }
+    if (bridge?.onWindowMaximizeChange) {
+      unsubMax = bridge.onWindowMaximizeChange((val) => setIsWindowMaximized(val));
+    }
+    const onFullscreenChange = () => {
+      if (!bridge?.isNativeDesktop) {
+        setIsWindowMaximized(Boolean(document.fullscreenElement));
+      }
+    };
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    return () => {
+      if (typeof unsubMax === 'function') unsubMax();
+      document.removeEventListener('fullscreenchange', onFullscreenChange);
+    };
+  }, []);
 
   // Sync unsaved dirty state to Electron window + browser beforeunload + desktop exit listener
   const hasAnyDirtyDocument = useMemo(
@@ -10306,15 +10700,15 @@ export default function App() {
         handleResetDefaultLayout();
         appendStudioLog('Disposición predeterminada restaurada.');
       } else if (cmd === 'save') {
-        handleSaveProjectPcs();
-        appendStudioLog('Proyecto .PCS guardado.');
+        void handleSmartSave();
+        appendStudioLog('Guardando proyecto...');
       } else if (cmd === 'clear') {
         setStudioLogs([]);
       } else {
         appendStudioLog(`Comando no reconocido: "${rawCmd}". Escribe "help".`);
       }
     },
-    [appendStudioLog, executeCommandById, handleResetDefaultLayout, handleSaveProjectPcs]
+    [appendStudioLog, executeCommandById, handleResetDefaultLayout, handleSmartSave]
   );
 
   // Dynamic Keyboard Shortcuts Dispatcher + Command Palette (F1) + Hold-Alt Cheat Sheet
@@ -10389,6 +10783,11 @@ export default function App() {
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'w') {
         e.preventDefault();
         handleRequestCloseDocumentTab(activeDocumentIdRef.current);
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'q') {
+        e.preventDefault();
+        handleRequestCloseAllDocuments(Boolean(getDesktopBridge()?.isNativeDesktop));
         return;
       }
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'i') {
@@ -10474,6 +10873,7 @@ export default function App() {
     executeCommandById,
     handleOpenSaveAsModal,
     handleRequestCloseDocumentTab,
+    handleRequestCloseAllDocuments,
     handleApplyCanvasEdit,
     handleCancelCanvasEdit,
   ]);
@@ -10741,6 +11141,11 @@ export default function App() {
     />
   );
 
+  const showIntegratedTabsInTopBar =
+    workspaceLayout.showTopBar &&
+    !(workspaceLayout.uiEditMode || workspaceLayout.totalFreedomMode) &&
+    workspaceLayout.integratedTitlebarTabs !== false;
+
   const topBarNode = (
     <TopBar
       embeddedInDock={Boolean(workspaceLayout.uiEditMode || workspaceLayout.totalFreedomMode)}
@@ -10753,6 +11158,20 @@ export default function App() {
       onUndo={handleUndo}
       onRedo={handleRedo}
       onOpenCommandSearch={() => setCommandPaletteOpen(true)}
+      onGoToHomeScreen={() => handleOpenHomeScreen('inicio')}
+      openDocumentsCount={openDocuments.length}
+      openDocuments={openDocuments}
+      activeDocumentId={activeDocumentId}
+      showIntegratedTabs={workspaceLayout.integratedTitlebarTabs !== false}
+      onSelectDocumentTab={handleSwitchDocumentTab}
+      onCloseDocumentTab={handleRequestCloseDocumentTab}
+      onReorderDocumentTabs={handleReorderDocumentTabs}
+      onNewDocument={() => setNewProjectModalOpen(true)}
+      dragEmptySpace={true}
+      isWindowMaximized={isWindowMaximized}
+      onMinimizeWindow={handleMinimizeWindow}
+      onToggleMaximizeWindow={handleToggleMaximizeWindow}
+      onCloseApplicationWindow={handleCloseApplicationWindow}
       onOpenExport={() => {
         setExportModalTab('gif');
         setExportModalOpen(true);
@@ -10858,7 +11277,11 @@ export default function App() {
         onSaveProjectAse={handleSaveProjectAse}
         onSaveProjectPsd={handleSaveProjectPsd}
         onCloseActiveDocument={() => handleRequestCloseDocumentTab(activeDocumentIdRef.current)}
-        onRequestCloseAllDocuments={() => handleRequestCloseAllDocuments(false)}
+        onRequestCloseAllDocuments={() =>
+          handleRequestCloseAllDocuments(Boolean(getDesktopBridge()?.isNativeDesktop))
+        }
+        dragEmptySpace={workspaceLayout.windowDragZones !== 'topbar_only'}
+        onToggleMaximizeWindow={handleToggleMaximizeWindow}
         onRestoreAutosave={handleRestoreAutosave}
         hasAutosave={hasAutosave}
         onOpenCanvasSizeModal={() => setCanvasSizeModalOpen(true)}
@@ -11171,87 +11594,93 @@ export default function App() {
         onResetCanvasEdit={handleResetCanvasEdit}
         onCancelCanvasEdit={handleCancelCanvasEdit}
         onFitCanvasEditToContent={handleFitCanvasEditToContent}
+        tileToolConfig={tileToolConfig}
+        onChangeTileToolConfig={setTileToolConfig}
+        tilesets={tilesets}
+        onOpenTilesetsPanel={() => handleFocusPanel('tilesets')}
       />
 
-      {/* Always-Visible Document Tabs Strip (visible even with 1 document open, shows dirty * and safe close) */}
-      <div
-        className="h-[28px] border-b flex items-center gap-1 px-2 overflow-x-auto shrink-0 select-none text-[11px]"
-        style={{
-          backgroundColor: 'var(--studio-bg-bar)',
-          borderColor: 'var(--studio-border)',
-        }}
-      >
-        {openDocuments.map((doc) => {
-          const isActive = doc.id === activeDocumentId;
-          return (
-            <div
-              key={doc.id}
-              draggable={openDocuments.length > 1}
-              onDragStart={() => setDraggedDocTabId(doc.id)}
-              onDragOver={(e) => {
-                if (draggedDocTabId && draggedDocTabId !== doc.id) {
-                  e.preventDefault();
-                }
-              }}
-              onDrop={(e) => {
-                e.preventDefault();
-                if (draggedDocTabId && draggedDocTabId !== doc.id) {
-                  handleReorderDocumentTabs(draggedDocTabId, doc.id);
-                }
-                setDraggedDocTabId(null);
-              }}
-              onDragEnd={() => setDraggedDocTabId(null)}
-              onClick={() => handleSwitchDocumentTab(doc.id)}
-              title={`${doc.name}${doc.isDirty ? ' · Cambios sin guardar' : ' · Guardado'} (${doc.width}×${doc.height} px)`}
-              className="flex items-center gap-1.5 px-2.5 h-[23px] rounded-t border cursor-pointer transition-colors shrink-0 whitespace-nowrap"
-              style={{
-                backgroundColor: isActive ? 'var(--studio-bg-panel)' : 'transparent',
-                borderColor: isActive ? 'var(--studio-accent)' : 'var(--studio-border)',
-                borderBottomColor: isActive ? 'var(--studio-bg-panel)' : 'var(--studio-border)',
-                color: isActive ? 'var(--studio-text)' : 'var(--studio-text-muted)',
-                opacity: draggedDocTabId === doc.id ? 0.5 : 1,
-              }}
-            >
-              <FileText
-                className="w-3 h-3 shrink-0"
-                style={{ color: isActive ? 'var(--studio-accent)' : undefined }}
-              />
-              <span className="font-medium truncate max-w-[150px]">{doc.name}</span>
-              {doc.isDirty && (
-                <span
-                  className="text-amber-400 font-bold text-xs leading-none shrink-0"
-                  title="Cambios sin guardar"
-                >
-                  *
-                </span>
-              )}
-              <span className="text-[9px] font-mono tabular-nums opacity-60 shrink-0">
-                {doc.width}×{doc.height}
-              </span>
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  handleRequestCloseDocumentTab(doc.id);
-                }}
-                title={doc.isDirty ? 'Cerrar documento (hay cambios sin guardar)' : 'Cerrar documento'}
-                className="p-0.5 rounded hover:bg-rose-500/20 hover:text-rose-400 transition-colors shrink-0"
-              >
-                <X className="w-2.5 h-2.5" />
-              </button>
-            </div>
-          );
-        })}
-        <button
-          type="button"
-          onClick={() => setNewProjectModalOpen(true)}
-          title="Nuevo documento (Ctrl+N)"
-          className="p-1 rounded hover:bg-white/10 transition-colors ml-0.5 shrink-0"
-          style={{ color: 'var(--studio-text-muted)' }}
+      {/* Fallback Standalone Document Tabs Strip (only shown if TopBar is hidden/floating or integrated tabs disabled) */}
+      {!showIntegratedTabsInTopBar && (
+        <div
+          className="h-[28px] border-b flex items-center gap-1 px-2 overflow-x-auto shrink-0 select-none text-[11px]"
+          style={{
+            backgroundColor: 'var(--studio-bg-bar)',
+            borderColor: 'var(--studio-border)',
+          }}
         >
-          <Plus className="w-3.5 h-3.5" />
-        </button>
-      </div>
+          {openDocuments.map((doc) => {
+            const isActive = doc.id === activeDocumentId;
+            return (
+              <div
+                key={doc.id}
+                draggable={openDocuments.length > 1}
+                onDragStart={() => setDraggedDocTabId(doc.id)}
+                onDragOver={(e) => {
+                  if (draggedDocTabId && draggedDocTabId !== doc.id) {
+                    e.preventDefault();
+                  }
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  if (draggedDocTabId && draggedDocTabId !== doc.id) {
+                    handleReorderDocumentTabs(draggedDocTabId, doc.id);
+                  }
+                  setDraggedDocTabId(null);
+                }}
+                onDragEnd={() => setDraggedDocTabId(null)}
+                onClick={() => handleSwitchDocumentTab(doc.id)}
+                title={`${doc.name}${doc.isDirty ? ' · Cambios sin guardar' : ' · Guardado'} (${doc.width}×${doc.height} px)`}
+                className="flex items-center gap-1.5 px-2.5 h-[23px] rounded-t border cursor-pointer transition-colors shrink-0 whitespace-nowrap"
+                style={{
+                  backgroundColor: isActive ? 'var(--studio-bg-panel)' : 'transparent',
+                  borderColor: isActive ? 'var(--studio-accent)' : 'var(--studio-border)',
+                  borderBottomColor: isActive ? 'var(--studio-bg-panel)' : 'var(--studio-border)',
+                  color: isActive ? 'var(--studio-text)' : 'var(--studio-text-muted)',
+                  opacity: draggedDocTabId === doc.id ? 0.5 : 1,
+                }}
+              >
+                <FileText
+                  className="w-3 h-3 shrink-0"
+                  style={{ color: isActive ? 'var(--studio-accent)' : undefined }}
+                />
+                <span className="font-medium truncate max-w-[150px]">{doc.name}</span>
+                {doc.isDirty && (
+                  <span
+                    className="text-amber-400 font-bold text-xs leading-none shrink-0"
+                    title="Cambios sin guardar"
+                  >
+                    *
+                  </span>
+                )}
+                <span className="text-[9px] font-mono tabular-nums opacity-60 shrink-0">
+                  {doc.width}×{doc.height}
+                </span>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleRequestCloseDocumentTab(doc.id);
+                  }}
+                  title={doc.isDirty ? 'Cerrar documento (hay cambios sin guardar)' : 'Cerrar documento'}
+                  className="p-0.5 rounded hover:bg-rose-500/20 hover:text-rose-400 transition-colors shrink-0"
+                >
+                  <X className="w-2.5 h-2.5" />
+                </button>
+              </div>
+            );
+          })}
+          <button
+            type="button"
+            onClick={() => setNewProjectModalOpen(true)}
+            title="Nuevo documento (Ctrl+N)"
+            className="p-1 rounded hover:bg-white/10 transition-colors ml-0.5 shrink-0"
+            style={{ color: 'var(--studio-text-muted)' }}
+          >
+            <Plus className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* Main 6-Zone Modular Dock Workspace Area */}
       <RightSidebar
@@ -11675,7 +12104,7 @@ export default function App() {
         onToggleHitboxes={() => setShowHitboxes((v) => !v)}
         onSetLayerKeyframe={(layerIdx, _frameIdx, kf) => handleSetLayerKeyframe(layerIdx, kf)}
         onRemoveLayerKeyframe={handleRemoveLayerKeyframe}
-        onSaveProjectPcs={handleSaveProjectPcs}
+        onSaveProjectPcs={() => void handleSmartSave()}
         studioLogs={studioLogs}
         onRunConsoleCommand={handleRunConsoleCommand}
         autoApplyAllFrames={autoApplyAiAllFrames}
@@ -11704,6 +12133,19 @@ export default function App() {
         onOpenGuidesModal={(tab: GuidesModalTab = 'perspective') => {
           setGuidesModalTab(tab);
           setGuidesModalOpen(true);
+        }}
+        tilesets={tilesets}
+        onChangeTilesets={setTilesets}
+        tileToolConfig={tileToolConfig}
+        onChangeTileToolConfig={setTileToolConfig}
+        onCaptureTileFromCanvas={handleCaptureTileFromCanvas}
+        activeFightingProfile={activeFightingProfile}
+        onApplyFightingProfile={handleApplyFightingProfile}
+        onAddStageRoleLayer={handleAddStageRoleLayer}
+        onFocusTilesetsPanel={() => handleFocusPanel('tilesets')}
+        onStudioNotify={(msg) => {
+          setImportNotification(msg);
+          setTimeout(() => setImportNotification(null), 2600);
         }}
         centerCanvas={
           <CanvasViewport
@@ -11865,6 +12307,10 @@ export default function App() {
             onApplyCanvasEdit={handleApplyCanvasEdit}
             onResetCanvasEdit={handleResetCanvasEdit}
             onCancelCanvasEdit={handleCancelCanvasEdit}
+            tileToolConfig={tileToolConfig}
+            tilesets={tilesets}
+            onChangeTileToolConfig={setTileToolConfig}
+            onCommitTileLayerEdit={handleCommitTileLayerEdit}
           />
         }
       />
@@ -12095,11 +12541,30 @@ export default function App() {
         />
       </StudioTopLayerPortal>
 
-      {/* Single Modified Document Close Protection Dialog */}
+      {/* Single Modified Document Close Protection & Sequential One-by-One Review Dialog */}
       {(() => {
-        const pendingDoc = pendingCloseDocId
-          ? openDocuments.find((d) => d.id === pendingCloseDocId) || null
+        const activeReviewDocId =
+          reviewCloseSession && saveAsModalState === null
+            ? reviewCloseSession.docIds[reviewCloseSession.currentIndex] || null
+            : null;
+        const modalDocId = pendingCloseDocId || activeReviewDocId;
+        const pendingDoc = modalDocId
+          ? openDocuments.find((d) => d.id === modalDocId) || null
           : null;
+        const isReview = Boolean(!pendingCloseDocId && reviewCloseSession && pendingDoc);
+
+        const advanceReviewOrFinish = () => {
+          if (!reviewCloseSession) return;
+          const nextIdx = reviewCloseSession.currentIndex + 1;
+          if (nextIdx >= reviewCloseSession.docIds.length) {
+            const exitFlag = reviewCloseSession.fromElectronExit;
+            setReviewCloseSession(null);
+            completeAllDocumentsClose(exitFlag);
+          } else {
+            setReviewCloseSession({ ...reviewCloseSession, currentIndex: nextIdx });
+          }
+        };
+
         return (
           <StudioTopLayerPortal isOpen={pendingDoc !== null} tier="critical" autoFocus ariaRole="alertdialog">
             <UnsavedDocumentCloseModal
@@ -12108,9 +12573,35 @@ export default function App() {
               width={pendingDoc?.width || canvasWidth}
               height={pendingDoc?.height || canvasHeight}
               isNewUnsaved={Boolean(pendingDoc?.isNewUnsaved)}
+              hasSavedLocation={Boolean(pendingDoc?.hasSavedLocation)}
+              reviewProgress={
+                isReview && reviewCloseSession
+                  ? {
+                      index: reviewCloseSession.currentIndex,
+                      total: reviewCloseSession.docIds.length,
+                    }
+                  : null
+              }
               onSave={async () => {
                 if (!pendingDoc) return;
                 const docId = pendingDoc.id;
+                if (isReview) {
+                  if (!pendingDoc.hasSavedLocation) {
+                    handleOpenSaveAsModal(
+                      docId,
+                      'review_next',
+                      `${pendingDoc.name} (${reviewCloseSession!.currentIndex + 1} de ${reviewCloseSession!.docIds.length})`
+                    );
+                  } else {
+                    const ok = await handleSaveDocumentInFormat(
+                      docId,
+                      pendingDoc.savedFormat || 'pcs'
+                    );
+                    if (ok) advanceReviewOrFinish();
+                  }
+                  return;
+                }
+
                 setPendingCloseDocId(null);
                 if (!pendingDoc.hasSavedLocation) {
                   handleOpenSaveAsModal(docId, 'close_doc');
@@ -12124,11 +12615,21 @@ export default function App() {
               }}
               onDiscard={() => {
                 if (!pendingDoc) return;
+                if (isReview) {
+                  advanceReviewOrFinish();
+                  return;
+                }
                 const docId = pendingDoc.id;
                 setPendingCloseDocId(null);
                 forceCloseDocumentTab(docId);
               }}
-              onCancel={() => setPendingCloseDocId(null)}
+              onCancel={() => {
+                setPendingCloseDocId(null);
+                if (isReview) {
+                  setReviewCloseSession(null);
+                  setIsAppClosingFromElectron(false);
+                }
+              }}
             />
           </StudioTopLayerPortal>
         );
@@ -12147,11 +12648,13 @@ export default function App() {
                 width: d.width,
                 height: d.height,
                 isNewUnsaved: d.isNewUnsaved,
+                hasSavedLocation: d.hasSavedLocation,
               })
             )}
           isProcessing={isBatchSavingDocs}
           onSaveSelected={(ids) => void handleBatchSaveSelectedAndClose(ids)}
-          onDiscardAll={completeAllDocumentsClose}
+          onReviewOneByOne={(ids) => handleStartReviewOneByOne(ids)}
+          onDiscardAll={() => completeAllDocumentsClose()}
           onCancel={() => {
             setUnsavedAppCloseModalOpen(false);
             setIsAppClosingFromElectron(false);
@@ -12159,7 +12662,7 @@ export default function App() {
         />
       </StudioTopLayerPortal>
 
-      {/* "Guardar como..." Format Selector Dialog (.pcs, PNG, JPG, WEBP, GIF, Spritesheet, ASE, PSD, JSON) */}
+      {/* "Guardar como..." Format Selector Dialog (.pcs, Proyecto de animación, PNG, JPG, WEBP, GIF, Spritesheet, ASE, PSD, JSON) */}
       <StudioTopLayerPortal isOpen={saveAsModalState !== null} tier="modal" autoFocus ariaRole="dialog">
         {(() => {
           const targetDoc = saveAsModalState
@@ -12178,6 +12681,7 @@ export default function App() {
               height={targetH}
               framesCount={targetFramesCount}
               isSaving={isSavingAs}
+              queueLabel={saveAsModalState?.queueLabel || null}
               onConfirm={async ({ fileName, format, scale, jpgBackgroundColor }) => {
                 if (!saveAsModalState) return;
                 const { docId, afterSaveAction } = saveAsModalState;
@@ -12188,21 +12692,126 @@ export default function App() {
                     scale,
                     jpgBackgroundColor,
                   });
-                  if (ok) {
-                    setSaveAsModalState(null);
-                    if (afterSaveAction === 'close_doc') {
-                      forceCloseDocumentTab(docId);
+                  if (!ok) return;
+
+                  setSaveAsModalState(null);
+
+                  if (afterSaveAction === 'close_doc') {
+                    forceCloseDocumentTab(docId);
+                  } else if (afterSaveAction === 'batch_close_queue' && batchSaveAsQueue) {
+                    const nextSavedCount = batchSaveAsQueue.savedCount + 1;
+                    if (batchSaveAsQueue.remainingDocIds.length === 0) {
+                      const exitFlag = batchSaveAsQueue.fromElectronExit;
+                      setBatchSaveAsQueue(null);
+                      setImportNotification(`${nextSavedCount} documento(s) guardados antes de cerrar.`);
+                      setTimeout(() => setImportNotification(null), 3200);
+                      completeAllDocumentsClose(exitFlag);
+                    } else {
+                      const nextDocId = batchSaveAsQueue.remainingDocIds[0];
+                      const nextDoc = openDocumentsRef.current.find((d) => d.id === nextDocId);
+                      const completedIdx =
+                        batchSaveAsQueue.totalNewLocationCount -
+                        batchSaveAsQueue.remainingDocIds.length +
+                        1;
+                      setBatchSaveAsQueue({
+                        ...batchSaveAsQueue,
+                        remainingDocIds: batchSaveAsQueue.remainingDocIds.slice(1),
+                        savedCount: nextSavedCount,
+                      });
+                      handleOpenSaveAsModal(
+                        nextDocId,
+                        'batch_close_queue',
+                        `${nextDoc?.name || 'Documento'} (${completedIdx} de ${batchSaveAsQueue.totalNewLocationCount})`
+                      );
+                    }
+                  } else if (afterSaveAction === 'review_next' && reviewCloseSession) {
+                    const nextIdx = reviewCloseSession.currentIndex + 1;
+                    if (nextIdx >= reviewCloseSession.docIds.length) {
+                      const exitFlag = reviewCloseSession.fromElectronExit;
+                      setReviewCloseSession(null);
+                      completeAllDocumentsClose(exitFlag);
+                    } else {
+                      setReviewCloseSession({
+                        ...reviewCloseSession,
+                        currentIndex: nextIdx,
+                      });
                     }
                   }
                 } finally {
                   setIsSavingAs(false);
                 }
               }}
-              onCancel={() => setSaveAsModalState(null)}
+              onCancel={() => {
+                const action = saveAsModalState?.afterSaveAction;
+                setSaveAsModalState(null);
+                if (action === 'batch_close_queue') {
+                  setBatchSaveAsQueue(null);
+                  setIsAppClosingFromElectron(false);
+                } else if (action === 'review_next') {
+                  setReviewCloseSession(null);
+                  setIsAppClosingFromElectron(false);
+                }
+              }}
             />
           );
         })()}
       </StudioTopLayerPortal>
+
+      {/* Web Preview Window Minimize Restore Bar (renders cleanly when minimized in browser) */}
+      {isWindowMinimized && (
+        <div
+          className="fixed inset-0 z-[200000] flex items-end justify-center p-6 pointer-events-auto"
+          style={{ backgroundColor: 'rgba(10, 9, 18, 0.94)' }}
+        >
+          <div
+            className="w-full max-w-xl rounded-lg border px-4 py-3 flex items-center justify-between gap-4 shadow-2xl"
+            style={{
+              backgroundColor: 'var(--studio-bg-header)',
+              borderColor: 'var(--studio-accent)',
+              color: 'var(--studio-text)',
+            }}
+          >
+            <div className="flex items-center gap-3 min-w-0">
+              <PixelClashLogoIcon size={28} className="shrink-0" />
+              <div className="min-w-0">
+                <div className="text-xs font-bold truncate">
+                  PixelClash Studio (Minimizado)
+                </div>
+                <div className="text-[11px] truncate" style={{ color: 'var(--studio-text-muted)' }}>
+                  {openDocuments.length} documento(s) abierto(s) · Activo: {projectName}
+                  {hasAnyDirtyDocument ? ' *' : ''}
+                </div>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => setIsWindowMinimized(false)}
+                className="px-3.5 py-1.5 rounded text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-opacity hover:opacity-90 whitespace-nowrap"
+                style={{
+                  backgroundColor: 'var(--studio-accent)',
+                  color: 'var(--studio-accent-text)',
+                }}
+              >
+                <Maximize2 className="w-3.5 h-3.5" />
+                <span>Restaurar ventana</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsWindowMinimized(false);
+                  handleCloseApplicationWindow();
+                }}
+                title="Cerrar aplicación"
+                className="p-1.5 rounded border hover:bg-rose-600 hover:text-white transition-colors cursor-pointer"
+                style={{ borderColor: 'var(--studio-border-strong)' }}
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Canvas Size Modal */}
       <StudioTopLayerPortal isOpen={canvasSizeModalOpen} tier="modal" autoFocus ariaRole="dialog">
@@ -12235,9 +12844,11 @@ export default function App() {
         <NewProjectModal
           isOpen={newProjectModalOpen}
           initialCategory={newProjectInitialCategory}
+          initialFightingProfileId={newProjectInitialFightingProfileId}
           onClose={() => {
             setNewProjectModalOpen(false);
             setNewProjectInitialCategory('Todas');
+            setNewProjectInitialFightingProfileId('custom');
           }}
           onCreateProject={handleCreateNewProject}
           onCreateProjectConfig={handleCreateProjectConfig}
@@ -13086,15 +13697,20 @@ export default function App() {
           initialSection={homeScreenSection}
           hasActiveDocument={openDocuments.length > 0}
           activeDocumentName={`${projectName} (${canvasWidth}×${canvasHeight} px · ${documentDpi} DPI)`}
+          openDocumentsCount={openDocuments.length}
+          activeFightingProfile={activeFightingProfile}
+          onChangeFightingProfile={setActiveFightingProfile}
           recentProjects={recentProjects}
           startupPreferences={startupPreferences}
           onUpdateStartupPreferences={handleUpdateStartupPreferences}
           onTestSplashAnimation={handleTestSplashAnimation}
           onReturnToCanvas={() => setHomeScreenOpen(false)}
-          onNewProject={(category?: NewProjectTemplateCategory) => {
+          onNewProject={(category?: NewProjectTemplateCategory, profileId?: FightingGameProfileId) => {
             setNewProjectInitialCategory(category || 'Todas');
+            setNewProjectInitialFightingProfileId(profileId || 'custom');
             setNewProjectModalOpen(true);
           }}
+          onQuickCreatePreset={handleCreateProjectConfig}
           onOpenProjectFile={() => void handleOpenFilePicker()}
           onOpenRecentProject={(entry) => void handleOpenRecentProject(entry)}
           onTogglePinRecent={handleTogglePinRecentProject}

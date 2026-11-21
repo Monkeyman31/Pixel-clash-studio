@@ -100,12 +100,17 @@ import {
   ShapeToolConfig,
   ShapeToolKind,
   SymmetryConfig,
+  TilesetCollection,
+  TileToolConfig,
+  TileToolMode,
+  TilePaintPatternMode,
   ToolType,
   VectorCreationMode,
   VectorRasterConfirmMode,
   VectorToolConfig,
   ZoomToolMode,
 } from '../types';
+import { renderTileThumbnailDataUrl } from '../utils/tilesetEngine';
 import { CUSTOM_SHAPE_PRESETS, SHAPE_KIND_LABELS } from '../utils/parametricShapeEngine';
 import { computeAnchoredCanvasRect } from '../utils/imageTransforms';
 import { StudioSlider } from './StudioSlider';
@@ -233,6 +238,11 @@ export interface ToolOptionsBarProps {
   onResetCanvasEdit?: () => void;
   onCancelCanvasEdit?: () => void;
   onFitCanvasEditToContent?: () => void;
+  // Tiles Tool & Tileset Collection
+  tileToolConfig?: TileToolConfig;
+  onChangeTileToolConfig?: (next: TileToolConfig) => void;
+  tilesets?: TilesetCollection[];
+  onOpenTilesetsPanel?: () => void;
 }
 
 interface OptionsBarDisplayCtxValue {
@@ -600,6 +610,10 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
   onResetCanvasEdit,
   onCancelCanvasEdit,
   onFitCanvasEditToContent,
+  tileToolConfig,
+  onChangeTileToolConfig,
+  tilesets,
+  onOpenTilesetsPanel,
 }) => {
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [searchFocused, setSearchFocused] = useState<boolean>(false);
@@ -699,6 +713,8 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
         return { label: 'Mano', icon: Hand };
       case 'canvas_edit':
         return { label: 'Editar Lienzo', icon: Expand };
+      case 'tile':
+        return { label: 'Herramienta Tiles', icon: Grid };
       default: {
         const custom = CUSTOM_TOOL_OPTIONS_REGISTRY.get(activeContextMode);
         return { label: custom?.label || 'Herramienta', icon: SlidersHorizontal };
@@ -2997,6 +3013,138 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               />
             )}
           </div>
+        </>
+      );
+    }
+
+    // 18.75. HERRAMIENTA TILES (Dibujar / Colocar / Reemplazar / Borrar / Seleccionar + Autotile)
+    if (activeContextMode === 'tile' && tileToolConfig && onChangeTileToolConfig) {
+      const activeTs =
+        tilesets?.find((ts) => ts.id === tileToolConfig.activeTilesetId) ||
+        tilesets?.[0] ||
+        null;
+      const activeTile =
+        activeTs?.tiles.find((t) => t.id === tileToolConfig.activeTileId) ||
+        activeTs?.tiles[0] ||
+        null;
+      const thumbUrl = activeTile ? renderTileThumbnailDataUrl(activeTile, 20) : '';
+
+      return (
+        <>
+          <SelectField
+            label="Modo"
+            keywords="dibujar colocar reemplazar borrar seleccionar tile"
+            value={tileToolConfig.mode}
+            onChange={(v) =>
+              onChangeTileToolConfig({ ...tileToolConfig, mode: v as TileToolMode })
+            }
+            options={[
+              { value: 'draw', label: 'Dibujar' },
+              { value: 'place', label: 'Colocar' },
+              { value: 'replace', label: 'Reemplazar' },
+              { value: 'erase', label: 'Borrar' },
+              { value: 'select', label: 'Seleccionar' },
+            ]}
+          />
+          <SelectField
+            label="Patrón"
+            keywords="pintar areas repeticion relleno inteligente unico tile"
+            value={tileToolConfig.paintMode}
+            onChange={(v) =>
+              onChangeTileToolConfig({
+                ...tileToolConfig,
+                paintMode: v as TilePaintPatternMode,
+              })
+            }
+            options={[
+              { value: 'single', label: 'Trazo / Celda' },
+              { value: 'area', label: 'Pintar Área' },
+              { value: 'repeat', label: 'Repetición' },
+              { value: 'smart_fill', label: 'Relleno Inteligente' },
+            ]}
+          />
+          <Sep />
+          <ToggleBtn
+            active={tileToolConfig.autotile}
+            onClick={() =>
+              onChangeTileToolConfig({ ...tileToolConfig, autotile: !tileToolConfig.autotile })
+            }
+            label="Autotile"
+            keywords="autotile bordes esquinas uniones automatico"
+            icon={Grid}
+            tone="emerald"
+            title="Detecta tiles vecinos y resuelve automáticamente bordes, esquinas y uniones"
+          />
+          <ToggleBtn
+            active={tileToolConfig.continuousDraw}
+            onClick={() =>
+              onChangeTileToolConfig({
+                ...tileToolConfig,
+                continuousDraw: !tileToolConfig.continuousDraw,
+              })
+            }
+            label="Continuo"
+            keywords="dibujo continuo arrastrar tile"
+            icon={Pencil}
+            title="Pintado continuo de tiles mientras arrastras"
+          />
+          <ToggleBtn
+            active={tileToolConfig.autoRepeat}
+            onClick={() =>
+              onChangeTileToolConfig({ ...tileToolConfig, autoRepeat: !tileToolConfig.autoRepeat })
+            }
+            label="Auto-Repetir"
+            keywords="repeticion automatica patron tile"
+            icon={Maximize2}
+          />
+          <Sep />
+          <SelectField
+            label="Tamaño"
+            keywords="tamano celda tile 8 16 24 32 48 64"
+            value={String(tileToolConfig.tileSize)}
+            onChange={(v) =>
+              onChangeTileToolConfig({ ...tileToolConfig, tileSize: parseInt(v, 10) || 16 })
+            }
+            options={[
+              { value: '8', label: '8×8' },
+              { value: '16', label: '16×16' },
+              { value: '24', label: '24×24' },
+              { value: '32', label: '32×32' },
+              { value: '48', label: '48×48' },
+              { value: '64', label: '64×64' },
+            ]}
+          />
+          {activeTile && (
+            <button
+              type="button"
+              onClick={onOpenTilesetsPanel}
+              title={`Tile activo: ${activeTile.name} — Abrir Panel Tilesets`}
+              className="h-6 px-1.5 rounded border text-[10px] font-medium flex items-center gap-1.5 whitespace-nowrap shrink-0 hover:bg-white/5"
+              style={{
+                backgroundColor: 'var(--studio-bg-elevated)',
+                borderColor: 'var(--studio-border-strong)',
+                color: 'var(--studio-text)',
+              }}
+            >
+              {thumbUrl && (
+                <img
+                  src={thumbUrl}
+                  alt={activeTile.name}
+                  className="w-4 h-4 rounded-sm"
+                  style={{ imageRendering: 'pixelated' }}
+                />
+              )}
+              <span className="max-w-[110px] truncate">{activeTile.name}</span>
+            </button>
+          )}
+          {onOpenTilesetsPanel && (
+            <ActionBtn
+              onClick={onOpenTilesetsPanel}
+              label="Tilesets"
+              keywords="panel tilesets biblioteca"
+              icon={Layers}
+            />
+          )}
         </>
       );
     }

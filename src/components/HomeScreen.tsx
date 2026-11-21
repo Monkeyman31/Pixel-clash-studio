@@ -30,13 +30,26 @@ import {
   Upload,
   UserSquare2,
   X,
+  ArrowRight,
+  Swords,
 } from 'lucide-react';
-import { RecentProjectEntry, StartupPreferences } from '../types';
+import {
+  FightingGameProfileId,
+  NewProjectConfig,
+  ProjectWorkMode,
+  RecentProjectEntry,
+  StartupPreferences,
+} from '../types';
 import { formatBytesCompact, detectHardwareCapabilities } from '../utils/canvasMemoryEstimator';
 import {
   clearCustomMascotFile,
   saveCustomMascotFile,
 } from '../utils/startupPreferences';
+import {
+  FIGHTING_GAME_PROFILE_ORDER,
+  FIGHTING_GAME_PROFILES,
+  MODE_SIZE_PRESETS,
+} from '../utils/fightingGameProfiles';
 import { MascotPreviewCanvas } from './SplashLoadingScreen';
 import { NewProjectTemplateCategory } from './NewProjectModal';
 import { PixelClashLogoIcon } from './PixelClashLogoIcon';
@@ -50,12 +63,16 @@ interface HomeScreenProps {
   initialSection?: HomeScreenSection;
   hasActiveDocument: boolean;
   activeDocumentName?: string;
+  openDocumentsCount?: number;
+  activeFightingProfile?: FightingGameProfileId;
+  onChangeFightingProfile?: (id: FightingGameProfileId) => void;
   recentProjects: RecentProjectEntry[];
   startupPreferences: StartupPreferences;
   onUpdateStartupPreferences: (next: StartupPreferences) => void;
   onTestSplashAnimation: () => void;
   onReturnToCanvas: () => void;
-  onNewProject: (category?: NewProjectTemplateCategory) => void;
+  onNewProject: (category?: NewProjectTemplateCategory, profileId?: FightingGameProfileId) => void;
+  onQuickCreatePreset?: (config: NewProjectConfig) => void;
   onOpenProjectFile: () => void;
   onOpenRecentProject: (entry: RecentProjectEntry) => void;
   onTogglePinRecent: (id: string) => void;
@@ -109,21 +126,22 @@ function getFormatMeta(entry: RecentProjectEntry): { label: string; color: strin
   }
 }
 
-const QUICK_TEMPLATE_CARDS: {
+  const QUICK_TEMPLATE_CARDS: {
   category: Exclude<NewProjectTemplateCategory, 'Todas'>;
+  workMode: ProjectWorkMode;
   title: string;
   defaultSize: string;
   subtitle: string;
   icon: React.FC<{ className?: string }>;
 }[] = [
-  { category: 'Personaje', title: 'Personaje', defaultSize: '48×48 / 64×64', subtitle: 'Sprites de lucha y RPG', icon: Gamepad2 },
-  { category: 'Stage', title: 'Stage', defaultSize: '320×180 / HD', subtitle: 'Escenarios y fondos', icon: Monitor },
-  { category: 'HUD', title: 'HUD', defaultSize: '256×64', subtitle: 'Barras, iconos y UI', icon: LayoutPanelTop },
-  { category: 'FX', title: 'FX', defaultSize: '80×80 / 128×96', subtitle: 'Auras, impactos y VFX', icon: Flame },
-  { category: 'Portrait', title: 'Portrait', defaultSize: '96×112', subtitle: 'Retratos y diálogos', icon: UserSquare2 },
-  { category: 'Cutscene', title: 'Cutscene', defaultSize: '384×216 / HD', subtitle: 'Escenas narrativas', icon: Film },
-  { category: 'Tileset', title: 'Tileset', defaultSize: '256×256+', subtitle: 'Mosaicos y mapas', icon: Grid },
-  { category: 'Personalizado', title: 'Personalizado', defaultSize: 'Sin límites', subtitle: 'Cualquier resolución', icon: Sliders },
+  { category: 'Personaje', workMode: 'fighter', title: 'Fighter', defaultSize: '32..256 px', subtitle: 'Sprites de lucha y RPG', icon: Gamepad2 },
+  { category: 'Stage', workMode: 'stage', title: 'Stage', defaultSize: '640..2560 px', subtitle: 'Escenarios multi-capa', icon: Monitor },
+  { category: 'HUD', workMode: 'hud_ui', title: 'HUD', defaultSize: 'Barras / UI', subtitle: 'Vida, energía, timer', icon: LayoutPanelTop },
+  { category: 'FX', workMode: 'fx', title: 'FX', defaultSize: 'Animado / Sheet', subtitle: 'Auras, partículas, VFX', icon: Flame },
+  { category: 'Portrait', workMode: 'portrait', title: 'Portrait', defaultSize: 'VN / FG / RPG', subtitle: 'Retratos y diálogos', icon: UserSquare2 },
+  { category: 'Cutscene', workMode: 'cutscene', title: 'Cutscene', defaultSize: 'Viñeta / 16:9', subtitle: 'Splash y cinemáticas', icon: Film },
+  { category: 'Tileset', workMode: 'tileset', title: 'Tileset', defaultSize: '256×256+', subtitle: 'Tiles y autotiles', icon: Grid },
+  { category: 'Personalizado', workMode: 'custom', title: 'Personalizado', defaultSize: 'Sin límites', subtitle: 'Cualquier resolución', icon: Sliders },
 ];
 
 export const HomeScreen: React.FC<HomeScreenProps> = ({
@@ -131,12 +149,16 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   initialSection = 'inicio',
   hasActiveDocument,
   activeDocumentName,
+  openDocumentsCount = 1,
+  activeFightingProfile = 'kof',
+  onChangeFightingProfile,
   recentProjects,
   startupPreferences,
   onUpdateStartupPreferences,
   onTestSplashAnimation,
   onReturnToCanvas,
   onNewProject,
+  onQuickCreatePreset,
   onOpenProjectFile,
   onOpenRecentProject,
   onTogglePinRecent,
@@ -150,6 +172,8 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [sortBy, setSortBy] = useState<RecentSortKey>('recientes');
   const [viewMode, setViewMode] = useState<RecentViewMode>('grid');
+  const [selectedQuickMode, setSelectedQuickMode] = useState<ProjectWorkMode>('fighter');
+  const [localProfileId, setLocalProfileId] = useState<FightingGameProfileId>(activeFightingProfile);
   const [mascotRefreshToken, setMascotRefreshToken] = useState(0);
   const [mascotUploadError, setMascotUploadError] = useState<string | null>(null);
   const [mascotUploadNotice, setMascotUploadNotice] = useState<string | null>(null);
@@ -158,6 +182,16 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const sheetInputRef = useRef<HTMLInputElement>(null);
 
   const hardware = useMemo(() => detectHardwareCapabilities(), []);
+  const currentProfileId = onChangeFightingProfile ? activeFightingProfile : localProfileId;
+  const setCurrentProfileId = (id: FightingGameProfileId) => {
+    setLocalProfileId(id);
+    onChangeFightingProfile?.(id);
+  };
+  const currentProfileSpec = FIGHTING_GAME_PROFILES[currentProfileId] || FIGHTING_GAME_PROFILES.kof;
+  const modePresetsList = useMemo(
+    () => MODE_SIZE_PRESETS.filter((p) => p.mode === selectedQuickMode),
+    [selectedQuickMode]
+  );
 
   // Sync external section jump (e.g. Ver -> Preferencias de Inicio)
   React.useEffect(() => {
@@ -581,11 +615,11 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
               <button
                 type="button"
                 onClick={onReturnToCanvas}
-                className="w-full px-3.5 py-2 rounded-lg border border-[#222b42] hover:bg-white/5 text-slate-300 hover:text-white text-xs font-medium flex items-center justify-center gap-2 transition-colors cursor-pointer"
-                title={activeDocumentName ? `Volver a ${activeDocumentName}` : 'Volver al espacio de trabajo'}
+                className="w-full px-3.5 py-2 rounded-lg border border-emerald-500/45 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-100 text-xs font-bold flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                title={activeDocumentName ? `Volver al Área de Trabajo (${activeDocumentName})` : 'Volver al Área de Trabajo'}
               >
-                <ArrowLeft className="w-3.5 h-3.5 shrink-0" />
-                <span className="truncate">Volver al Lienzo</span>
+                <ArrowRight className="w-3.5 h-3.5 text-emerald-300 shrink-0" />
+                <span className="truncate whitespace-nowrap">Volver al Área de Trabajo</span>
               </button>
             )}
           </div>
@@ -726,10 +760,11 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
             <button
               type="button"
               onClick={onReturnToCanvas}
-              title="Cerrar pantalla de inicio y volver al lienzo"
-              className="p-1.5 rounded-lg border border-[#26304b] text-slate-400 hover:text-white hover:bg-white/5 cursor-pointer shrink-0"
+              title={`Conserva tus paneles, zoom, herramientas y selección (${openDocumentsCount} abierto${openDocumentsCount === 1 ? '' : 's'})`}
+              className="px-3 py-1.5 rounded-lg border border-emerald-500/45 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-100 text-xs font-semibold flex items-center gap-1.5 cursor-pointer shrink-0 whitespace-nowrap"
             >
-              <X className="w-4 h-4" />
+              <ArrowRight className="w-3.5 h-3.5 text-emerald-300 shrink-0" />
+              <span>Volver al Área de Trabajo</span>
             </button>
           )}
         </header>
@@ -739,35 +774,43 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
           {/* SECTION: INICIO */}
           {section === 'inicio' && (
             <>
-              {/* Quick Create Project Templates */}
+              {/* Quick Create Project Modes + Expanded Presets per Mode */}
               <section className="space-y-3">
-                <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
                   <div>
                     <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300">
-                      Crear Proyecto Rápido
+                      Crear Proyecto por Modo y Resolución
                     </h3>
                     <p className="text-[11px] text-slate-400 mt-0.5">
-                      Selecciona una plantilla base o define cualquier resolución sin límites artificiales.
+                      Elige un modo para explorar sus formatos dedicados o abre la configuración avanzada.
                     </p>
                   </div>
                   <button
                     type="button"
-                    onClick={() => onNewProject('Personalizado')}
+                    onClick={() => onNewProject('Personalizado', currentProfileId)}
                     className="text-xs font-semibold text-amber-400 hover:text-amber-300 cursor-pointer whitespace-nowrap"
                   >
                     Configuración avanzada →
                   </button>
                 </div>
 
-                <div className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-8 gap-2.5">
+                <div className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-8 gap-2">
                   {QUICK_TEMPLATE_CARDS.map((tpl) => {
                     const Icon = tpl.icon;
+                    const active = selectedQuickMode === tpl.workMode;
                     return (
                       <button
                         key={tpl.category}
                         type="button"
-                        onClick={() => onNewProject(tpl.category)}
-                        className="p-3 rounded-lg border border-[#22293e] bg-[#111522] hover:border-amber-400/70 hover:bg-[#161c2e] text-left transition-colors flex flex-col justify-between gap-2 cursor-pointer group"
+                        onClick={() => {
+                          setSelectedQuickMode(tpl.workMode);
+                        }}
+                        onDoubleClick={() => onNewProject(tpl.category, currentProfileId)}
+                        className={`p-2.5 rounded-lg border text-left transition-colors flex flex-col justify-between gap-1.5 cursor-pointer group ${
+                          active
+                            ? 'border-amber-400 bg-[#192036]'
+                            : 'border-[#22293e] bg-[#111522] hover:border-amber-400/60 hover:bg-[#161c2e]'
+                        }`}
                       >
                         <Icon className="w-4 h-4 text-amber-400 group-hover:scale-105 transition-transform" />
                         <div className="space-y-0.5">
@@ -784,6 +827,161 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                       </button>
                     );
                   })}
+                </div>
+
+                {/* Presets list for the selected Mode */}
+                {modePresetsList.length > 0 && (
+                  <div className="p-3 rounded-lg border border-[#22293e] bg-[#0f1320] space-y-2">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <span className="text-[11px] font-bold text-slate-200">
+                        Formatos de {QUICK_TEMPLATE_CARDS.find((c) => c.workMode === selectedQuickMode)?.title}:
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onNewProject(
+                            QUICK_TEMPLATE_CARDS.find((c) => c.workMode === selectedQuickMode)?.category || 'Todas',
+                            currentProfileId
+                          )
+                        }
+                        className="text-[11px] font-semibold text-sky-300 hover:text-sky-200 cursor-pointer whitespace-nowrap"
+                      >
+                        Personalizado / Opciones avanzadas →
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+                      {modePresetsList.map((preset) => (
+                        <button
+                          key={preset.id}
+                          type="button"
+                          onClick={() => {
+                            if (onQuickCreatePreset) {
+                              onQuickCreatePreset({
+                                name: `${preset.name}`,
+                                width: preset.width,
+                                height: preset.height,
+                                dpi: 72,
+                                pixelScale: 1,
+                                category: preset.categoryLabel,
+                                templateId: preset.id,
+                                backgroundMode: 'transparent',
+                                backgroundColor: '#111524',
+                                initialPaletteId: currentProfileSpec.paletteId,
+                                enableGrid: preset.grid,
+                                enablePixelPerfect: preset.pixelPerfect,
+                                createInitialLayer: true,
+                                createInitialGroup: preset.animationMode,
+                                enableAnimationMode: preset.animationMode,
+                                workMode: preset.mode,
+                                fightingProfileId: currentProfileId,
+                              });
+                            } else {
+                              onNewProject(preset.categoryLabel as NewProjectTemplateCategory, currentProfileId);
+                            }
+                          }}
+                          className="p-2 rounded border border-[#26304b] bg-[#141929] hover:border-emerald-400/70 hover:bg-[#192138] text-left transition-colors cursor-pointer"
+                        >
+                          <div className="text-[11px] font-bold text-slate-100 truncate">{preset.name}</div>
+                          <div className="text-[10px] font-mono text-amber-300 tabular-nums mt-0.5">
+                            {preset.width} × {preset.height}
+                          </div>
+                          <div className="text-[9px] text-slate-400 truncate mt-0.5">{preset.desc}</div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </section>
+
+              {/* Optional Fighting Game Profile System */}
+              <section className="p-4 rounded-xl border border-[#22293e] bg-[#111522] space-y-3">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <div className="flex items-center gap-2">
+                    <Swords className="w-4 h-4 text-rose-400 shrink-0" />
+                    <div>
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-slate-200">
+                        Perfil de Juego de Pelea (Opcional)
+                      </h3>
+                      <p className="text-[11px] text-slate-400">
+                        Aplica automáticamente resoluciones, layout de fighter/stage/FX, paleta y guías clásicas de cada saga.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => onNewProject('Personaje', currentProfileId)}
+                      className="px-2.5 py-1 rounded border border-[#2c3654] bg-[#161c2e] hover:border-amber-400 text-[11px] font-semibold text-slate-100 cursor-pointer whitespace-nowrap"
+                    >
+                      Nuevo Fighter ({currentProfileSpec.resolutions.fighter.w}×{currentProfileSpec.resolutions.fighter.h})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onNewProject('Stage', currentProfileId)}
+                      className="px-2.5 py-1 rounded border border-emerald-500/40 bg-emerald-500/10 hover:bg-emerald-500/20 text-[11px] font-semibold text-emerald-200 cursor-pointer whitespace-nowrap"
+                    >
+                      Nuevo Stage ({currentProfileSpec.resolutions.stage.w}×{currentProfileSpec.resolutions.stage.h})
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
+                  {FIGHTING_GAME_PROFILE_ORDER.map((pid) => {
+                    const prof = FIGHTING_GAME_PROFILES[pid];
+                    const active = currentProfileId === pid;
+                    return (
+                      <button
+                        key={pid}
+                        type="button"
+                        onClick={() => setCurrentProfileId(pid)}
+                        className={`px-2.5 py-1.5 rounded-md border text-left transition-colors cursor-pointer ${
+                          active
+                            ? 'bg-[#1a2238] text-white'
+                            : 'bg-[#0e121d] border-[#22293e] text-slate-400 hover:text-slate-100'
+                        }`}
+                        style={{
+                          borderColor: active ? prof.accentColor : undefined,
+                        }}
+                      >
+                        <div className="text-[11px] font-bold truncate">{prof.shortName}</div>
+                        <div className="text-[9px] font-mono opacity-75 truncate">{prof.era}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Selected Profile Layout & Guide Specs */}
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-2.5 pt-2 border-t border-[#1c2336] text-[11px]">
+                  <div className="p-2.5 rounded-lg bg-[#0d111b] border border-[#1d2438]">
+                    <div className="text-[10px] font-mono uppercase text-slate-400">Resoluciones Sugeridas</div>
+                    <div className="mt-1 space-y-0.5 font-mono text-[10px] tabular-nums text-slate-200">
+                      <div>Fighter: <strong className="text-amber-300">{currentProfileSpec.resolutions.fighter.label}</strong></div>
+                      <div>Stage: <strong className="text-emerald-300">{currentProfileSpec.resolutions.stage.label}</strong></div>
+                      <div>FX: <strong className="text-orange-300">{currentProfileSpec.resolutions.fx.label}</strong></div>
+                    </div>
+                  </div>
+                  <div className="p-2.5 rounded-lg bg-[#0d111b] border border-[#1d2438]">
+                    <div className="text-[10px] font-mono uppercase text-slate-400">Layout Fighter</div>
+                    <div className="mt-1 text-[10px] text-slate-300 space-y-0.5">
+                      <div>{currentProfileSpec.fighterLayout.recommendedFps} FPS · Grid {currentProfileSpec.fighterLayout.gridStep}px</div>
+                      <div className="text-slate-400 truncate">{currentProfileSpec.fighterLayout.layers.join(' · ')}</div>
+                    </div>
+                  </div>
+                  <div className="p-2.5 rounded-lg bg-[#0d111b] border border-[#1d2438]">
+                    <div className="text-[10px] font-mono uppercase text-slate-400">Layout Stage &amp; FX</div>
+                    <div className="mt-1 text-[10px] text-slate-300 space-y-0.5">
+                      <div>{currentProfileSpec.stageLayout.parallaxPlanes} planos · Suelo {currentProfileSpec.stageLayout.floorPct}%</div>
+                      <div className="text-slate-400 truncate">{currentProfileSpec.fxLayout.description}</div>
+                    </div>
+                  </div>
+                  <div className="p-2.5 rounded-lg bg-[#0d111b] border border-[#1d2438]">
+                    <div className="text-[10px] font-mono uppercase text-slate-400">Guías Típicas</div>
+                    <div className="mt-1 text-[10px] text-sky-300 space-y-0.5">
+                      {currentProfileSpec.typicalGuides.slice(0, 3).map((g, gi) => (
+                        <div key={gi} className="truncate">• {g}</div>
+                      ))}
+                    </div>
+                  </div>
                 </div>
               </section>
 

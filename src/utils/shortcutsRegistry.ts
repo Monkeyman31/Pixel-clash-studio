@@ -76,6 +76,7 @@ export const DEFAULT_SHORTCUT_BINDINGS: ShortcutBinding[] = [
   { id: 'tool.move_selection', label: 'Subherramienta: Mover Selección', category: 'Pixel Art', location: 'Barra Herramientas > Mover', primary: '' },
   { id: 'tool.move_reference', label: 'Subherramienta: Mover Referencia', category: 'Pixel Art', location: 'Barra Herramientas > Mover', primary: 'Shift+R' },
   { id: 'tool.text', label: 'Texto Pixel / Arcade', category: 'Pixel Art', location: 'Barra Herramientas', primary: 'T' },
+  { id: 'tool.tile', label: 'Tiles (Pintar / Colocar / Reemplazar / Autotile)', category: 'Pixel Art', location: 'Barra Herramientas > Tiles', primary: 'Shift+T' },
   { id: 'tool.hand', label: 'Mano (Mover Vista)', category: 'Pixel Art', location: 'Barra Herramientas', primary: 'H' },
   { id: 'tool.zoom', label: 'Lupa (Zoom / Región)', category: 'Pixel Art', location: 'Barra Herramientas > Lupa', primary: 'Z' },
   { id: 'view.zoom_in', label: 'Acercar Zoom', category: 'General', location: 'Ver > Acercar / Lupa', primary: 'Ctrl++', secondary: 'Ctrl+=' },

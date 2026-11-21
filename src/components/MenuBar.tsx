@@ -242,6 +242,8 @@ interface MenuBarProps {
   onOpenHomeScreen?: (section?: 'inicio' | 'recientes' | 'configuracion' | 'ayuda' | 'novedades') => void;
   onTestSplashAnimation?: () => void;
   onActivateCanvasEditTool?: () => void;
+  dragEmptySpace?: boolean;
+  onToggleMaximizeWindow?: () => void;
 }
 
 // Strictly vertical submenu alias (zero horizontal flyouts, preserves main menu structure)
@@ -398,6 +400,8 @@ export const MenuBar: React.FC<MenuBarProps> = ({
   onOpenHomeScreen,
   onTestSplashAnimation,
   onActivateCanvasEditTool,
+  dragEmptySpace = false,
+  onToggleMaximizeWindow,
 }) => {
   const activeWorkModeDef = WORK_MODES_REGISTRY[workMode] || WORK_MODES_REGISTRY.fighter;
   const [activeMenu, setActiveMenu] = useState<string | null>(null);
@@ -1121,9 +1125,9 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                   >
                     <span className="flex items-center gap-2">
                       <LogOut className="w-3.5 h-3.5 text-rose-400" />
-                      <span>Cerrar Todo / Salir...</span>
+                      <span>Salir / Cerrar aplicación</span>
                     </span>
-                    <span className="text-[10px] text-rose-400 font-mono">Seguro</span>
+                    <span className="text-[10px] text-rose-400 font-mono">Ctrl+Q</span>
                   </button>
                 )}
               </>
@@ -3206,8 +3210,14 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             )}
       </TopMenuGroup>
 
+      {/* Flexible empty bar drag region when enabled */}
+      <div
+        className={`flex-1 h-full min-w-[16px] ${dragEmptySpace ? 'studio-window-drag' : ''}`}
+        onDoubleClick={dragEmptySpace ? onToggleMaximizeWindow : undefined}
+      />
+
       {/* Right-side compact active Work Mode badge + UI Free Mode exit control */}
-      <div className="ml-auto flex items-center gap-1.5">
+      <div className="flex items-center gap-1.5 studio-window-no-drag">
         <button
           type="button"
           onClick={() => onFocusPanel?.('workmode')}

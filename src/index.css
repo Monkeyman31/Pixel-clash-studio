@@ -172,3 +172,22 @@ html[data-icon-size="xl"] .studio-icon-scalable svg.lucide {
 .help-spotlight-ring {
   animation: help-spotlight-ring 1.25s ease-in-out infinite;
 }
+
+/* Custom Frameless Desktop Window Drag Regions */
+.studio-window-drag {
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+.studio-window-drag button,
+.studio-window-drag input,
+.studio-window-drag select,
+.studio-window-drag textarea,
+.studio-window-drag a,
+.studio-window-drag [role="button"],
+.studio-window-drag [draggable="true"],
+.studio-window-no-drag {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+

@@ -73,14 +73,15 @@ import {
   DummiePose,
   EditableFxRecipe,
   EyedropperConfig,
-  Frame, 
+  FightingGameProfileId,
+  Frame,
   GradientConfig,
   GroundConfig,
   GuidesConfig,
   GuidesModalTab,
-  Hitbox, 
-  HitboxType, 
-  Layer, 
+  Hitbox,
+  HitboxType,
+  Layer,
   LayerAdjustmentConfig,
   LayerBlendMode,
   LayerGroup,
@@ -96,10 +97,13 @@ import {
   ReferenceItem,
   SampledColorInfo,
   ShapeToolConfig,
+  StageBuilderRole,
   StageParallaxConfig,
   StageType,
   SymmetryConfig,
+  TilesetCollection,
   TilesetWorkspaceConfig,
+  TileToolConfig,
   ToolType,
   TransformActionId,
   TransformParameters,
@@ -136,7 +140,9 @@ import { HistoryPanel } from './HistoryPanel';
 import { DummiePosePanel } from './DummiePosePanel';
 import { SymmetryPanel } from './SymmetryPanel';
 import { WorkModeHubPanel } from './WorkModeHubPanel';
+import { TilesetEditorPanel } from './TilesetEditorPanel';
 import { DEFAULT_STAGE_PARALLAX_CONFIG, DEFAULT_TILESET_CONFIG } from '../utils/workModesEngine';
+import { DEFAULT_TILE_TOOL_CONFIG } from '../utils/tilesetEngine';
 import {
   AiConfigPanel,
   AnimationControlPanel,
@@ -650,6 +656,17 @@ interface RightSidebarProps {
   onChangeGuidesConfig?: (next: GuidesConfig) => void;
   onOpenGuidesModal?: (tab?: GuidesModalTab) => void;
   performanceMode?: PerformanceMode;
+  // Tilesets Panel, Stage Builder Roles & Fighting Profile
+  tilesets?: TilesetCollection[];
+  onChangeTilesets?: (next: TilesetCollection[]) => void;
+  tileToolConfig?: TileToolConfig;
+  onChangeTileToolConfig?: (next: TileToolConfig) => void;
+  onCaptureTileFromCanvas?: (tileSize: number) => (string | null)[][] | null;
+  activeFightingProfile?: FightingGameProfileId;
+  onApplyFightingProfile?: (id: FightingGameProfileId) => void;
+  onAddStageRoleLayer?: (role: StageBuilderRole) => void;
+  onFocusTilesetsPanel?: () => void;
+  onStudioNotify?: (msg: string) => void;
 }
 
 const PANEL_ICONS: Record<RightPanelId, React.FC<{ className?: string; style?: React.CSSProperties }>> = {
@@ -683,6 +700,7 @@ const PANEL_ICONS: Record<RightPanelId, React.FC<{ className?: string; style?: R
   vector_editor: PenTool,
   masks: Shield,
   project_explorer: FolderTree,
+  tilesets: LayoutGrid,
 };
 
 const PANEL_SHORT_LABELS: Record<RightPanelId, string> = Object.fromEntries(
@@ -972,6 +990,16 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
   onChangeGuidesConfig,
   onOpenGuidesModal,
   performanceMode = 'balanced',
+  tilesets = [],
+  onChangeTilesets,
+  tileToolConfig = DEFAULT_TILE_TOOL_CONFIG,
+  onChangeTileToolConfig,
+  onCaptureTileFromCanvas,
+  activeFightingProfile = 'custom',
+  onApplyFightingProfile,
+  onAddStageRoleLayer,
+  onFocusTilesetsPanel,
+  onStudioNotify,
 }) => {
   const workModeCompositeGrid = useMemo(
     () =>
@@ -3603,6 +3631,26 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                       guidesConfig={guidesConfig}
                       onChangeGuidesConfig={onChangeGuidesConfig}
                       onOpenGuidesModal={onOpenGuidesModal}
+                      activeFightingProfile={activeFightingProfile}
+                      onApplyFightingProfile={onApplyFightingProfile}
+                      onAddStageRoleLayer={onAddStageRoleLayer}
+                      onSelectTool={onSelectTool}
+                      onFocusTilesetsPanel={onFocusTilesetsPanel}
+                    />
+                  )}
+
+                  {/* ========================================================= */}
+                  {/* PANEL 4C: EDITOR DEDICADO DE TILESETS & AUTOTILE          */}
+                  {/* ========================================================= */}
+                  {panel.id === 'tilesets' && onChangeTilesets && onChangeTileToolConfig && (
+                    <TilesetEditorPanel
+                      tilesets={tilesets}
+                      onChangeTilesets={onChangeTilesets}
+                      tileToolConfig={tileToolConfig}
+                      onChangeTileToolConfig={onChangeTileToolConfig}
+                      onSelectTool={onSelectTool}
+                      onCaptureTileFromCanvas={onCaptureTileFromCanvas}
+                      onNotify={onStudioNotify}
                     />
                   )}
 

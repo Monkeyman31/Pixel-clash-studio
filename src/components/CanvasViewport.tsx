@@ -76,7 +76,10 @@ import {
   StageParallaxConfig,
   StageType,
   SymmetryConfig,
+  TileItem,
+  TilesetCollection,
   TilesetWorkspaceConfig,
+  TileToolConfig,
   ToolType,
   TransformActionId,
   TransformParameters,
@@ -128,6 +131,14 @@ import {
   getTransformedQuadCorners,
   transformVectorPath,
 } from '../utils/transformEngine';
+import {
+  clearTileCellOnGrid,
+  DEFAULT_TILE_TOOL_CONFIG,
+  replaceMatchingTilesOnGrid,
+  smartFillTilesOnGrid,
+  stampTilePixelsOntoGrid,
+  updateAutotileAroundCell,
+} from '../utils/tilesetEngine';
 import {
   alignSelectedNodes,
   bendSegmentByDelta,
@@ -387,6 +398,11 @@ interface CanvasViewportProps {
   onApplyCanvasEdit?: () => void;
   onResetCanvasEdit?: () => void;
   onCancelCanvasEdit?: () => void;
+  // Tiles Tool & Tileset Collection
+  tileToolConfig?: TileToolConfig;
+  tilesets?: TilesetCollection[];
+  onChangeTileToolConfig?: (next: TileToolConfig) => void;
+  onCommitTileLayerEdit?: (pixels: (string | null)[][], tileMapData: Record<string, string>) => void;
 }
 
 const HITBOX_RENDER_STYLES: Record<HitboxType, { stroke: string; fill: string; label: string }> = {
@@ -549,6 +565,10 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   onApplyCanvasEdit,
   onResetCanvasEdit,
   onCancelCanvasEdit,
+  tileToolConfig = DEFAULT_TILE_TOOL_CONFIG,
+  tilesets = [],
+  onChangeTileToolConfig,
+  onCommitTileLayerEdit,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasBoxRef = useRef<HTMLDivElement>(null);
@@ -759,7 +779,39 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   const draftMaskRef = useRef<number[][]>([]);
   const isPaintingMaskRef = useRef<boolean>(false);
   const smoothedCoordRef = useRef<{ x: number; y: number } | null>(null);
+  const draftTileMapRef = useRef<Record<string, string> | null>(null);
+  const tileDragStartCellRef = useRef<{ tx: number; ty: number } | null>(null);
+  const tileLastCellRef = useRef<{ tx: number; ty: number } | null>(null);
   const [livePressureInfo, setLivePressureInfo] = useState<{ pressure: number; pointerType: string; size: number } | null>(null);
+
+  const activeTileset = useMemo(
+    () => tilesets.find((ts) => ts.id === tileToolConfig.activeTilesetId) || tilesets[0] || null,
+    [tilesets, tileToolConfig.activeTilesetId]
+  );
+
+  const activeTileItem = useMemo(
+    () => activeTileset?.tiles.find((t) => t.id === tileToolConfig.activeTileId) || activeTileset?.tiles[0] || null,
+    [activeTileset, tileToolConfig.activeTileId]
+  );
+
+  const findTileByKey = useCallback(
+    (key: string): TileItem | undefined => {
+      const sep = key.indexOf(':');
+      if (sep > 0) {
+        const tsId = key.slice(0, sep);
+        const tId = key.slice(sep + 1);
+        const ts = tilesets.find((s) => s.id === tsId);
+        const found = ts?.tiles.find((t) => t.id === tId);
+        if (found) return found;
+      }
+      for (const ts of tilesets) {
+        const f = ts.tiles.find((t) => t.id === key);
+        if (f) return f;
+      }
+      return activeTileItem || undefined;
+    },
+    [tilesets, activeTileItem]
+  );
 
   // Live centered brush footprint preview HUD (~900ms when adjusting brush sliders)
   const [showBrushPreviewHud, setShowBrushPreviewHud] = useState<boolean>(false);
@@ -3682,8 +3734,43 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       ctx.restore();
     }
 
-    // 12. Cursor Hover Reticle (Matches configured brush size & shape + fast-path for >32px)
-    if (cursorPos && !isSpaceDown && effTool !== 'hand' && effTool !== 'move') {
+    // 12. Cursor Hover Reticle (Matches configured brush size & shape + fast-path for >32px + Tiles Ghost Preview)
+    if (cursorPos && !isSpaceDown && effTool === 'tile') {
+      const tileSz = Math.max(4, tileToolConfig.tileSize || 16);
+      const tx = Math.floor(cursorPos.x / tileSz);
+      const ty = Math.floor(cursorPos.y / tileSz);
+      const gx = tx * tileSz;
+      const gy = ty * tileSz;
+      ctx.save();
+      if (tileToolConfig.mode !== 'erase' && tileToolConfig.mode !== 'select' && activeTileItem) {
+        ctx.globalAlpha = 0.55;
+        const tw = Math.max(1, activeTileItem.width);
+        const th = Math.max(1, activeTileItem.height);
+        for (let py = 0; py < tileSz; py++) {
+          const pxRow = activeTileItem.pixels[py % th];
+          if (!pxRow) continue;
+          for (let px = 0; px < tileSz; px++) {
+            const c = pxRow[px % tw];
+            if (!c) continue;
+            const cx = gx + px;
+            const cy = gy + py;
+            if (cx < 0 || cx >= width || cy < 0 || cy >= height) continue;
+            ctx.fillStyle = c;
+            ctx.fillRect(cx * zoom, cy * zoom, zoom, zoom);
+          }
+        }
+        ctx.globalAlpha = 1;
+      }
+      ctx.strokeStyle =
+        tileToolConfig.mode === 'erase'
+          ? 'rgba(244, 63, 94, 0.95)'
+          : tileToolConfig.mode === 'select'
+          ? 'rgba(56, 189, 248, 0.95)'
+          : 'rgba(16, 185, 129, 0.95)';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(gx * zoom + 0.5, gy * zoom + 0.5, tileSz * zoom - 1, tileSz * zoom - 1);
+      ctx.restore();
+    } else if (cursorPos && !isSpaceDown && effTool !== 'hand' && effTool !== 'move') {
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
       ctx.lineWidth = 1;
       const reticleSize = ['pencil', 'eraser', 'shading', 'smear', 'line', 'dither'].includes(effTool)
@@ -3885,6 +3972,8 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     workMode,
     stageParallaxConfig,
     tilesetConfig,
+    tileToolConfig,
+    activeTileItem,
     performanceMode,
   ]);
 
@@ -5751,6 +5840,148 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
+    // Tiles Tool (Dibujar, Colocar, Reemplazar, Borrar, Seleccionar + Autotile + Área + Repetición + Relleno Inteligente)
+    if (activeTool === 'tile' && !canEditMaskNow) {
+      const tileSz = Math.max(4, tileToolConfig.tileSize || 16);
+      const tx = Math.floor(coords.x / tileSz);
+      const ty = Math.floor(coords.y / tileSz);
+      const coordKey = `${tx},${ty}`;
+      const curMap: Record<string, string> = { ...(currentLayer.tileMapData || {}) };
+
+      if (tileToolConfig.mode === 'select') {
+        const pickedKey = curMap[coordKey];
+        if (pickedKey) {
+          const sep = pickedKey.indexOf(':');
+          if (sep > 0 && onChangeTileToolConfig) {
+            onChangeTileToolConfig({
+              ...tileToolConfig,
+              activeTilesetId: pickedKey.slice(0, sep),
+              activeTileId: pickedKey.slice(sep + 1),
+            });
+          }
+        }
+        draftPixelsRef.current = [];
+        draftTileMapRef.current = null;
+        setIsDrawing(false);
+        return;
+      }
+
+      if (draftPixelsRef.current.length === 0) {
+        draftPixelsRef.current = createEmptyGrid(width, height);
+      }
+      draftTileMapRef.current = curMap;
+      const activeKey = activeTileset && activeTileItem ? `${activeTileset.id}:${activeTileItem.id}` : '';
+
+      if (tileToolConfig.mode === 'replace') {
+        const targetKey = curMap[coordKey];
+        if (targetKey && activeTileItem && activeKey) {
+          const changed = replaceMatchingTilesOnGrid(
+            draftPixelsRef.current,
+            draftTileMapRef.current,
+            targetKey,
+            activeKey,
+            activeTileItem,
+            tileSz,
+            width,
+            height,
+            tileToolConfig.autotile,
+            findTileByKey
+          );
+          if (changed > 0) {
+            if (onCommitTileLayerEdit) {
+              onCommitTileLayerEdit(draftPixelsRef.current, draftTileMapRef.current);
+            } else {
+              onUpdateLayerPixels(draftPixelsRef.current, currentLayer.offCanvasPixels);
+            }
+          }
+        }
+        draftPixelsRef.current = [];
+        draftTileMapRef.current = null;
+        setIsDrawing(false);
+        return;
+      }
+
+      if (tileToolConfig.paintMode === 'smart_fill' && (tileToolConfig.mode === 'draw' || tileToolConfig.mode === 'place')) {
+        if (activeTileItem && activeKey) {
+          const changed = smartFillTilesOnGrid(
+            draftPixelsRef.current,
+            draftTileMapRef.current,
+            tx,
+            ty,
+            activeKey,
+            activeTileItem,
+            tileSz,
+            width,
+            height,
+            tileToolConfig.autotile,
+            findTileByKey
+          );
+          if (changed > 0) {
+            if (onCommitTileLayerEdit) {
+              onCommitTileLayerEdit(draftPixelsRef.current, draftTileMapRef.current);
+            } else {
+              onUpdateLayerPixels(draftPixelsRef.current, currentLayer.offCanvasPixels);
+            }
+          }
+        }
+        draftPixelsRef.current = [];
+        draftTileMapRef.current = null;
+        setIsDrawing(false);
+        return;
+      }
+
+      const applySingleTileCell = (cx: number, cy: number) => {
+        if (!draftTileMapRef.current) return;
+        const cKey = `${cx},${cy}`;
+        if (tileToolConfig.mode === 'erase') {
+          delete draftTileMapRef.current[cKey];
+          clearTileCellOnGrid(draftPixelsRef.current, cx, cy, tileSz, width, height);
+          if (tileToolConfig.autotile) {
+            updateAutotileAroundCell(
+              draftPixelsRef.current,
+              draftTileMapRef.current,
+              cx,
+              cy,
+              tileSz,
+              width,
+              height,
+              findTileByKey
+            );
+          }
+        } else if (activeTileItem && activeKey) {
+          draftTileMapRef.current[cKey] = activeKey;
+          if (tileToolConfig.autotile) {
+            updateAutotileAroundCell(
+              draftPixelsRef.current,
+              draftTileMapRef.current,
+              cx,
+              cy,
+              tileSz,
+              width,
+              height,
+              findTileByKey
+            );
+          } else {
+            stampTilePixelsOntoGrid(
+              draftPixelsRef.current,
+              cx,
+              cy,
+              tileSz,
+              activeTileItem.pixels,
+              width,
+              height
+            );
+          }
+        }
+      };
+
+      tileDragStartCellRef.current = { tx, ty };
+      tileLastCellRef.current = { tx, ty };
+      applySingleTileCell(tx, ty);
+      renderCanvas();
+      return;
+    }
+
     // Freehand tools (Pencil Universal, Eraser, Dither with full BrushSettings + Stylus Pressure + Mask Painting)
     if (['pencil', 'eraser', 'dither'].includes(activeTool)) {
       const { rawPressure, pointerType, effectiveSize, totalOpacity } = getPointerStrokeMetrics(e, 1);
@@ -7151,6 +7382,93 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
+    if (activeTool === 'tile' && isDrawing && draftTileMapRef.current) {
+      const tileSz = Math.max(4, tileToolConfig.tileSize || 16);
+      const tx = Math.floor(coords.x / tileSz);
+      const ty = Math.floor(coords.y / tileSz);
+      const activeKey = activeTileset && activeTileItem ? `${activeTileset.id}:${activeTileItem.id}` : '';
+
+      if (tileToolConfig.paintMode === 'area' && tileDragStartCellRef.current) {
+        const baseGrid =
+          currentLayer.pixels.length > 0
+            ? currentLayer.pixels.map((r) => [...r])
+            : createEmptyGrid(width, height);
+        const nextMap: Record<string, string> = { ...(currentLayer.tileMapData || {}) };
+        const minTx = Math.min(tileDragStartCellRef.current.tx, tx);
+        const maxTx = Math.max(tileDragStartCellRef.current.tx, tx);
+        const minTy = Math.min(tileDragStartCellRef.current.ty, ty);
+        const maxTy = Math.max(tileDragStartCellRef.current.ty, ty);
+
+        for (let cy = minTy; cy <= maxTy; cy++) {
+          for (let cx = minTx; cx <= maxTx; cx++) {
+            const cKey = `${cx},${cy}`;
+            if (tileToolConfig.mode === 'erase') {
+              delete nextMap[cKey];
+              clearTileCellOnGrid(baseGrid, cx, cy, tileSz, width, height);
+            } else if (activeTileItem && activeKey) {
+              nextMap[cKey] = activeKey;
+              if (!tileToolConfig.autotile) {
+                stampTilePixelsOntoGrid(baseGrid, cx, cy, tileSz, activeTileItem.pixels, width, height);
+              }
+            }
+          }
+        }
+        if (tileToolConfig.autotile) {
+          for (let cy = minTy; cy <= maxTy; cy++) {
+            for (let cx = minTx; cx <= maxTx; cx++) {
+              updateAutotileAroundCell(baseGrid, nextMap, cx, cy, tileSz, width, height, findTileByKey);
+            }
+          }
+        }
+        draftPixelsRef.current = baseGrid;
+        draftTileMapRef.current = nextMap;
+        tileLastCellRef.current = { tx, ty };
+        renderCanvas();
+        return;
+      }
+
+      if (
+        (tileToolConfig.continuousDraw || tileToolConfig.autoRepeat || tileToolConfig.paintMode === 'repeat') &&
+        tileToolConfig.mode !== 'place' &&
+        tileLastCellRef.current &&
+        (tileLastCellRef.current.tx !== tx || tileLastCellRef.current.ty !== ty)
+      ) {
+        let cx0 = tileLastCellRef.current.tx;
+        let cy0 = tileLastCellRef.current.ty;
+        const dx = Math.abs(tx - cx0);
+        const dy = Math.abs(ty - cy0);
+        const sx = cx0 < tx ? 1 : -1;
+        const sy = cy0 < ty ? 1 : -1;
+        let err = dx - dy;
+
+        while (true) {
+          const cKey = `${cx0},${cy0}`;
+          if (tileToolConfig.mode === 'erase') {
+            delete draftTileMapRef.current[cKey];
+            clearTileCellOnGrid(draftPixelsRef.current, cx0, cy0, tileSz, width, height);
+            if (tileToolConfig.autotile) {
+              updateAutotileAroundCell(draftPixelsRef.current, draftTileMapRef.current, cx0, cy0, tileSz, width, height, findTileByKey);
+            }
+          } else if (activeTileItem && activeKey) {
+            draftTileMapRef.current[cKey] = activeKey;
+            if (tileToolConfig.autotile) {
+              updateAutotileAroundCell(draftPixelsRef.current, draftTileMapRef.current, cx0, cy0, tileSz, width, height, findTileByKey);
+            } else {
+              stampTilePixelsOntoGrid(draftPixelsRef.current, cx0, cy0, tileSz, activeTileItem.pixels, width, height);
+            }
+          }
+          if (cx0 === tx && cy0 === ty) break;
+          const e2 = 2 * err;
+          if (e2 > -dy) { err -= dy; cx0 += sx; }
+          if (e2 < dx) { err += dx; cy0 += sy; }
+        }
+        tileLastCellRef.current = { tx, ty };
+        renderCanvas();
+        return;
+      }
+      return;
+    }
+
     if (lastDrawnPoint) {
       strokeHistoryRef.current.push(coords);
       const strokeLen = strokeHistoryRef.current.length;
@@ -7613,6 +7931,26 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       (brushSettings.size || brushSize) === 1
     ) {
       cleanPixelPerfectStroke(strokeHistoryRef.current, draftPixelsRef.current);
+    }
+
+    if (activeTool === 'tile' && draftTileMapRef.current) {
+      if (draftPixelsRef.current.length > 0) {
+        const finalGrid = currentLayer.lockTransparency
+          ? applyTransparencyLock(currentLayer.pixels, draftPixelsRef.current)
+          : draftPixelsRef.current;
+        if (onCommitTileLayerEdit) {
+          onCommitTileLayerEdit(finalGrid, draftTileMapRef.current);
+        } else {
+          onUpdateLayerPixels(finalGrid, currentLayer.offCanvasPixels);
+        }
+        draftPixelsRef.current = [];
+      }
+      draftTileMapRef.current = null;
+      tileDragStartCellRef.current = null;
+      tileLastCellRef.current = null;
+      setLastDrawnPoint(null);
+      setDragStartPoint(null);
+      return;
     }
 
     if (draftPixelsRef.current.length > 0) {

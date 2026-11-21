@@ -398,6 +398,23 @@ export const HELP_CATALOG_ITEMS: HelpCatalogItem[] = [
     toolId: 'hand',
     panelId: 'toolbar',
   },
+  {
+    id: 'tool.tile',
+    name: 'Tiles (Pintado de Escenarios y Autotile)',
+    category: 'Herramientas',
+    location: 'Barra de Herramientas · Panel Tilesets',
+    searchKeywords: 'tile tiles tilesets autotile mapa escenario suelo cesped agua lava roca',
+    howToAccess: 'Pulsa Shift+T o elige el icono de Tiles en la Barra de Herramientas. Usa el panel Tilesets para seleccionar o importar tiles.',
+    hotkey: 'Shift+T',
+    description: 'Pinta y edita mapas modulares sobre capas con modos Dibujar, Colocar, Reemplazar, Borrar, Seleccionar, Pintar Área, Repetición Automática, Relleno Inteligente y Autotile automático 4-bit.',
+    useCases: [
+      'Construir suelos, muros, vegetación y agua rápidamente con Autotile inteligente.',
+      'Reemplazar todo un tipo de tile por otro o rellenar regiones cerradas.',
+    ],
+    demoType: 'pixel_draw',
+    toolId: 'tile',
+    panelId: 'tilesets',
+  },
 
   // PANELES Y SISTEMAS PRINCIPALES
   {

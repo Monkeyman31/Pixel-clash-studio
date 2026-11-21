@@ -17,8 +17,18 @@ import {
   X,
 } from 'lucide-react';
 import { FIGHTING_GAME_PALETTES } from '../constants/palettes';
-import { NewProjectConfig, RecentProjectEntry } from '../types';
+import {
+  FightingGameProfileId,
+  NewProjectConfig,
+  ProjectWorkMode,
+  RecentProjectEntry,
+} from '../types';
 import { estimateCanvasResources } from '../utils/canvasMemoryEstimator';
+import {
+  FIGHTING_GAME_PROFILE_ORDER,
+  FIGHTING_GAME_PROFILES,
+  MODE_SIZE_PRESETS,
+} from '../utils/fightingGameProfiles';
 
 export type NewProjectTemplateCategory =
   | 'Todas'
@@ -35,6 +45,7 @@ interface NewProjectModalProps {
   isOpen: boolean;
   onClose: () => void;
   initialCategory?: NewProjectTemplateCategory | string;
+  initialFightingProfileId?: FightingGameProfileId;
   onCreateProject?: (name: string, width: number, height: number) => void;
   onCreateProjectConfig?: (config: NewProjectConfig) => void;
   recentProjects?: RecentProjectEntry[];
@@ -45,6 +56,7 @@ interface NewProjectModalProps {
 interface ProjectTemplateItem {
   id: string;
   category: Exclude<NewProjectTemplateCategory, 'Todas'>;
+  workMode: ProjectWorkMode;
   name: string;
   width: number;
   height: number;
@@ -55,34 +67,19 @@ interface ProjectTemplateItem {
   pixelPerfect: boolean;
 }
 
-const PROJECT_TEMPLATES: ProjectTemplateItem[] = [
-  // Personaje
-  { id: 'char-16bit', category: 'Personaje', name: 'Fighter 16-Bit', width: 48, height: 48, pixelScale: 1, desc: 'Estándar arcade ágil', animationMode: true, grid: true, pixelPerfect: true },
-  { id: 'char-cps2', category: 'Personaje', name: 'Luchador CPS-2', width: 64, height: 64, pixelScale: 1, desc: 'Sprite medio detallado', animationMode: true, grid: true, pixelPerfect: true },
-  { id: 'char-boss', category: 'Personaje', name: 'Jefe SNK Boss', width: 128, height: 128, pixelScale: 1, desc: 'Personaje gran escala', animationMode: true, grid: true, pixelPerfect: false },
-  // Stage
-  { id: 'stage-retro', category: 'Stage', name: 'Stage 16:9 Retro', width: 320, height: 180, pixelScale: 1, desc: 'Escenario pixel art clásico', animationMode: false, grid: false, pixelPerfect: false },
-  { id: 'stage-panoramic', category: 'Stage', name: 'Escenario Panorámico', width: 1024, height: 384, pixelScale: 1, desc: 'Fondo amplio con parallax', animationMode: false, grid: false, pixelPerfect: false },
-  { id: 'stage-hd', category: 'Stage', name: 'Stage Ultra-Wide HD', width: 2560, height: 720, pixelScale: 1, desc: 'Motor Tiled 256×256', animationMode: false, grid: false, pixelPerfect: false },
-  // HUD
-  { id: 'hud-life', category: 'HUD', name: 'Barra Vida / K.O.', width: 256, height: 64, pixelScale: 1, desc: 'Interfaz de combate arcade', animationMode: false, grid: true, pixelPerfect: true },
-  { id: 'hud-panel', category: 'HUD', name: 'Marco / Menú UI', width: 192, height: 128, pixelScale: 1, desc: 'Ventanas, contadores e iconos', animationMode: false, grid: true, pixelPerfect: true },
-  // FX
-  { id: 'fx-hit', category: 'FX', name: 'Impacto / Slash', width: 80, height: 80, pixelScale: 1, desc: 'Golpes, chispas y smears', animationMode: true, grid: true, pixelPerfect: true },
-  { id: 'fx-aura', category: 'FX', name: 'Aura / Proyectil', width: 128, height: 96, pixelScale: 1, desc: 'Ki, fuego, rayos y explosiones', animationMode: true, grid: true, pixelPerfect: false },
-  // Portrait
-  { id: 'port-select', category: 'Portrait', name: 'Retrato Selección', width: 96, height: 112, pixelScale: 1, desc: 'Pantalla de selección / diálogo', animationMode: false, grid: false, pixelPerfect: true },
-  { id: 'port-super', category: 'Portrait', name: 'Retrato Super Move', width: 256, height: 160, pixelScale: 1, desc: 'Ilustración de ataque especial', animationMode: false, grid: false, pixelPerfect: false },
-  // Cutscene
-  { id: 'cut-arcade', category: 'Cutscene', name: 'Cinemática 384×216', width: 384, height: 216, pixelScale: 1, desc: 'Escena narrativa 16:9', animationMode: true, grid: false, pixelPerfect: false },
-  { id: 'cut-hd', category: 'Cutscene', name: 'Storyboard 1280×720', width: 1280, height: 720, pixelScale: 1, desc: 'Alta resolución Tiled', animationMode: true, grid: false, pixelPerfect: false },
-  // Tileset
-  { id: 'tile-16', category: 'Tileset', name: 'Hoja Tiles 256×256', width: 256, height: 256, pixelScale: 1, desc: 'Mosaicos 16×16 o 32×32', animationMode: false, grid: true, pixelPerfect: true },
-  { id: 'tile-atlas', category: 'Tileset', name: 'Mega Atlas 1024×1024', width: 1024, height: 1024, pixelScale: 1, desc: 'Atlas completo de niveles', animationMode: false, grid: true, pixelPerfect: true },
-  // Personalizado
-  { id: 'custom-1024', category: 'Personalizado', name: 'Alta Resolución 1024', width: 1024, height: 1024, pixelScale: 1, desc: 'Lienzo HD sin límites', animationMode: false, grid: false, pixelPerfect: false },
-  { id: 'custom-4096', category: 'Personalizado', name: 'Mega Lienzo 4096', width: 4096, height: 4096, pixelScale: 1, desc: 'Tiled 256×256 bajo demanda', animationMode: false, grid: false, pixelPerfect: false },
-];
+const PROJECT_TEMPLATES: ProjectTemplateItem[] = MODE_SIZE_PRESETS.map((p) => ({
+  id: p.id,
+  category: p.categoryLabel as Exclude<NewProjectTemplateCategory, 'Todas'>,
+  workMode: p.mode,
+  name: p.name,
+  width: p.width,
+  height: p.height,
+  pixelScale: 1,
+  desc: p.desc,
+  animationMode: p.animationMode,
+  grid: p.grid,
+  pixelPerfect: p.pixelPerfect,
+}));
 
 const CATEGORIES: NewProjectTemplateCategory[] = [
   'Todas',
@@ -100,6 +97,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
   isOpen,
   onClose,
   initialCategory,
+  initialFightingProfileId = 'custom',
   onCreateProject,
   onCreateProjectConfig,
   recentProjects = [],
@@ -108,9 +106,10 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
 }) => {
   const [name, setName] = useState<string>('Nuevo Proyecto');
   const [category, setCategory] = useState<NewProjectTemplateCategory>('Todas');
-  const [selectedTemplateId, setSelectedTemplateId] = useState<string>('char-16bit');
-  const [width, setWidth] = useState<number>(48);
-  const [height, setHeight] = useState<number>(48);
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>('fighter-64');
+  const [fightingProfileId, setFightingProfileId] = useState<FightingGameProfileId>(initialFightingProfileId);
+  const [width, setWidth] = useState<number>(64);
+  const [height, setHeight] = useState<number>(64);
   const [pixelScale, setPixelScale] = useState<number>(1);
   const [dpi, setDpi] = useState<number>(72);
   const [backgroundMode, setBackgroundMode] = useState<'transparent' | 'solid'>('transparent');
@@ -122,9 +121,39 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
   const [createInitialGroup, setCreateInitialGroup] = useState<boolean>(false);
   const [enableAnimationMode, setEnableAnimationMode] = useState<boolean>(true);
 
+  const selectedFightingProfile = FIGHTING_GAME_PROFILES[fightingProfileId] || FIGHTING_GAME_PROFILES.custom;
+
+  const applyProfileToCategory = (pid: FightingGameProfileId, cat: NewProjectTemplateCategory) => {
+    setFightingProfileId(pid);
+    if (pid === 'custom') return;
+    const spec = FIGHTING_GAME_PROFILES[pid];
+    setInitialPaletteId(spec.paletteId);
+    setEnablePixelPerfect(spec.fighterLayout.pixelPerfect);
+    if (cat === 'Personaje') {
+      setWidth(spec.resolutions.fighter.w);
+      setHeight(spec.resolutions.fighter.h);
+    } else if (cat === 'Stage') {
+      setWidth(spec.resolutions.stage.w);
+      setHeight(spec.resolutions.stage.h);
+    } else if (cat === 'HUD') {
+      setWidth(spec.resolutions.hud.w);
+      setHeight(spec.resolutions.hud.h);
+    } else if (cat === 'FX') {
+      setWidth(spec.resolutions.fx.w);
+      setHeight(spec.resolutions.fx.h);
+    } else if (cat === 'Portrait') {
+      setWidth(spec.resolutions.portrait.w);
+      setHeight(spec.resolutions.portrait.h);
+    } else if (cat === 'Cutscene') {
+      setWidth(spec.resolutions.cutscene.w);
+      setHeight(spec.resolutions.cutscene.h);
+    }
+  };
+
   // Sync category & first template when launched from Home Screen quick templates
   useEffect(() => {
     if (!isOpen) return;
+    setFightingProfileId(initialFightingProfileId);
     if (initialCategory && CATEGORIES.includes(initialCategory as NewProjectTemplateCategory)) {
       const targetCat = initialCategory as NewProjectTemplateCategory;
       setCategory(targetCat);
@@ -140,9 +169,12 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
           setEnablePixelPerfect(match.pixelPerfect);
           setName(`Nuevo ${targetCat}`);
         }
+        if (initialFightingProfileId && initialFightingProfileId !== 'custom') {
+          applyProfileToCategory(initialFightingProfileId, targetCat);
+        }
       }
     }
-  }, [isOpen, initialCategory]);
+  }, [isOpen, initialCategory, initialFightingProfileId]);
 
   const visibleTemplates = useMemo(
     () =>
@@ -192,6 +224,23 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
 
     if (onCreateProjectConfig) {
       const tpl = PROJECT_TEMPLATES.find((t) => t.id === selectedTemplateId);
+      const inferredMode: ProjectWorkMode =
+        tpl?.workMode ||
+        (category === 'Personaje'
+          ? 'fighter'
+          : category === 'Stage'
+          ? 'stage'
+          : category === 'HUD'
+          ? 'hud_ui'
+          : category === 'FX'
+          ? 'fx'
+          : category === 'Portrait'
+          ? 'portrait'
+          : category === 'Cutscene'
+          ? 'cutscene'
+          : category === 'Tileset'
+          ? 'tileset'
+          : 'custom');
       onCreateProjectConfig({
         name: safeName,
         width: effWidth,
@@ -208,6 +257,8 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
         createInitialLayer,
         createInitialGroup,
         enableAnimationMode,
+        workMode: inferredMode,
+        fightingProfileId,
       });
     } else if (onCreateProject) {
       onCreateProject(safeName, effWidth, effHeight);
@@ -269,6 +320,34 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
                 onChange={(e) => setName(e.target.value)}
                 className="w-full bg-[#171b2a] border border-[#2c354a] rounded-lg px-3 py-2 text-xs text-slate-100 font-semibold focus:border-emerald-400 focus:outline-none"
               />
+            </div>
+
+            {/* Optional Fighting Game Profile Selector */}
+            <div className="p-2.5 rounded-lg bg-[#161a28] border border-[#252d43] space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-rose-300">
+                  Perfil Juego de Pelea (Opcional)
+                </span>
+                <select
+                  value={fightingProfileId}
+                  onChange={(e) => applyProfileToCategory(e.target.value as FightingGameProfileId, category)}
+                  className="bg-[#10131e] border border-[#2c354a] rounded px-2 py-1 text-xs text-slate-100 focus:outline-none"
+                >
+                  {FIGHTING_GAME_PROFILE_ORDER.map((pid) => (
+                    <option key={pid} value={pid}>
+                      {FIGHTING_GAME_PROFILES[pid].name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {fightingProfileId !== 'custom' && (
+                <div className="text-[10px] text-slate-400 flex flex-wrap items-center gap-x-3 gap-y-0.5 font-mono">
+                  <span>Fighter: <strong className="text-amber-300">{selectedFightingProfile.resolutions.fighter.label}</strong></span>
+                  <span>Stage: <strong className="text-emerald-300">{selectedFightingProfile.resolutions.stage.label}</strong></span>
+                  <span>FX: <strong className="text-orange-300">{selectedFightingProfile.fxStyle}</strong></span>
+                  <span>{selectedFightingProfile.fighterLayout.recommendedFps} FPS</span>
+                </div>
+              )}
             </div>
 
             {/* Category Tabs + Templates Grid */}
