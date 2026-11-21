@@ -1,4 +1,4 @@
-name: Compilar Instaladores Windows (.EXE y .MSI)
+name: Compilar Instaladores Windows Rust/Tauri (.EXE y .MSI)
 
 on:
   workflow_dispatch:
@@ -18,25 +18,31 @@ jobs:
         with:
           node-version: 22
 
-      - name: Instalar dependencias del proyecto y empaquetado Electron
+      - name: Configurar toolchain nativo Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cachear dependencias Cargo (Rust)
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Instalar dependencias frontend y CLI de Tauri v2
         run: |
           npm install --legacy-peer-deps
-          npm install --save-dev --legacy-peer-deps electron@^33.2.0 electron-builder@^25.1.8
+          npm install --save-dev --legacy-peer-deps @tauri-apps/cli@^2.2.0
 
       - name: Verificar icono Windows (.ICO)
         run: node installer/ensure-icon.mjs
 
-      - name: Compilar aplicación para escritorio y generar .EXE + .MSI
-        env:
-          CSC_IDENTITY_AUTO_DISCOVERY: false
+      - name: Compilar frontend + binario nativo Rust y generar .EXE + .MSI
         run: |
           npx vite build --base=./
-          npx electron-builder --win nsis msi --x64 --publish never --config electron-builder.yml
+          npx tauri build --bundles nsis,msi
 
       - name: Publicar instaladores finales (.EXE y .MSI)
         uses: actions/upload-artifact@v4
         with:
-          name: PixelClashStudio-Installers-Windows-x64
+          name: PixelClashStudio-Rust-Installers-Windows-x64
           path: |
-            release/*.exe
-            release/*.msi
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi

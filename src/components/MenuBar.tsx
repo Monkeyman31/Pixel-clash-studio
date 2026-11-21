@@ -104,6 +104,7 @@ import {
   StudioDropdownPortal,
   StudioVerticalSubMenu,
 } from './StudioMenu';
+import { getDesktopBridge } from '../utils/desktopBridge';
 
 export type ImportMenuMode =
   | 'smart'
@@ -3212,7 +3213,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
       {/* Flexible empty bar drag region when enabled */}
       <div
+        data-tauri-drag-region={dragEmptySpace ? 'true' : undefined}
         className={`flex-1 h-full min-w-[16px] ${dragEmptySpace ? 'studio-window-drag' : ''}`}
+        onMouseDown={(e) => {
+          if (!dragEmptySpace || e.button !== 0 || e.detail >= 2) return;
+          void getDesktopBridge()?.startWindowDragging?.();
+        }}
         onDoubleClick={dragEmptySpace ? onToggleMaximizeWindow : undefined}
       />
 

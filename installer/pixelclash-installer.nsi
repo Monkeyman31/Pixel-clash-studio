@@ -1,4 +1,4 @@
-; PixelClash Studio - Instalador Grafico Windows (.EXE) con NSIS MUI2
+; PixelClash Studio - Instalador Grafico Windows (.EXE) para binario nativo Rust (Tauri v2)
 Unicode True
 !include "MUI2.nsh"
 !include "x64.nsh"
@@ -13,7 +13,7 @@ SetCompressor /SOLID lzma
 VIProductVersion "2.0.0.0"
 VIAddVersionKey /LANG=3082 "ProductName" "PixelClash Studio"
 VIAddVersionKey /LANG=3082 "CompanyName" "PixelClash Studio"
-VIAddVersionKey /LANG=3082 "FileDescription" "Instalador de PixelClash Studio para Windows"
+VIAddVersionKey /LANG=3082 "FileDescription" "Instalador nativo Rust/Tauri de PixelClash Studio para Windows"
 VIAddVersionKey /LANG=3082 "FileVersion" "2.0.0"
 VIAddVersionKey /LANG=3082 "ProductVersion" "2.0.0"
 
@@ -32,10 +32,11 @@ VIAddVersionKey /LANG=3082 "ProductVersion" "2.0.0"
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "Spanish"
 
-Section "PixelClash Studio (Principal)" SecCore
+Section "PixelClash Studio (Principal - Nativo Rust)" SecCore
   SectionIn RO
   SetOutPath "$INSTDIR"
-  File /r "..\release\win-unpacked\*.*"
+  File "/oname=PixelClashStudio.exe" "..\src-tauri\target\release\pixelclash-studio.exe"
+  File "..\assets\pixelclash.ico"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PixelClashStudio" "DisplayName" "PixelClash Studio 2.0.0"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PixelClashStudio" "DisplayIcon" "$INSTDIR\PixelClashStudio.exe,0"

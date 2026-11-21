@@ -5,7 +5,7 @@ import {
   renderOfficialPixelClashIconToCanvas,
 } from '../components/PixelClashLogoIcon';
 
-export type WindowsInstallerEngine = 'nsis_electron' | 'msi_wix' | 'inno_setup';
+export type WindowsInstallerEngine = 'nsis_tauri' | 'msi_wix' | 'inno_setup';
 
 export interface WindowsInstallerConfig {
   appName: string;
@@ -32,7 +32,7 @@ export const DEFAULT_WINDOWS_INSTALLER_CONFIG: WindowsInstallerConfig = {
   createUninstaller: true,
   associatePcs: true,
   includeCurrentProject: true,
-  engine: 'nsis_electron',
+  engine: 'nsis_tauri',
 };
 
 function renderIconToCanvas(size: number): HTMLCanvasElement {
@@ -174,8 +174,8 @@ Section "${cfg.appName} (Aplicacion Principal)" SecCore
   SectionIn RO
   SetOutPath "$INSTDIR"
 
-  ; Archivos empaquetados de la aplicacion de escritorio compilada
-  File /r "..\\release\\win-unpacked\\*.*"
+  ; Archivos empaquetados del binario nativo Rust compilado (Tauri v2)
+  File "/oname=${exeName}" "..\\src-tauri\\target\\release\\pixelclash-studio.exe"
   File "..\\assets\\pixelclash.ico"
 
   WriteRegStr HKLM "Software\\${slug}" "Install_Dir" "$INSTDIR"
@@ -297,7 +297,7 @@ Name: "desktopicon"; Description: "Crear acceso directo en el Escritorio"; Group
 Name: "startmenuicon"; Description: "Crear acceso directo en el Menu Inicio"; GroupDescription: "Accesos directos adicionales:"; Flags: ${cfg.startMenuShortcut ? 'checkedonce' : 'unchecked'}
 
 [Files]
-Source: "..\\release\\win-unpacked\\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\\src-tauri\\target\\release\\pixelclash-studio.exe"; DestDir: "{app}"; DestName: "{#MyAppExeName}"; Flags: ignoreversion
 Source: "..\\assets\\pixelclash.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
@@ -369,7 +369,7 @@ export function generateMsiWixScript(cfg: WindowsInstallerConfig): string {
 
     <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
       <Component Id="MainExecutable" Guid="B8C41910-5E22-4B77-9C30-1E9A74401001">
-        <File Id="PixelClashExe" Source="..\\release\\win-unpacked\\${exeName}" KeyPath="yes" />
+        <File Id="PixelClashExe" Name="${exeName}" Source="..\\src-tauri\\target\\release\\pixelclash-studio.exe" KeyPath="yes" />
         <File Id="PixelClashIco" Source="..\\assets\\pixelclash.ico" />
 ${
   cfg.associatePcs
@@ -381,7 +381,6 @@ ${
     : '        <!-- Asociacion de extension .pcs deshabilitada -->'
 }
       </Component>
-      <Files Include="..\\release\\win-unpacked\\**" Exclude="..\\release\\win-unpacked\\${exeName}" />
     </ComponentGroup>
 
     <ComponentGroup Id="AppShortcuts">
@@ -423,71 +422,75 @@ ${
 `;
 }
 
-export function generateElectronBuilderYaml(cfg: WindowsInstallerConfig): string {
+export function generateTauriConfJson(cfg: WindowsInstallerConfig): string {
   const slug = sanitizeSafeSlug(cfg.appName);
-  return `appId: com.pixelclash.studio
-productName: "${cfg.appName}"
-copyright: "Copyright © ${new Date().getFullYear()} ${cfg.publisher}"
-extraMetadata:
-  main: electron/main.cjs
-  version: "${cfg.version}"
-npmRebuild: false
-publish: null
-directories:
-  output: release
-  buildResources: assets
-files:
-  - dist/**/*
-  - electron/**/*
-  - assets/pixelclash.ico
-  - package.json
-  - "!node_modules/**/*"
-win:
-  icon: assets/pixelclash.ico
-  executableName: "${slug}"
-  target:
-    - target: nsis
-      arch:
-        - x64
-    - target: msi
-      arch:
-        - x64
-nsis:
-  oneClick: false
-  perMachine: false
-  allowElevation: true
-  allowToChangeInstallationDirectory: ${cfg.allowCustomDir ? 'true' : 'false'}
-  createDesktopShortcut: ${cfg.desktopShortcut ? 'true' : 'false'}
-  createStartMenuShortcut: ${cfg.startMenuShortcut ? 'true' : 'false'}
-  shortcutName: "${cfg.appName}"
-  installerIcon: assets/pixelclash.ico
-  uninstallerIcon: assets/pixelclash.ico
-  installerHeaderIcon: assets/pixelclash.ico
-  uninstallDisplayName: "${cfg.appName} ${cfg.version}"
-  deleteAppDataOnUninstall: false
-  runAfterFinish: true
-  installerLanguages:
-    - es_ES
-  language: "3082"
-  artifactName: "${slug}-Setup-\${version}-x64.exe"
-msi:
-  oneClick: false
-  perMachine: false
-  createDesktopShortcut: ${cfg.desktopShortcut ? 'true' : 'false'}
-  createStartMenuShortcut: ${cfg.startMenuShortcut ? 'true' : 'false'}
-  shortcutName: "${cfg.appName}"
-  artifactName: "${slug}-\${version}-x64.msi"
-${
-  cfg.associatePcs
-    ? `fileAssociations:
-  - ext: pcs
-    name: "Proyecto PixelClash Studio"
-    description: "Proyecto editable de animación y pixel art PixelClash Studio"
-    icon: assets/pixelclash.ico
-    role: Editor`
-    : ''
-}
-`;
+  const bundleConfig: Record<string, unknown> = {
+    active: true,
+    targets: ['nsis', 'msi'],
+    icon: ['../assets/pixelclash.ico', '../assets/pixelclash.png'],
+    windows: {
+      webviewInstallMode: {
+        type: 'downloadBootstrapper',
+      },
+      nsis: {
+        languages: ['Spanish'],
+        displayLanguageSelector: false,
+        installMode: 'both',
+      },
+    },
+  };
+
+  if (cfg.associatePcs) {
+    bundleConfig.fileAssociations = [
+      {
+        ext: ['pcs'],
+        name: `Proyecto ${cfg.appName}`,
+        description: `Proyecto editable de pixel art y animación ${cfg.appName} (.pcs)`,
+        role: 'Editor',
+      },
+    ];
+  }
+
+  return JSON.stringify(
+    {
+      $schema: 'https://schema.tauri.app/config/2',
+      productName: cfg.appName,
+      version: cfg.version,
+      identifier: `com.${slug.toLowerCase()}.studio`,
+      build: {
+        beforeDevCommand: 'npm run dev',
+        devUrl: 'http://localhost:3000',
+        beforeBuildCommand: 'npm run build -- --base=./',
+        frontendDist: '../dist',
+      },
+      app: {
+        withGlobalTauri: true,
+        windows: [
+          {
+            label: 'main',
+            title: `${cfg.appName} ${cfg.version}`,
+            width: 1440,
+            height: 900,
+            minWidth: 1080,
+            minHeight: 680,
+            center: true,
+            resizable: true,
+            maximizable: true,
+            minimizable: true,
+            decorations: false,
+            transparent: false,
+            backgroundColor: '#12101e',
+          },
+        ],
+        security: {
+          csp: null,
+        },
+      },
+      bundle: bundleConfig,
+    },
+    null,
+    2
+  );
 }
 
 export async function generateWindowsExeBuilderZip(
@@ -496,268 +499,538 @@ export async function generateWindowsExeBuilderZip(
 ): Promise<Blob> {
   const zip = new JSZip();
   const slug = sanitizeSafeSlug(cfg.appName);
-  const root = zip.folder(`${slug}-Windows-EXE-Installer`) || zip;
+  const root = zip.folder(`${slug}-Windows-Rust-Tauri-Installer`) || zip;
 
-  // 1. Multi-resolution real binary .ico
+  // 1. Multi-resolution real binary .ico + 256px PNG icon
   const icoBytes = await generatePixelClashIcoBytes();
+  const png256Bytes = await canvasToPngBytes(renderIconToCanvas(256));
   root.file('assets/pixelclash.ico', icoBytes);
+  root.file('assets/pixelclash.png', png256Bytes);
 
-  // 2. Native Electron main & preload runtime (custom integrated frameless desktop window)
-  const electronMain = `const { app, BrowserWindow, Menu, shell, ipcMain, dialog } = require('electron');
-const path = require('path');
-const fs = require('fs');
+  // 2. Native Rust / Tauri v2 desktop workspace (frameless custom window + native I/O & clipboard)
+  const cargoToml = `[package]
+name = "pixelclash-studio"
+version = "${cfg.version}"
+description = "${cfg.appName} — Editor profesional de Pixel Art, Sprites, Escenarios y Animación"
+authors = ["${cfg.publisher}"]
+license = "MIT"
+edition = "2021"
 
-let mainWindow = null;
-let hasUnsavedChanges = false;
-let forceCloseConfirmed = false;
+[lib]
+name = "pixelclash_studio_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
 
-function registerDesktopFileIpc() {
-  ipcMain.handle('desktop:window-minimize', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.minimize();
-    return { ok: true };
-  });
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
 
-  ipcMain.handle('desktop:window-toggle-maximize', () => {
-    if (!mainWindow || mainWindow.isDestroyed()) return { maximized: false };
-    if (mainWindow.isMaximized()) {
-      mainWindow.unmaximize();
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rfd = "0.15"
+arboard = "3"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
+`;
+  root.file('src-tauri/Cargo.toml', cargoToml);
+  root.file('src-tauri/build.rs', 'fn main() {\n    tauri_build::build();\n}\n');
+  root.file('src-tauri/tauri.conf.json', generateTauriConfJson(cfg));
+  root.file(
+    'src-tauri/capabilities/default.json',
+    JSON.stringify(
+      {
+        $schema: '../gen/schemas/desktop-schema.json',
+        identifier: 'default',
+        description: `Permisos nativos de ventana, eventos, archivos y portapapeles para ${cfg.appName}`,
+        windows: ['main'],
+        permissions: [
+          'core:default',
+          'core:event:default',
+          'core:window:default',
+          'core:window:allow-minimize',
+          'core:window:allow-maximize',
+          'core:window:allow-unmaximize',
+          'core:window:allow-toggle-maximize',
+          'core:window:allow-is-maximized',
+          'core:window:allow-close',
+          'core:window:allow-start-dragging',
+        ],
+      },
+      null,
+      2
+    )
+  );
+  root.file(
+    'src-tauri/src/main.rs',
+    `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+fn main() {
+    pixelclash_studio_lib::run();
+}
+`
+  );
+
+  const tauriLibRs = `use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::UNIX_EPOCH;
+
+use image::ImageEncoder;
+use serde::{Deserialize, Serialize};
+use tauri::{Emitter, Manager};
+
+pub struct DesktopRuntimeState {
+    pub has_unsaved: AtomicBool,
+    pub force_close: AtomicBool,
+    pub last_maximized: AtomicBool,
+}
+
+impl Default for DesktopRuntimeState {
+    fn default() -> Self {
+        Self {
+            has_unsaved: AtomicBool::new(false),
+            force_close: AtomicBool::new(false),
+            last_maximized: AtomicBool::new(false),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenDialogFilter {
+    pub name: String,
+    pub extensions: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenFileDialogOptions {
+    pub title: Option<String>,
+    pub multiple: Option<bool>,
+    pub filters: Option<Vec<OpenDialogFilter>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopOpenFilePayload {
+    pub file_path: String,
+    pub name: String,
+    pub size: u64,
+    pub last_modified: u64,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenFileDialogResponse {
+    pub canceled: bool,
+    pub error: Option<String>,
+    pub files: Vec<DesktopOpenFilePayload>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileExistsResponse {
+    pub exists: bool,
+    pub size: Option<u64>,
+    pub last_modified: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadFileResponse {
+    pub exists: bool,
+    pub file_path: Option<String>,
+    pub name: Option<String>,
+    pub size: Option<u64>,
+    pub last_modified: Option<u64>,
+    pub bytes: Option<Vec<u8>>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipboardImageReadResponse {
+    pub has_image: bool,
+    pub png_bytes: Option<Vec<u8>>,
+    pub width: Option<usize>,
+    pub height: Option<usize>,
+    pub error: Option<String>,
+}
+
+fn modified_ms(meta: &fs::Metadata) -> u64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn read_disk_file_payload(path: &Path) -> Result<DesktopOpenFilePayload, String> {
+    let meta = fs::metadata(path).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("La ruta no corresponde a un archivo válido.".to_string());
+    }
+    let bytes = fs::read(path).map_err(|e| e.to_string())?;
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("archivo")
+        .to_string();
+
+    Ok(DesktopOpenFilePayload {
+        file_path: path.to_string_lossy().to_string(),
+        name,
+        size: meta.len(),
+        last_modified: modified_ms(&meta),
+        bytes,
+    })
+}
+
+#[tauri::command]
+async fn open_file_dialog(options: Option<OpenFileDialogOptions>) -> OpenFileDialogResponse {
+    let opts = options.unwrap_or_default();
+    let title = opts
+        .title
+        .unwrap_or_else(|| "Abrir archivo en ${cfg.appName}".to_string());
+    let multiple = opts.multiple.unwrap_or(false);
+
+    let mut dialog = rfd::AsyncFileDialog::new().set_title(&title);
+
+    if let Some(custom_filters) = opts.filters {
+        for f in custom_filters {
+            let exts: Vec<&str> = f.extensions.iter().map(|s| s.as_str()).collect();
+            dialog = dialog.add_filter(&f.name, &exts);
+        }
     } else {
-      mainWindow.maximize();
+        dialog = dialog
+            .add_filter(
+                "Todos los formatos compatibles",
+                &[
+                    "pcs", "ase", "aseprite", "psd", "json", "png", "jpg", "jpeg", "webp", "gif",
+                    "bmp", "tif", "tiff", "tga", "ico",
+                ],
+            )
+            .add_filter(
+                "Imágenes (PNG, JPG, WEBP, GIF, BMP, TIFF, TGA, ICO)",
+                &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "tga", "ico"],
+            )
+            .add_filter(
+                "Pixel Art y Proyectos (PCS, ASE, ASEPRITE, PSD, JSON)",
+                &["pcs", "ase", "aseprite", "psd", "json"],
+            )
+            .add_filter("Todos los archivos", &["*"]);
     }
-    return { maximized: mainWindow.isMaximized() };
-  });
 
-  ipcMain.handle('desktop:window-is-maximized', () => {
-    return { maximized: Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isMaximized()) };
-  });
+    let picked_paths: Vec<PathBuf> = if multiple {
+        match dialog.pick_files().await {
+            Some(handles) => handles.into_iter().map(|h| h.path().to_path_buf()).collect(),
+            None => Vec::new(),
+        }
+    } else {
+        match dialog.pick_file().await {
+            Some(handle) => vec![handle.path().to_path_buf()],
+            None => Vec::new(),
+        }
+    };
 
-  ipcMain.handle('desktop:window-close', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close();
-    return { ok: true };
-  });
-
-  ipcMain.handle('desktop:set-unsaved-state', (_event, dirtyFlag) => {
-    hasUnsavedChanges = Boolean(dirtyFlag);
-    return { ok: true };
-  });
-
-  ipcMain.handle('desktop:confirm-app-close', () => {
-    forceCloseConfirmed = true;
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.close();
+    if picked_paths.is_empty() {
+        return OpenFileDialogResponse {
+            canceled: true,
+            error: None,
+            files: Vec::new(),
+        };
     }
-    return { ok: true };
-  });
 
-  ipcMain.handle('desktop:open-file-dialog', async (_event, options = {}) => {
-    const res = await dialog.showOpenDialog(mainWindow || undefined, {
-      title: options.title || 'Abrir archivo en ${cfg.appName}',
-      properties: options.multiple ? ['openFile', 'multiSelections'] : ['openFile'],
-      filters: options.filters || [
-        {
-          name: 'Todos los formatos compatibles',
-          extensions: ['pcs', 'ase', 'aseprite', 'psd', 'json', 'png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'tif', 'tiff', 'tga', 'ico'],
-        },
-        {
-          name: 'Imágenes (PNG, JPG, WEBP, GIF, BMP, TIFF, TGA, ICO)',
-          extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'tif', 'tiff', 'tga', 'ico'],
-        },
-        {
-          name: 'Pixel Art y Proyectos (PCS, ASE, ASEPRITE, PSD, JSON)',
-          extensions: ['pcs', 'ase', 'aseprite', 'psd', 'json'],
-        },
-        { name: 'Todos los archivos', extensions: ['*'] },
-      ],
-    });
-    if (res.canceled || !res.filePaths || res.filePaths.length === 0) {
-      return { canceled: true, files: [] };
+    let mut files = Vec::with_capacity(picked_paths.len());
+    for path in picked_paths {
+        match read_disk_file_payload(&path) {
+            Ok(payload) => files.push(payload),
+            Err(err) => {
+                return OpenFileDialogResponse {
+                    canceled: false,
+                    error: Some(err),
+                    files: Vec::new(),
+                };
+            }
+        }
     }
-    const files = [];
-    for (const filePath of res.filePaths) {
-      try {
-        const stat = fs.statSync(filePath);
-        const buf = fs.readFileSync(filePath);
-        files.push({
-          filePath,
-          name: path.basename(filePath),
-          size: stat.size,
-          lastModified: stat.mtimeMs,
-          bytes: new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength),
-        });
-      } catch (err) {
-        return { canceled: false, error: err.message, files: [] };
-      }
-    }
-    return { canceled: false, files };
-  });
 
-  ipcMain.handle('desktop:check-file-exists', async (_event, filePath) => {
-    if (!filePath || typeof filePath !== 'string') return { exists: false };
-    try {
-      if (!fs.existsSync(filePath)) return { exists: false };
-      const stat = fs.statSync(filePath);
-      return { exists: stat.isFile(), size: stat.size, lastModified: stat.mtimeMs };
-    } catch {
-      return { exists: false };
+    OpenFileDialogResponse {
+        canceled: false,
+        error: None,
+        files,
     }
-  });
-
-  ipcMain.handle('desktop:read-file-at-path', async (_event, filePath) => {
-    if (!filePath || typeof filePath !== 'string') return { exists: false, error: 'Ruta inválida' };
-    try {
-      if (!fs.existsSync(filePath)) return { exists: false };
-      const stat = fs.statSync(filePath);
-      if (!stat.isFile()) return { exists: false };
-      const buf = fs.readFileSync(filePath);
-      return {
-        exists: true,
-        filePath,
-        name: path.basename(filePath),
-        size: stat.size,
-        lastModified: stat.mtimeMs,
-        bytes: new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength),
-      };
-    } catch (err) {
-      return { exists: false, error: err.message };
-    }
-  });
 }
 
-function createWindow() {
-  forceCloseConfirmed = false;
-  mainWindow = new BrowserWindow({
-    width: 1440,
-    height: 900,
-    minWidth: 1080,
-    minHeight: 680,
-    frame: false,
-    titleBarStyle: 'hidden',
-    thickFrame: true,
-    resizable: true,
-    maximizable: true,
-    minimizable: true,
-    title: '${cfg.appName} ${cfg.version}',
-    backgroundColor: '#12101e',
-    icon: path.join(__dirname, '..', 'assets', 'pixelclash.ico'),
-    autoHideMenuBar: true,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.cjs'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-    },
-  });
-
-  Menu.setApplicationMenu(null);
-  mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
-
-  mainWindow.on('maximize', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('desktop:window-maximize-change', true);
+#[tauri::command]
+fn check_file_exists(file_path: String) -> FileExistsResponse {
+    let path = Path::new(&file_path);
+    match fs::metadata(path) {
+        Ok(meta) if meta.is_file() => FileExistsResponse {
+            exists: true,
+            size: Some(meta.len()),
+            last_modified: Some(modified_ms(&meta)),
+        },
+        _ => FileExistsResponse {
+            exists: false,
+            size: None,
+            last_modified: None,
+        },
     }
-  });
-
-  mainWindow.on('unmaximize', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('desktop:window-maximize-change', false);
-    }
-  });
-
-  mainWindow.on('close', (e) => {
-    if (hasUnsavedChanges && !forceCloseConfirmed && mainWindow && !mainWindow.isDestroyed()) {
-      e.preventDefault();
-      mainWindow.webContents.send('desktop:request-app-close');
-    }
-  });
-
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
-    return { action: 'deny' };
-  });
-
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-  });
 }
 
-app.whenReady().then(() => {
-  registerDesktopFileIpc();
-  createWindow();
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
-  });
-});
+#[tauri::command]
+fn read_file_at_path(file_path: String) -> ReadFileResponse {
+    let path = Path::new(&file_path);
+    if !path.exists() {
+        return ReadFileResponse {
+            exists: false,
+            file_path: None,
+            name: None,
+            size: None,
+            last_modified: None,
+            bytes: None,
+            error: None,
+        };
+    }
+    match read_disk_file_payload(path) {
+        Ok(payload) => ReadFileResponse {
+            exists: true,
+            file_path: Some(payload.file_path),
+            name: Some(payload.name),
+            size: Some(payload.size),
+            last_modified: Some(payload.last_modified),
+            bytes: Some(payload.bytes),
+            error: None,
+        },
+        Err(err) => ReadFileResponse {
+            exists: false,
+            file_path: None,
+            name: None,
+            size: None,
+            last_modified: None,
+            bytes: None,
+            error: Some(err),
+        },
+    }
+}
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
-});
+#[tauri::command]
+fn read_clipboard_image() -> ClipboardImageReadResponse {
+    let mut clipboard = match arboard::Clipboard::new() {
+        Ok(cb) => cb,
+        Err(err) => {
+            return ClipboardImageReadResponse {
+                has_image: false,
+                png_bytes: None,
+                width: None,
+                height: None,
+                error: Some(err.to_string()),
+            }
+        }
+    };
+    let img = match clipboard.get_image() {
+        Ok(img) => img,
+        Err(_) => {
+            return ClipboardImageReadResponse {
+                has_image: false,
+                png_bytes: None,
+                width: None,
+                height: None,
+                error: None,
+            }
+        }
+    };
+    let mut png_bytes: Vec<u8> = Vec::new();
+    let encoder = image::codecs::png::PngEncoder::new(&mut png_bytes);
+    if let Err(err) = encoder.write_image(
+        &img.bytes,
+        img.width as u32,
+        img.height as u32,
+        image::ExtendedColorType::Rgba8,
+    ) {
+        return ClipboardImageReadResponse {
+            has_image: false,
+            png_bytes: None,
+            width: None,
+            height: None,
+            error: Some(err.to_string()),
+        };
+    }
+    ClipboardImageReadResponse {
+        has_image: true,
+        png_bytes: Some(png_bytes),
+        width: Some(img.width),
+        height: Some(img.height),
+        error: None,
+    }
+}
+
+#[tauri::command]
+fn write_clipboard_image(png_bytes: Vec<u8>) -> serde_json::Value {
+    let decoded = match image::load_from_memory_with_format(&png_bytes, image::ImageFormat::Png) {
+        Ok(img) => img.to_rgba8(),
+        Err(err) => return serde_json::json!({ "ok": false, "error": err.to_string() }),
+    };
+    let mut clipboard = match arboard::Clipboard::new() {
+        Ok(cb) => cb,
+        Err(err) => return serde_json::json!({ "ok": false, "error": err.to_string() }),
+    };
+    let image_data = arboard::ImageData {
+        width: decoded.width() as usize,
+        height: decoded.height() as usize,
+        bytes: std::borrow::Cow::Owned(decoded.into_raw()),
+    };
+    match clipboard.set_image(image_data) {
+        Ok(_) => serde_json::json!({ "ok": true }),
+        Err(err) => serde_json::json!({ "ok": false, "error": err.to_string() }),
+    }
+}
+
+#[tauri::command]
+fn window_minimize(window: tauri::Window) -> serde_json::Value {
+    serde_json::json!({ "ok": window.minimize().is_ok() })
+}
+
+#[tauri::command]
+fn window_toggle_maximize(
+    window: tauri::Window,
+    state: tauri::State<'_, DesktopRuntimeState>,
+) -> serde_json::Value {
+    let is_max = window.is_maximized().unwrap_or(false);
+    if is_max {
+        let _ = window.unmaximize();
+    } else {
+        let _ = window.maximize();
+    }
+    let next_max = window.is_maximized().unwrap_or(!is_max);
+    state.last_maximized.store(next_max, Ordering::SeqCst);
+    let _ = window.emit("desktop:window-maximize-change", next_max);
+    serde_json::json!({ "maximized": next_max })
+}
+
+#[tauri::command]
+fn window_is_maximized(window: tauri::Window) -> serde_json::Value {
+    serde_json::json!({ "maximized": window.is_maximized().unwrap_or(false) })
+}
+
+#[tauri::command]
+fn window_close(window: tauri::Window) -> serde_json::Value {
+    serde_json::json!({ "ok": window.close().is_ok() })
+}
+
+#[tauri::command]
+fn window_start_dragging(window: tauri::Window) -> serde_json::Value {
+    serde_json::json!({ "ok": window.start_dragging().is_ok() })
+}
+
+#[tauri::command]
+fn set_unsaved_state(
+    has_unsaved: bool,
+    state: tauri::State<'_, DesktopRuntimeState>,
+) -> serde_json::Value {
+    state.has_unsaved.store(has_unsaved, Ordering::SeqCst);
+    serde_json::json!({ "ok": true })
+}
+
+#[tauri::command]
+fn confirm_app_close(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, DesktopRuntimeState>,
+) -> serde_json::Value {
+    state.force_close.store(true, Ordering::SeqCst);
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.close();
+    } else {
+        app.exit(0);
+    }
+    serde_json::json!({ "ok": true })
+}
+
+pub fn run() {
+    tauri::Builder::default()
+        .manage(DesktopRuntimeState::default())
+        .invoke_handler(tauri::generate_handler![
+            open_file_dialog,
+            check_file_exists,
+            read_file_at_path,
+            read_clipboard_image,
+            write_clipboard_image,
+            window_minimize,
+            window_toggle_maximize,
+            window_is_maximized,
+            window_close,
+            window_start_dragging,
+            set_unsaved_state,
+            confirm_app_close,
+        ])
+        .on_window_event(|window, event| {
+            let state = window.state::<DesktopRuntimeState>();
+            match event {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    let has_unsaved = state.has_unsaved.load(Ordering::SeqCst);
+                    let force_close = state.force_close.load(Ordering::SeqCst);
+                    if has_unsaved && !force_close {
+                        api.prevent_close();
+                        let _ = window.emit("desktop:request-app-close", ());
+                    }
+                }
+                tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_) => {
+                    if let Ok(is_max) = window.is_maximized() {
+                        let prev = state.last_maximized.swap(is_max, Ordering::SeqCst);
+                        if prev != is_max {
+                            let _ = window.emit("desktop:window-maximize-change", is_max);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        })
+        .run(tauri::generate_context!())
+        .expect("error al iniciar el runtime nativo Rust (Tauri)");
+}
 `;
-  root.file('electron/main.cjs', electronMain);
+  root.file('src-tauri/src/lib.rs', tauriLibRs);
 
-  const electronPreload = `const { contextBridge, ipcRenderer } = require('electron');
-
-contextBridge.exposeInMainWorld('pixelClashDesktop', {
-  platform: process.platform,
-  version: '${cfg.version}',
-  isNativeDesktop: true,
-  windowMinimize: () => ipcRenderer.invoke('desktop:window-minimize'),
-  windowToggleMaximize: () => ipcRenderer.invoke('desktop:window-toggle-maximize'),
-  isWindowMaximized: () => ipcRenderer.invoke('desktop:window-is-maximized'),
-  windowClose: () => ipcRenderer.invoke('desktop:window-close'),
-  onWindowMaximizeChange: (cb) => {
-    const listener = (_event, isMax) => cb(Boolean(isMax));
-    ipcRenderer.on('desktop:window-maximize-change', listener);
-    return () => ipcRenderer.removeListener('desktop:window-maximize-change', listener);
-  },
-  setUnsavedState: (hasUnsaved) => ipcRenderer.invoke('desktop:set-unsaved-state', Boolean(hasUnsaved)),
-  onRequestAppClose: (cb) => {
-    const listener = () => cb();
-    ipcRenderer.on('desktop:request-app-close', listener);
-    return () => ipcRenderer.removeListener('desktop:request-app-close', listener);
-  },
-  confirmAppClose: () => ipcRenderer.invoke('desktop:confirm-app-close'),
-  openFileDialog: (options) => ipcRenderer.invoke('desktop:open-file-dialog', options),
-  checkFileExists: (filePath) => ipcRenderer.invoke('desktop:check-file-exists', filePath),
-  readFileAtPath: (filePath) => ipcRenderer.invoke('desktop:read-file-at-path', filePath),
-});
-`;
-  root.file('electron/preload.cjs', electronPreload);
-
-  // 3. Installer build descriptors (.yml, .nsi, .wxs, .iss, LICENSE)
-  root.file('electron-builder.yml', generateElectronBuilderYaml(cfg));
+  // 3. Installer build descriptors (.nsi, .wxs, .iss, LICENSE)
   root.file('installer/pixelclash-installer.nsi', generateNsisInstallerScript(cfg));
   root.file('installer/pixelclash-installer.wxs', generateMsiWixScript(cfg));
   root.file('installer/pixelclash-setup.iss', generateInnoSetupScript(cfg));
   root.file(
     'installer/LICENSE.txt',
-    `${cfg.appName} v${cfg.version}\r\nCopyright © ${new Date().getFullYear()} ${cfg.publisher}\r\n\r\nSuite profesional de dibujo Pixel Art, Vectores y Animación 2D.\r\nDistribución nativa para Windows 10 y Windows 11 (64 bits).\r\n`
+    `${cfg.appName} v${cfg.version}\r\nCopyright © ${new Date().getFullYear()} ${cfg.publisher}\r\n\r\nSuite profesional de dibujo Pixel Art, Vectores y Animación 2D.\r\nBinario nativo compilado en Rust (Tauri v2) para Windows 10 y Windows 11 (64 bits).\r\n`
   );
 
-  // 4. Desktop npm build descriptor (generates real Setup.exe and .msi installers)
+  // 4. Desktop npm build descriptor (generates real Setup.exe and .msi via Rust + Tauri v2)
   const desktopPkg = {
     name: slug.toLowerCase(),
     productName: cfg.appName,
     version: cfg.version,
-    description: `${cfg.appName} - Suite profesional de Pixel Art y Animación 2D`,
+    description: `${cfg.appName} - Suite profesional nativa en Rust de Pixel Art y Animación 2D`,
     author: cfg.publisher,
-    main: 'electron/main.cjs',
     scripts: {
       'build:web': 'vite build --base=./',
-      'build:win-exe': 'vite build --base=./ && electron-builder --win nsis --x64 --publish never --config electron-builder.yml',
-      'build:win-msi': 'vite build --base=./ && electron-builder --win msi --x64 --publish never --config electron-builder.yml',
-      'build:win-all': 'vite build --base=./ && electron-builder --win nsis msi --x64 --publish never --config electron-builder.yml',
-      'build:win-unpacked': 'vite build --base=./ && electron-builder --win dir --x64 --publish never --config electron-builder.yml',
-      'build:inno': 'vite build --base=./ && electron-builder --win dir --x64 --publish never --config electron-builder.yml && iscc installer/pixelclash-setup.iss',
+      'tauri:dev': 'tauri dev',
+      'build:win-exe': 'vite build --base=./ && tauri build --bundles nsis',
+      'build:win-msi': 'vite build --base=./ && tauri build --bundles msi',
+      'build:win-all': 'vite build --base=./ && tauri build --bundles nsis,msi',
+      'build:inno': 'vite build --base=./ && tauri build --no-bundle && iscc installer/pixelclash-setup.iss',
     },
     devDependencies: {
-      electron: '^33.2.0',
-      'electron-builder': '^25.1.8',
+      '@tauri-apps/cli': '^2.2.0',
     },
   };
   root.file('package.desktop.json', JSON.stringify(desktopPkg, null, 2));
 
-  // 5. GitHub Actions CI workflow that compiles BOTH Setup.exe AND .msi automatically
-  const ghWorkflow = `name: Compilar Instaladores Windows (.EXE y .MSI)
+  // 5. GitHub Actions CI workflow that compiles Rust binary + Setup.exe AND .msi automatically
+  const ghWorkflow = `name: Compilar Instaladores Windows Rust/Tauri (.EXE y .MSI)
 
 on:
   workflow_dispatch:
@@ -777,42 +1050,49 @@ jobs:
         with:
           node-version: 22
 
-      - name: Instalar dependencias de empaquetado
+      - name: Configurar toolchain nativo Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cachear dependencias Cargo (Rust)
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Instalar dependencias de empaquetado Tauri v2
         run: |
           npm install --legacy-peer-deps
-          npm install --save-dev --legacy-peer-deps electron@^33.2.0 electron-builder@^25.1.8
+          npm install --save-dev --legacy-peer-deps @tauri-apps/cli@^2.2.0
 
-      - name: Compilar aplicación y generar Instaladores Windows (.EXE y .MSI)
-        env:
-          CSC_IDENTITY_AUTO_DISCOVERY: false
+      - name: Compilar aplicación Rust y generar Instaladores Windows (.EXE y .MSI)
         run: |
           npx vite build --base=./
-          npx electron-builder --win nsis msi --x64 --publish never --config electron-builder.yml
+          npx tauri build --bundles nsis,msi
 
       - name: Publicar instaladores finales (.EXE y .MSI)
         uses: actions/upload-artifact@v4
         with:
-          name: ${slug}-Installers-${cfg.version}-Windows-x64
+          name: ${slug}-Rust-Installers-${cfg.version}-Windows-x64
           path: |
-            release/*.exe
-            release/*.msi
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
 `;
   root.file('.github/workflows/build-windows-installers.yml', ghWorkflow);
 
   // 6. Clean distributor instructions (end user NEVER opens console or .bat files)
   const guide = `================================================================
-${cfg.appName.toUpperCase()} v${cfg.version} — INSTALADOR PROFESIONAL WINDOWS (.EXE / .MSI)
+${cfg.appName.toUpperCase()} v${cfg.version} — INSTALADOR NATIVO RUST/TAURI (.EXE / .MSI)
 ================================================================
 
 EXPERIENCIA PARA EL USUARIO FINAL (CERO CONSOLA, CERO ARCHIVOS .BAT):
   1. Ejecutar el instalador (${slug}-Setup-${cfg.version}-x64.exe o ${slug}-${cfg.version}-x64.msi).
   2. Elegir carpeta de instalación (${cfg.installDir}).
-  3. Pulsar Instalar (instala dependencias y runtime integrados automáticamente).
+  3. Pulsar Instalar (~12 MB nativos en Rust + WebView2 del sistema).
   4. Abrir ${cfg.appName} directamente desde el acceso directo en Escritorio o Menú Inicio.
 
 CARACTERÍSTICAS CONFIGURADAS:
-- Instalador EXE:     ${slug}-Setup-${cfg.version}-x64.exe (NSIS Modern UI 2 / Inno Setup 6)
-- Instalador MSI:     ${slug}-${cfg.version}-x64.msi (Windows Installer / WiX v4)
+- Runtime nativo:     Rust + Tauri v2 (ventana sin bordes integrada y E/S nativa rápida)
+- Instalador EXE:     NSIS Modern UI 2 / Inno Setup 6
+- Instalador MSI:     Windows Installer (.MSI)
 - Icono incrustado:   assets/pixelclash.ico (multi-resolución 16/32/48/256px)
 - Carpeta destino:    ${cfg.installDir} (${cfg.allowCustomDir ? 'Personalizable por el usuario' : 'Fija'})
 - Acceso Escritorio:  ${cfg.desktopShortcut ? 'Sí' : 'Opcional (desmarcado)'}
@@ -828,11 +1108,16 @@ MÉTODO 1 — COMPILACIÓN AUTOMÁTICA EN LA NUBE (GITHUB ACTIONS, SIN CONFIGURA
       .github/workflows/build-windows-installers.yml
   - Descarga directamente los instaladores listos (.exe y .msi) desde Actions > Artifacts.
 
-MÉTODO 2 — COMPILACIÓN EN EQUIPO DE DESARROLLO (ELECTRON BUILDER):
-  - Ejecuta el script de empaquetado definido en package.desktop.json:
-      build:win-all   -> genera Setup.exe + .msi en release/
-      build:win-exe   -> genera únicamente Setup.exe en release/
-      build:win-msi   -> genera únicamente .msi en release/
+MÉTODO 2 — COMPILACIÓN EN EQUIPO DE DESARROLLO (RUST + TAURI v2 CLI):
+  - Requisitos: Rust (rustup stable) + Node.js 22 LTS + Visual Studio Build Tools C++.
+  - Comandos:
+      npm install --legacy-peer-deps
+      npm install --save-dev --legacy-peer-deps @tauri-apps/cli@^2.2.0
+      npx vite build --base=./
+      npx tauri build --bundles nsis,msi
+  - Los instaladores generados aparecerán en:
+      src-tauri/target/release/bundle/nsis/*.exe
+      src-tauri/target/release/bundle/msi/*.msi
 
 MÉTODO 3 — COMPILADORES NATIVOS (WIX / NSIS / INNO SETUP):
   - WiX v4 (.msi):     installer/pixelclash-installer.wxs
@@ -848,3 +1133,4 @@ MÉTODO 3 — COMPILADORES NATIVOS (WIX / NSIS / INNO SETUP):
 
   return await zip.generateAsync({ type: 'blob' });
 }
+

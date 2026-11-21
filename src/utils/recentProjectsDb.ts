@@ -18,7 +18,7 @@ export interface StoredRecentPayload<TSnapshot = unknown> {
   fileLastModified?: number;
   /** Chromium FileSystemFileHandle (structured-cloneable in IndexedDB) */
   fileHandle?: FileSystemFileHandle;
-  /** Real OS disk path when running inside Electron desktop app */
+  /** Real OS disk path when running inside native Rust/Tauri desktop app */
   diskPath?: string;
   updatedAt: number;
 }

@@ -332,6 +332,7 @@ import {
   readImageFromGlobalClipboard,
   writePixelGridToSystemClipboard,
 } from './utils/systemClipboard';
+import { getDesktopBridge } from './utils/desktopBridge';
 import { 
   AnchorPosition, 
   applyCanvasRectTransform,
@@ -381,60 +382,6 @@ interface OpenDocumentSnapshot {
   activePaletteColors: string[];
   guides?: CanvasGuide[];
   workMode?: ProjectWorkMode;
-}
-
-interface DesktopOpenFilePayload {
-  filePath: string;
-  name: string;
-  size: number;
-  lastModified: number;
-  bytes: Uint8Array;
-}
-
-interface PixelClashDesktopBridge {
-  platform?: string;
-  version?: string;
-  isNativeDesktop?: boolean;
-  openFileDialog?: (options?: { title?: string; multiple?: boolean }) => Promise<{
-    canceled: boolean;
-    error?: string;
-    files: DesktopOpenFilePayload[];
-  }>;
-  checkFileExists?: (filePath: string) => Promise<{
-    exists: boolean;
-    size?: number;
-    lastModified?: number;
-  }>;
-  readFileAtPath?: (filePath: string) => Promise<{
-    exists: boolean;
-    filePath?: string;
-    name?: string;
-    size?: number;
-    lastModified?: number;
-    bytes?: Uint8Array;
-    error?: string;
-  }>;
-  readClipboardImage?: () => Promise<{
-    hasImage: boolean;
-    pngBytes?: Uint8Array | number[];
-    width?: number;
-    height?: number;
-    error?: string;
-  }>;
-  writeClipboardImage?: (pngBytes: Uint8Array) => Promise<{ ok: boolean; error?: string }>;
-  setUnsavedState?: (hasUnsaved: boolean) => Promise<{ ok: boolean }> | void;
-  onRequestAppClose?: (cb: () => void) => () => void;
-  confirmAppClose?: () => Promise<{ ok: boolean }> | void;
-  windowMinimize?: () => Promise<{ ok: boolean }>;
-  windowToggleMaximize?: () => Promise<{ maximized: boolean }>;
-  isWindowMaximized?: () => Promise<{ maximized: boolean }>;
-  windowClose?: () => Promise<{ ok: boolean }>;
-  onWindowMaximizeChange?: (cb: (isMax: boolean) => void) => () => void;
-}
-
-function getDesktopBridge(): PixelClashDesktopBridge | null {
-  const w = window as unknown as { pixelClashDesktop?: PixelClashDesktopBridge };
-  return w.pixelClashDesktop || null;
 }
 
 function formatRecentDate(timestamp?: number): string {
@@ -1259,18 +1206,18 @@ export default function App() {
   const [draggedDocTabId, setDraggedDocTabId] = useState<string | null>(null);
   const [pendingCloseDocId, setPendingCloseDocId] = useState<string | null>(null);
   const [unsavedAppCloseModalOpen, setUnsavedAppCloseModalOpen] = useState<boolean>(false);
-  const [isAppClosingFromElectron, setIsAppClosingFromElectron] = useState<boolean>(false);
+  const [isAppClosingFromDesktop, setIsAppClosingFromDesktop] = useState<boolean>(false);
   const [isBatchSavingDocs, setIsBatchSavingDocs] = useState<boolean>(false);
   const [reviewCloseSession, setReviewCloseSession] = useState<{
     docIds: string[];
     currentIndex: number;
-    fromElectronExit: boolean;
+    fromDesktopExit: boolean;
   } | null>(null);
   const [batchSaveAsQueue, setBatchSaveAsQueue] = useState<{
     remainingDocIds: string[];
     savedCount: number;
     totalNewLocationCount: number;
-    fromElectronExit: boolean;
+    fromDesktopExit: boolean;
   } | null>(null);
   const [saveAsModalState, setSaveAsModalState] = useState<{
     docId: string;
@@ -8637,7 +8584,7 @@ export default function App() {
     }
   }, [pendingSpritesheetOpen, hydrateImportResultAsDocument, reportFileLoadFailure]);
 
-  // Unified File Picker (Electron native dialog -> Chromium FileSystemFileHandle -> <input>)
+  // Unified File Picker (Rust/Tauri native dialog -> Chromium FileSystemFileHandle -> <input>)
   const handleOpenFilePicker = useCallback(
     async (replaceRecentId?: string) => {
       const desktop = getDesktopBridge();
@@ -8732,7 +8679,7 @@ export default function App() {
       try {
         setImportNotification(`Cargando reciente "${entry.name}"...`);
 
-        // 1. Electron Desktop: verify real disk path directly before loading
+        // 1. Rust/Tauri Desktop: verify real disk path directly before loading
         const desktop = getDesktopBridge();
         if (entry.diskPath && desktop?.readFileAtPath) {
           const diskRes = await desktop.readFileAtPath(entry.diskPath);
@@ -9196,18 +9143,18 @@ export default function App() {
   }, [handleOpenSaveAsModal, handleSaveProjectPcs, handleSaveDocumentInFormat]);
 
   const completeAllDocumentsClose = useCallback(
-    (overrideElectronExit?: boolean) => {
+    (overrideDesktopExit?: boolean) => {
       setUnsavedAppCloseModalOpen(false);
       setReviewCloseSession(null);
       setBatchSaveAsQueue(null);
-      const useElectronExit =
-        typeof overrideElectronExit === 'boolean'
-          ? overrideElectronExit
-          : isAppClosingFromElectron;
-      setIsAppClosingFromElectron(false);
+      const useDesktopExit =
+        typeof overrideDesktopExit === 'boolean'
+          ? overrideDesktopExit
+          : isAppClosingFromDesktop;
+      setIsAppClosingFromDesktop(false);
 
       const bridge = getDesktopBridge();
-      if (useElectronExit && bridge?.confirmAppClose) {
+      if (useDesktopExit && bridge?.confirmAppClose) {
         void bridge.confirmAppClose();
         return;
       }
@@ -9233,17 +9180,17 @@ export default function App() {
       setImportNotification('Todos los documentos cerrados de forma segura.');
       setTimeout(() => setImportNotification(null), 2800);
     },
-    [isAppClosingFromElectron, applyDocumentSnapshot, createFreshBlankDocumentSnapshot]
+    [isAppClosingFromDesktop, applyDocumentSnapshot, createFreshBlankDocumentSnapshot]
   );
 
   const handleRequestCloseAllDocuments = useCallback(
-    (fromElectronExit: boolean = Boolean(getDesktopBridge()?.isNativeDesktop)) => {
+    (fromDesktopExit: boolean = Boolean(getDesktopBridge()?.isNativeDesktop)) => {
       const dirtyDocs = openDocumentsRef.current.filter((d) => d.isDirty);
       if (dirtyDocs.length === 0) {
-        completeAllDocumentsClose(fromElectronExit);
+        completeAllDocumentsClose(fromDesktopExit);
         return;
       }
-      setIsAppClosingFromElectron(fromElectronExit);
+      setIsAppClosingFromDesktop(fromDesktopExit);
       setUnsavedAppCloseModalOpen(true);
     },
     [completeAllDocumentsClose]
@@ -9262,10 +9209,10 @@ export default function App() {
       setReviewCloseSession({
         docIds: cleanIds,
         currentIndex: 0,
-        fromElectronExit: isAppClosingFromElectron,
+        fromDesktopExit: isAppClosingFromDesktop,
       });
     },
-    [completeAllDocumentsClose, isAppClosingFromElectron]
+    [completeAllDocumentsClose, isAppClosingFromDesktop]
   );
 
   const handleBatchSaveSelectedAndClose = useCallback(
@@ -9310,7 +9257,7 @@ export default function App() {
           remainingDocIds: docsWithoutLoc.slice(1),
           savedCount: savedNow,
           totalNewLocationCount: docsWithoutLoc.length,
-          fromElectronExit: isAppClosingFromElectron,
+          fromDesktopExit: isAppClosingFromDesktop,
         });
         handleOpenSaveAsModal(
           firstId,
@@ -9325,7 +9272,7 @@ export default function App() {
       handleSaveDocumentInFormat,
       completeAllDocumentsClose,
       handleOpenSaveAsModal,
-      isAppClosingFromElectron,
+      isAppClosingFromDesktop,
     ]
   );
 
@@ -9389,7 +9336,7 @@ export default function App() {
     };
   }, []);
 
-  // Sync unsaved dirty state to Electron window + browser beforeunload + desktop exit listener
+  // Sync unsaved dirty state to Rust/Tauri window + browser beforeunload + desktop exit listener
   const hasAnyDirtyDocument = useMemo(
     () => openDocuments.some((d) => d.isDirty),
     [openDocuments]
@@ -9765,15 +9712,15 @@ export default function App() {
         return;
       }
 
-      // If Electron native clipboard holds an image that Chromium didn't expose in ClipboardEvent
-      const electronImg = await readImageFromGlobalClipboard();
-      if (electronImg) {
+      // If Rust/Tauri native clipboard holds an image that Chromium didn't expose in ClipboardEvent
+      const desktopImg = await readImageFromGlobalClipboard();
+      if (desktopImg) {
         e.preventDefault();
-        const sig = computeRgbaQuickSignature(electronImg.rgba.data, electronImg.width, electronImg.height);
+        const sig = computeRgbaQuickSignature(desktopImg.rgba.data, desktopImg.width, desktopImg.height);
         if (clipboard && lastInternalCopySigRef.current && sig === lastInternalCopySigRef.current) {
           handlePasteClipboard(false, true);
         } else {
-          handleIncomingClipboardImage(electronImg);
+          handleIncomingClipboardImage(desktopImg);
         }
         return;
       }
@@ -12557,7 +12504,7 @@ export default function App() {
           if (!reviewCloseSession) return;
           const nextIdx = reviewCloseSession.currentIndex + 1;
           if (nextIdx >= reviewCloseSession.docIds.length) {
-            const exitFlag = reviewCloseSession.fromElectronExit;
+            const exitFlag = reviewCloseSession.fromDesktopExit;
             setReviewCloseSession(null);
             completeAllDocumentsClose(exitFlag);
           } else {
@@ -12627,7 +12574,7 @@ export default function App() {
                 setPendingCloseDocId(null);
                 if (isReview) {
                   setReviewCloseSession(null);
-                  setIsAppClosingFromElectron(false);
+                  setIsAppClosingFromDesktop(false);
                 }
               }}
             />
@@ -12657,7 +12604,7 @@ export default function App() {
           onDiscardAll={() => completeAllDocumentsClose()}
           onCancel={() => {
             setUnsavedAppCloseModalOpen(false);
-            setIsAppClosingFromElectron(false);
+            setIsAppClosingFromDesktop(false);
           }}
         />
       </StudioTopLayerPortal>
@@ -12701,7 +12648,7 @@ export default function App() {
                   } else if (afterSaveAction === 'batch_close_queue' && batchSaveAsQueue) {
                     const nextSavedCount = batchSaveAsQueue.savedCount + 1;
                     if (batchSaveAsQueue.remainingDocIds.length === 0) {
-                      const exitFlag = batchSaveAsQueue.fromElectronExit;
+                      const exitFlag = batchSaveAsQueue.fromDesktopExit;
                       setBatchSaveAsQueue(null);
                       setImportNotification(`${nextSavedCount} documento(s) guardados antes de cerrar.`);
                       setTimeout(() => setImportNotification(null), 3200);
@@ -12727,7 +12674,7 @@ export default function App() {
                   } else if (afterSaveAction === 'review_next' && reviewCloseSession) {
                     const nextIdx = reviewCloseSession.currentIndex + 1;
                     if (nextIdx >= reviewCloseSession.docIds.length) {
-                      const exitFlag = reviewCloseSession.fromElectronExit;
+                      const exitFlag = reviewCloseSession.fromDesktopExit;
                       setReviewCloseSession(null);
                       completeAllDocumentsClose(exitFlag);
                     } else {
@@ -12746,10 +12693,10 @@ export default function App() {
                 setSaveAsModalState(null);
                 if (action === 'batch_close_queue') {
                   setBatchSaveAsQueue(null);
-                  setIsAppClosingFromElectron(false);
+                  setIsAppClosingFromDesktop(false);
                 } else if (action === 'review_next') {
                   setReviewCloseSession(null);
-                  setIsAppClosingFromElectron(false);
+                  setIsAppClosingFromDesktop(false);
                 }
               }}
             />
@@ -13401,7 +13348,7 @@ export default function App() {
             title: 'Instalador Windows (.exe) — Paquete de Escritorio',
             subtitle: 'Archivo > Instalador Windows (.exe)',
             category: 'Ajustes',
-            keywords: 'instalador windows exe nsis inno electron escritorio descargar',
+            keywords: 'instalador windows exe nsis inno rust tauri escritorio descargar',
             onExecute: () => setLocalInstallerModalOpen(true),
           },
           {

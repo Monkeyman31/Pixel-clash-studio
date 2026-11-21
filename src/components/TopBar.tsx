@@ -14,6 +14,7 @@ import {
   Copy,
 } from 'lucide-react';
 import { PixelClashLogoIcon } from './PixelClashLogoIcon';
+import { getDesktopBridge } from '../utils/desktopBridge';
 
 export interface TopBarDocumentTab {
   id: string;
@@ -86,9 +87,19 @@ export const TopBar: React.FC<TopBarProps> = ({
     openDocuments.find((d) => d.id === activeDocumentId) || openDocuments[0] || null;
 
   const dragClass = !embeddedInDock && dragEmptySpace ? 'studio-window-drag' : '';
+  const canDragHeader = !embeddedInDock && dragEmptySpace;
 
   return (
     <header
+      data-tauri-drag-region={canDragHeader ? 'true' : undefined}
+      onMouseDown={(e) => {
+        if (!canDragHeader || e.button !== 0 || e.detail >= 2) return;
+        const target = e.target as HTMLElement;
+        if (target.closest('button, input, select, textarea, a, [role="button"], [data-tab-item="true"], .studio-window-no-drag')) {
+          return;
+        }
+        void getDesktopBridge()?.startWindowDragging?.();
+      }}
       onDoubleClick={(e) => {
         if (embeddedInDock || !onToggleMaximizeWindow) return;
         const target = e.target as HTMLElement;

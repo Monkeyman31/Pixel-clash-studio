@@ -6,6 +6,7 @@ import {
   rgbaToDataUrl,
 } from './fileImporter';
 import { getCachedPixelGridCanvas } from './renderCache';
+import { getDesktopBridge } from './desktopBridge';
 
 export interface ClipboardImagePayload {
   file: File;
@@ -17,23 +18,7 @@ export interface ClipboardImagePayload {
   formatLabel: string;
   sizeBytes: number;
   hasTransparency: boolean;
-  source: 'event' | 'electron' | 'async_api';
-}
-
-interface DesktopClipboardBridge {
-  readClipboardImage?: () => Promise<{
-    hasImage: boolean;
-    pngBytes?: Uint8Array | number[];
-    width?: number;
-    height?: number;
-    error?: string;
-  }>;
-  writeClipboardImage?: (pngBytes: Uint8Array) => Promise<{ ok: boolean; error?: string }>;
-}
-
-function getDesktopBridge(): DesktopClipboardBridge | undefined {
-  if (typeof window === 'undefined') return undefined;
-  return (window as unknown as { pixelClashDesktop?: DesktopClipboardBridge }).pixelClashDesktop;
+  source: 'event' | 'desktop' | 'async_api';
 }
 
 function rgbaBufferHasTransparency(rgba: Uint8ClampedArray): boolean {
@@ -154,11 +139,11 @@ export async function readImageFromClipboardEvent(
 }
 
 /**
- * Reads an image directly from the global OS clipboard (via Electron native
+ * Reads an image directly from the global OS clipboard (via Rust/Tauri native
  * clipboard IPC first for lossless alpha support, then Web Async Clipboard API).
  */
 export async function readImageFromGlobalClipboard(): Promise<ClipboardImagePayload | null> {
-  // 1. Electron desktop native clipboard (preserves exact OS RGBA PNG transparency)
+  // 1. Rust/Tauri native desktop clipboard (preserves exact OS RGBA PNG transparency)
   const bridge = getDesktopBridge();
   if (bridge?.readClipboardImage) {
     try {
@@ -169,7 +154,7 @@ export async function readImageFromGlobalClipboard(): Promise<ClipboardImagePayl
         copy.set(bytes);
         const blob = new Blob([copy.buffer], { type: 'image/png' });
         const file = new File([blob], 'clipboard-image.png', { type: 'image/png' });
-        const payload = await decodeFileToClipboardPayload(file, 'electron');
+        const payload = await decodeFileToClipboardPayload(file, 'desktop');
         if (payload) return payload;
       }
     } catch {
@@ -232,15 +217,15 @@ export async function writePixelGridToSystemClipboard(
     );
     if (!blob) return false;
 
-    let wroteElectron = false;
+    let wroteDesktop = false;
     const bridge = getDesktopBridge();
     if (bridge?.writeClipboardImage) {
       try {
         const arrBuf = await blob.arrayBuffer();
         const res = await bridge.writeClipboardImage(new Uint8Array(arrBuf));
-        wroteElectron = Boolean(res?.ok);
+        wroteDesktop = Boolean(res?.ok);
       } catch {
-        wroteElectron = false;
+        wroteDesktop = false;
       }
     }
 
@@ -259,7 +244,7 @@ export async function writePixelGridToSystemClipboard(
       }
     }
 
-    return wroteElectron || wroteWeb;
+    return wroteDesktop || wroteWeb;
   } catch {
     return false;
   }

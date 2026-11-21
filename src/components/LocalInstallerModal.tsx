@@ -229,7 +229,7 @@ export const LocalInstallerModal: React.FC<LocalInstallerModalProps> = ({
                 ¿Por qué el botón descarga un .ZIP y no directamente un .EXE listo?
               </div>
               <p className="text-[11px] text-amber-100/90">
-                Ningún navegador web puede compilar directamente un archivo binario ejecutable de Windows (.exe / .msi de ~115 MB) por restricciones técnicas del navegador. Por eso PixelClash Studio prepara toda la configuración oficial (Electron, icono .ico, scripts NSIS/WiX y flujo automático de GitHub Actions) para que puedas generar el <strong>Setup.exe</strong> y el <strong>.msi</strong> reales una sola vez y luego instalarlo con doble clic en cualquier PC con Windows sin consola ni .bat.
+                Ningún navegador web puede compilar directamente un archivo binario ejecutable de Windows (.exe / .msi nativo de ~12 MB en Rust). Por eso PixelClash Studio prepara toda la configuración oficial (código fuente Rust/Tauri v2, icono .ico, scripts NSIS/WiX y flujo automático de GitHub Actions) para que puedas generar el <strong>Setup.exe</strong> y el <strong>.msi</strong> reales una sola vez y luego instalarlo con doble clic en cualquier PC con Windows sin consola ni .bat.
               </p>
             </div>
 
@@ -246,10 +246,10 @@ export const LocalInstallerModal: React.FC<LocalInstallerModalProps> = ({
                   Opción 1 · Recomendada (En la nube, sin instalar nada)
                 </div>
                 <ol className="list-decimal list-inside space-y-1.5 text-[11px] opacity-90 leading-relaxed">
-                  <li>Exporta este proyecto desde AI Studio a un repositorio en tu cuenta gratuita de <strong>GitHub</strong> (el repositorio ya incluye el workflow automático).</li>
+                  <li>Exporta este proyecto desde tu espacio de trabajo a un repositorio en tu cuenta gratuita de <strong>GitHub</strong> (el repositorio ya incluye el workflow Rust/Tauri automático).</li>
                   <li>Si cambiaste opciones en el Configurador, descomprime el ZIP descargado y reemplaza los archivos en tu repositorio.</li>
-                  <li>En GitHub abre la pestaña <strong>Actions</strong> → elige <strong>Compilar Instaladores Windows (.EXE y .MSI)</strong> → pulsa <strong>Run workflow</strong>.</li>
-                  <li>Tras ~3 minutos, baja al final y descarga el archivo en <strong>Artifacts</strong>: ahí vienen <strong>{exeFileName}</strong> y el otro formato listos para doble clic.</li>
+                  <li>En GitHub abre la pestaña <strong>Actions</strong> → elige <strong>Compilar Instaladores Windows Rust/Tauri (.EXE y .MSI)</strong> → pulsa <strong>Run workflow</strong>.</li>
+                  <li>Tras ~4 minutos, baja al final y descarga el archivo en <strong>Artifacts</strong>: ahí vienen <strong>{exeFileName}</strong> y el otro formato nativo compilado en Rust listos para doble clic.</li>
                 </ol>
               </div>
 
@@ -262,24 +262,24 @@ export const LocalInstallerModal: React.FC<LocalInstallerModalProps> = ({
                 }}
               >
                 <div className="text-[11px] font-bold text-sky-300">
-                  Opción 2 · Compilar el .EXE/.MSI en tu PC Windows
+                  Opción 2 · Compilar el .EXE/.MSI nativo en tu PC Windows
                 </div>
                 <ol className="list-decimal list-inside space-y-1.5 text-[11px] opacity-90 leading-relaxed">
-                  <li>Descarga el <strong>proyecto completo</strong> desde AI Studio (no solo el ZIP del instalador) y descomprímelo en una carpeta.</li>
-                  <li>Instala <strong>Node.js 22 LTS</strong> (solo necesario en el equipo que compila; el usuario final nunca lo necesita).</li>
+                  <li>Descarga el <strong>proyecto completo</strong> y descomprímelo en una carpeta.</li>
+                  <li>Instala <strong>Rust (rustup stable)</strong>, <strong>Node.js 22 LTS</strong> y Visual Studio C++ Build Tools (solo en el equipo que compila).</li>
                   <li>Abre PowerShell en esa carpeta raíz una sola vez y pega estos comandos:</li>
                 </ol>
                 <div className="relative rounded border border-slate-700 bg-[#090d16] p-2 font-mono text-[10px] text-cyan-200 select-all leading-relaxed">
                   npm install --legacy-peer-deps{'\n'}
-                  npm install --save-dev --legacy-peer-deps electron@^33.2.0 electron-builder@^25.1.8{'\n'}
+                  npm install --save-dev --legacy-peer-deps @tauri-apps/cli@^2.2.0{'\n'}
                   node installer/ensure-icon.mjs{'\n'}
                   npx vite build --base=./{'\n'}
-                  npx electron-builder --win nsis msi --x64 --publish never --config electron-builder.yml
+                  npx tauri build --bundles nsis,msi
                   <button
                     type="button"
                     onClick={() => {
                       navigator.clipboard?.writeText(
-                        'npm install --legacy-peer-deps\nnpm install --save-dev --legacy-peer-deps electron@^33.2.0 electron-builder@^25.1.8\nnode installer/ensure-icon.mjs\nnpx vite build --base=./\nnpx electron-builder --win nsis msi --x64 --publish never --config electron-builder.yml'
+                        'npm install --legacy-peer-deps\nnpm install --save-dev --legacy-peer-deps @tauri-apps/cli@^2.2.0\nnode installer/ensure-icon.mjs\nnpx vite build --base=./\nnpx tauri build --bundles nsis,msi'
                       );
                       setCopiedCmd(true);
                       window.setTimeout(() => setCopiedCmd(false), 1800);
@@ -291,7 +291,7 @@ export const LocalInstallerModal: React.FC<LocalInstallerModalProps> = ({
                   </button>
                 </div>
                 <p className="text-[10px] opacity-80">
-                  Al terminar, abre la carpeta <strong>release/</strong>: encontrarás el <strong>Setup.exe</strong> y el <strong>.msi</strong> listos para instalar con doble clic.
+                  Al terminar, abre <strong>src-tauri/target/release/bundle/</strong>: encontrarás el <strong>Setup.exe</strong> (nsis/) y el <strong>.msi</strong> (msi/) listos para doble clic.
                 </p>
               </div>
 
@@ -334,21 +334,21 @@ export const LocalInstallerModal: React.FC<LocalInstallerModalProps> = ({
               <div className="grid grid-cols-3 gap-1.5">
                 <button
                   type="button"
-                  onClick={() => updateCfg('engine', 'nsis_electron')}
+                  onClick={() => updateCfg('engine', 'nsis_tauri')}
                   className="px-2 py-2 rounded-md border text-left transition-colors cursor-pointer"
                   style={{
                     backgroundColor:
-                      config.engine === 'nsis_electron'
+                      config.engine === 'nsis_tauri'
                         ? 'color-mix(in srgb, var(--studio-accent) 16%, var(--studio-bg-elevated))'
                         : 'var(--studio-bg-elevated)',
                     borderColor:
-                      config.engine === 'nsis_electron'
+                      config.engine === 'nsis_tauri'
                         ? 'var(--studio-accent)'
                         : 'var(--studio-border)',
                   }}
                 >
                   <div className="font-bold text-[11px]">Setup.exe</div>
-                  <div className="text-[9px] opacity-70 mt-0.5">NSIS 64-bit</div>
+                  <div className="text-[9px] opacity-70 mt-0.5">NSIS Rust x64</div>
                 </button>
                 <button
                   type="button"
@@ -602,11 +602,11 @@ export const LocalInstallerModal: React.FC<LocalInstallerModalProps> = ({
                         </div>
                         <span>
                           • Motor:{' '}
-                          {config.engine === 'nsis_electron'
-                            ? 'NSIS Modern UI 2 + Electron'
+                          {config.engine === 'nsis_tauri'
+                            ? 'NSIS Modern UI 2 + Rust (Tauri v2)'
                             : config.engine === 'msi_wix'
-                            ? 'Windows Installer MSI (WiX v4 + Electron)'
-                            : 'Inno Setup 6 Modern Wizard'}
+                            ? 'Windows Installer MSI (WiX v4 + Rust/Tauri v2)'
+                            : 'Inno Setup 6 Modern Wizard + Binario Rust'}
                         </span>
                         <span>• Editor: {config.publisher}</span>
                       </div>
@@ -638,7 +638,7 @@ export const LocalInstallerModal: React.FC<LocalInstallerModalProps> = ({
                       </div>
                       <div className="text-[10px] font-mono text-slate-500 flex items-center gap-1.5 mt-1">
                         <HardDrive className="w-3.5 h-3.5 text-sky-400" />
-                        <span>Espacio requerido estimado: ~115 MB</span>
+                        <span>Espacio requerido estimado: ~12 MB (Binario Rust + WebView2)</span>
                       </div>
                     </div>
                   )}
@@ -757,12 +757,12 @@ export const LocalInstallerModal: React.FC<LocalInstallerModalProps> = ({
                 className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-[10px]"
                 style={{ color: 'var(--studio-text-muted)' }}
               >
-                <span>• Ventana nativa de escritorio (Electron)</span>
+                <span>• Ventana nativa en Rust (Tauri v2)</span>
                 <span>• Icono binario Windows .ICO (16–256px)</span>
                 <span>• Instalador gráfico NSIS (.nsi → Setup.exe)</span>
                 <span>• Instalador Windows Installer WiX (.wxs → .msi)</span>
                 <span>• Script alternativo Inno Setup (.iss)</span>
-                <span>• Workflow automático CI (genera .exe y .msi)</span>
+                <span>• Workflow automático CI Rust (genera .exe y .msi)</span>
               </div>
             </div>
 

@@ -149,7 +149,7 @@ export const MascotPreviewCanvas: React.FC<MascotPreviewCanvasProps> = ({
         }
       }
 
-      // Check if user bundled public/mascot.gif or public/mascot.webp in repo/Electron build
+      // Check if user bundled public/mascot.gif or public/mascot.webp in repo/Tauri build
       const publicUrl = await probePublicMascotAsset();
       if (active && publicUrl) {
         setResolvedGifUrl(publicUrl);
