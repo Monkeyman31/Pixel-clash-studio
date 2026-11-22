@@ -39,7 +39,8 @@ import {
   VectorToolConfig,
 } from '../types';
 import { FIGHTING_GAME_PALETTES } from '../constants/palettes';
-import { compositeFrame, renderFramePreviewToTargetCanvas } from '../utils/pixelMath';
+import { renderFramePreviewToTargetCanvas } from '../utils/pixelMath';
+import { AI_EXTERNAL_PROFILES } from '../utils/projectContextAi';
 import { StudioSlider } from './StudioSlider';
 
 // =========================================================
@@ -581,31 +582,32 @@ export const AiConfigPanel: React.FC<{
   return (
     <div className="p-2.5 flex flex-col gap-2 text-[11px]">
       <div className="flex flex-col gap-1">
-        <span className="text-[10px]" style={{ color: 'var(--studio-text-muted)' }}>Modo Contextual:</span>
+        <span className="text-[10px]" style={{ color: 'var(--studio-text-muted)' }}>Estilo Objetivo:</span>
         <select
           value={aiMode}
           onChange={(e) => setAiMode(e.target.value as AiContextualMode)}
           className="px-2 py-1 rounded border text-[10px]"
           style={{ backgroundColor: 'var(--studio-bg-elevated)', borderColor: 'var(--studio-border-strong)', color: 'var(--studio-text)' }}
         >
-          <option value="keep">Respetar estilo del proyecto</option>
-          <option value="adapt">Adaptar a perfil arcade</option>
+          <option value="keep">Mantener estilo actual</option>
+          <option value="auto_detect">Detectar automáticamente</option>
+          <option value="custom">Personalizado (Elegir perfil)</option>
           <option value="blend">Mezclar estilo (50%)</option>
         </select>
       </div>
       <div className="flex flex-col gap-1">
-        <span className="text-[10px]" style={{ color: 'var(--studio-text-muted)' }}>Perfil Estético Base:</span>
+        <span className="text-[10px]" style={{ color: 'var(--studio-text-muted)' }}>Perfil de Estilo (16 estilos):</span>
         <select
           value={aiProfile}
           onChange={(e) => setAiProfile(e.target.value as AiExternalProfileId)}
           className="px-2 py-1 rounded border text-[10px]"
           style={{ backgroundColor: 'var(--studio-bg-elevated)', borderColor: 'var(--studio-border-strong)', color: 'var(--studio-text)' }}
         >
-          <option value="kof">King of Fighters (SNK)</option>
-          <option value="sf_alpha">Street Fighter Alpha</option>
-          <option value="cps2">Capcom CPS-2</option>
-          <option value="guilty_gear">Guilty Gear Pixel</option>
-          <option value="darkstalkers">Darkstalkers</option>
+          {AI_EXTERNAL_PROFILES.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name} ({p.era})
+            </option>
+          ))}
         </select>
       </div>
       <label className="flex items-center justify-between gap-2 p-2 rounded border cursor-pointer" style={{ backgroundColor: 'var(--studio-bg-card)', borderColor: 'var(--studio-border)' }}>

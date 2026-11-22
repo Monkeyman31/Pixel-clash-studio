@@ -86,6 +86,7 @@ import {
   serializeFxPresetJson,
   synthesizeFxFrames,
 } from '../utils/fxGeneratorEngine';
+import { validateAndCleanAiPixelGrid } from '../utils/projectContextAi';
 import {
   animateStaticFxFrame,
   applyMaterialToGrid,
@@ -1004,7 +1005,11 @@ export const FxStudioModal: React.FC<FxStudioModalProps> = ({
             g[y][x] = p.color;
           }
         }
-        return resizeFxGridNearest(g, canvasWidth, canvasHeight);
+        const resized = resizeFxGridNearest(g, canvasWidth, canvasHeight);
+        return validateAndCleanAiPixelGrid(resized, 'vfx', {
+          targetPalette: activePaletteColors,
+          coherenceLevel: 'high',
+        }).grid;
       });
 
       setEditableFrames(parsedGrids);

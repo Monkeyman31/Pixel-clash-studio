@@ -1,4 +1,6 @@
 import {
+  AiPixelValidationStats,
+  AiPoseFidelityLevel,
   DummieAnchorProfile,
   DummieAnchorSection,
   DummieAnchorVisualState,
@@ -10,6 +12,7 @@ import {
   DummieRigType,
   PerspectiveGuidesConfig,
 } from '../types';
+import { validateAndCleanAiPixelGrid } from './projectContextAi';
 
 export const DEFAULT_JOINT_ANCHOR: DummieJointAnchor = {
   anchored: true,
@@ -1050,110 +1053,252 @@ export function detectCharacterSilhouetteRegions(
   };
 }
 
-// Local pixel-retargeting based on skeletal displacement against neutral rig idle (nearest-neighbor Pixel Perfect)
+interface BoneDeformSegment {
+  bx0: number;
+  by0: number;
+  bx1: number;
+  by1: number;
+  tx0: number;
+  ty0: number;
+  tx1: number;
+  ty1: number;
+  baseLen: number;
+  tgtLen: number;
+  bux: number;
+  buy: number;
+  tux: number;
+  tuy: number;
+}
+
+function pointToSegmentDistSq(
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number
+): number {
+  const vx = bx - ax;
+  const vy = by - ay;
+  const lenSq = vx * vx + vy * vy;
+  if (lenSq < 1e-4) {
+    const dx = px - ax;
+    const dy = py - ay;
+    return dx * dx + dy * dy;
+  }
+  const t = Math.max(0, Math.min(1, ((px - ax) * vx + (py - ay) * vy) / lenSq));
+  const projX = ax + t * vx;
+  const projY = ay + t * vy;
+  const dx = px - projX;
+  const dy = py - projY;
+  return dx * dx + dy * dy;
+}
+
+/**
+ * Holistic continuous Inverse-Distance-Weighted (IDW) skeletal bone-segment deformation.
+ * Uses smooth inverse coordinate mapping across ALL connected bones rather than rectangular slicing,
+ * ensuring the entire character adapts as one cohesive silhouette with zero fragmentation or tearing.
+ */
+export function retargetSpriteGridToPoseDetailed(
+  sourceGrid: (string | null)[][],
+  pose: DummiePose,
+  canvasWidth: number,
+  canvasHeight: number,
+  intensity01: number = 1,
+  pixelPerfectOutlines: boolean = true,
+  poseFidelity: AiPoseFidelityLevel = 'high'
+): { grid: (string | null)[][]; stats: AiPixelValidationStats } {
+  const out: (string | null)[][] = Array.from({ length: canvasHeight }, () =>
+    new Array(canvasWidth).fill(null)
+  );
+  const anatomy = detectCharacterSilhouetteRegions(sourceGrid);
+  if (!anatomy) {
+    return {
+      grid: out,
+      stats: {
+        removedOrphans: 0,
+        filledHoles: 0,
+        prunedFragments: 0,
+        repairedEdges: 0,
+        quantizedColors: 0,
+        totalPixelsAfter: 0,
+      },
+    };
+  }
+
+  const idleJoints = createRigJoints(pose.rigType, 'idle');
+  const joints = getEffectivePoseJoints(pose);
+  const idleById = new Map(idleJoints.map((j) => [j.id, j]));
+
+  // Fit neutral rig bounds neatly over the sprite's detected silhouette box
+  let rigMinX = Infinity, rigMaxX = -Infinity, rigMinY = Infinity, rigMaxY = -Infinity;
+  for (const j of idleJoints) {
+    if (j.x < rigMinX) rigMinX = j.x;
+    if (j.x > rigMaxX) rigMaxX = j.x;
+    if (j.y < rigMinY) rigMinY = j.y;
+    if (j.y > rigMaxY) rigMaxY = j.y;
+  }
+  const rigSpanX = Math.max(0.15, rigMaxX - rigMinX);
+  const rigSpanY = Math.max(0.15, rigMaxY - rigMinY);
+
+  const fidelityMult =
+    poseFidelity === 'exact' ? 1.08 : poseFidelity === 'high' ? 1.0 : poseFidelity === 'medium' ? 0.85 : 0.65;
+  const effIntensity = Math.max(0, Math.min(1.25, intensity01 * fidelityMult));
+
+  const mapNormToCanvas = (nx: number, ny: number): [number, number] => [
+    anatomy.minX + ((nx - rigMinX) / rigSpanX) * anatomy.width,
+    anatomy.minY + ((ny - rigMinY) / rigSpanY) * anatomy.height,
+  ];
+
+  // Build paired base -> target positions for all joints
+  const basePos = new Map<string, [number, number]>();
+  const targetPos = new Map<string, [number, number]>();
+  for (const j of joints) {
+    const bj = idleById.get(j.id);
+    if (!bj) continue;
+    const [bx, by] = mapNormToCanvas(bj.x, bj.y);
+    const ix = bj.x + (j.x - bj.x) * effIntensity;
+    const iy = bj.y + (j.y - bj.y) * effIntensity;
+    const [tx, ty] = mapNormToCanvas(ix, iy);
+    basePos.set(j.id, [bx, by]);
+    targetPos.set(j.id, [tx, ty]);
+  }
+
+  // Construct connected bone segments along parent->child hierarchy
+  const segments: BoneDeformSegment[] = [];
+  for (const j of joints) {
+    if (!j.parentId) continue;
+    const b0 = basePos.get(j.parentId);
+    const b1 = basePos.get(j.id);
+    const t0 = targetPos.get(j.parentId);
+    const t1 = targetPos.get(j.id);
+    if (!b0 || !b1 || !t0 || !t1) continue;
+
+    const bdx = b1[0] - b0[0];
+    const bdy = b1[1] - b0[1];
+    const baseLen = Math.max(1.5, Math.hypot(bdx, bdy));
+    const tdx = t1[0] - t0[0];
+    const tdy = t1[1] - t0[1];
+    const tgtLen = Math.max(1.5, Math.hypot(tdx, tdy));
+
+    segments.push({
+      bx0: b0[0],
+      by0: b0[1],
+      bx1: b1[0],
+      by1: b1[1],
+      tx0: t0[0],
+      ty0: t0[1],
+      tx1: t1[0],
+      ty1: t1[1],
+      baseLen,
+      tgtLen,
+      bux: bdx / baseLen,
+      buy: bdy / baseLen,
+      tux: tdx / tgtLen,
+      tuy: tdy / tgtLen,
+    });
+  }
+
+  // Fallback if rig has no segments
+  if (segments.length === 0) {
+    const fallbackOut = sourceGrid.map((r) => [...r]);
+    return validateAndCleanAiPixelGrid(fallbackOut, 'pose', { repairOutlines: pixelPerfectOutlines });
+  }
+
+  // Smooth influence radius scales with character dimensions (prevents rigid block boundaries)
+  const charScale = Math.max(6, Math.max(anatomy.width, anatomy.height));
+  const sigma =
+    poseFidelity === 'exact'
+      ? Math.max(2.5, charScale * 0.085)
+      : poseFidelity === 'high'
+      ? Math.max(3.0, charScale * 0.11)
+      : Math.max(3.5, charScale * 0.15);
+  const sigmaSq = sigma * sigma;
+
+  // Compute safe evaluation bounding box covering both target joints & padded source anatomy
+  let scanMinX = anatomy.minX;
+  let scanMaxX = anatomy.maxX;
+  let scanMinY = anatomy.minY;
+  let scanMaxY = anatomy.maxY;
+  for (const [tx, ty] of targetPos.values()) {
+    if (tx < scanMinX) scanMinX = Math.floor(tx);
+    if (tx > scanMaxX) scanMaxX = Math.ceil(tx);
+    if (ty < scanMinY) scanMinY = Math.floor(ty);
+    if (ty > scanMaxY) scanMaxY = Math.ceil(ty);
+  }
+  const pad = Math.max(8, Math.ceil(charScale * 0.35));
+  scanMinX = Math.max(0, scanMinX - pad);
+  scanMaxX = Math.min(canvasWidth - 1, scanMaxX + pad);
+  scanMinY = Math.max(0, scanMinY - pad);
+  scanMaxY = Math.min(canvasHeight - 1, scanMaxY + pad);
+
+  // Inverse mapping for every destination pixel guarantees zero gaps & smooth skeletal coherence
+  for (let y = scanMinY; y <= scanMaxY; y++) {
+    for (let x = scanMinX; x <= scanMaxX; x++) {
+      let sumW = 0;
+      let sumSx = 0;
+      let sumSy = 0;
+
+      for (let s = 0; s < segments.length; s++) {
+        const seg = segments[s];
+        const dSq = pointToSegmentDistSq(x, y, seg.tx0, seg.ty0, seg.tx1, seg.ty1);
+        const w = 1 / Math.pow(dSq + sigmaSq, 1.35);
+
+        // Local coordinates along target bone frame
+        const px = x - seg.tx0;
+        const py = y - seg.ty0;
+        const alongT = px * seg.tux + py * seg.tuy;
+        const perpT = px * -seg.tuy + py * seg.tux;
+
+        // Preserve limb length proportionality cleanly
+        const lenRatio = Math.max(0.65, Math.min(1.45, seg.baseLen / seg.tgtLen));
+        const mappedAlong = alongT * lenRatio;
+
+        const sx = seg.bx0 + mappedAlong * seg.bux - perpT * seg.buy;
+        const sy = seg.by0 + mappedAlong * seg.buy + perpT * seg.bux;
+
+        sumW += w;
+        sumSx += w * sx;
+        sumSy += w * sy;
+      }
+
+      if (sumW <= 0) continue;
+      const sampleX = Math.round(sumSx / sumW);
+      const sampleY = Math.round(sumSy / sumW);
+      if (sampleX >= 0 && sampleX < canvasWidth && sampleY >= 0 && sampleY < canvasHeight) {
+        const col = sourceGrid[sampleY]?.[sampleX];
+        if (col) {
+          out[y][x] = col;
+        }
+      }
+    }
+  }
+
+  return validateAndCleanAiPixelGrid(out, 'pose', {
+    coherenceLevel: poseFidelity === 'exact' ? 'max' : 'high',
+    repairOutlines: pixelPerfectOutlines,
+  });
+}
+
+// Local holistic pixel-retargeting based on continuous skeletal bone-segment inverse mapping
 export function retargetSpriteGridToPose(
   sourceGrid: (string | null)[][],
   pose: DummiePose,
   canvasWidth: number,
   canvasHeight: number,
   intensity01: number = 1,
-  pixelPerfectOutlines: boolean = true
+  pixelPerfectOutlines: boolean = true,
+  poseFidelity: AiPoseFidelityLevel = 'high'
 ): (string | null)[][] {
-  const out: (string | null)[][] = Array.from({ length: canvasHeight }, () =>
-    new Array(canvasWidth).fill(null)
-  );
-  const anatomy = detectCharacterSilhouetteRegions(sourceGrid);
-  if (!anatomy) return out;
-
-  const idleJoints = createRigJoints(pose.rigType, 'idle');
-  const joints = getEffectivePoseJoints(pose);
-  const findJ = (list: DummieJoint[], id: string) => list.find((j) => j.id === id);
-
-  const headJ = findJ(joints, 'head');
-  const chestJ = findJ(joints, 'chest');
-  const pelvisJ = findJ(joints, 'pelvis');
-  const wristL = findJ(joints, 'wrist_l') || findJ(joints, 'wing_l_2');
-  const wristR = findJ(joints, 'wrist_r') || findJ(joints, 'wing_r_2');
-  const ankleL = findJ(joints, 'ankle_l');
-  const ankleR = findJ(joints, 'ankle_r');
-
-  const baseHead = findJ(idleJoints, 'head') || { x: 0.5, y: 0.19 };
-  const baseChest = findJ(idleJoints, 'chest') || { x: 0.5, y: 0.30 };
-  const basePelvis = findJ(idleJoints, 'pelvis') || { x: 0.5, y: 0.52 };
-  const baseWristL = findJ(idleJoints, 'wrist_l') || findJ(idleJoints, 'wing_l_2') || { x: 0.30, y: 0.52 };
-  const baseWristR = findJ(idleJoints, 'wrist_r') || findJ(idleJoints, 'wing_r_2') || { x: 0.70, y: 0.52 };
-  const baseAnkleL = findJ(idleJoints, 'ankle_l') || { x: 0.39, y: 0.84 };
-  const baseAnkleR = findJ(idleJoints, 'ankle_r') || { x: 0.61, y: 0.84 };
-
-  const dxFor = (j: DummieJoint | undefined, base: { x: number; y: number }) =>
-    j ? (j.x - base.x) * anatomy.width * 1.15 * intensity01 : 0;
-  const dyFor = (j: DummieJoint | undefined, base: { x: number; y: number }) =>
-    j ? (j.y - base.y) * anatomy.height * 1.15 * intensity01 : 0;
-
-  for (let y = anatomy.minY; y <= anatomy.maxY; y++) {
-    for (let x = anatomy.minX; x <= anatomy.maxX; x++) {
-      const col = sourceGrid[y]?.[x];
-      if (!col) continue;
-
-      const relY = (y - anatomy.minY) / anatomy.height;
-      const relX = (x - anatomy.minX) / anatomy.width;
-
-      let shiftX = 0;
-      let shiftY = 0;
-
-      if (relY < 0.25) {
-        shiftX = dxFor(headJ, baseHead);
-        shiftY = dyFor(headJ, baseHead);
-      } else if (relY < 0.56) {
-        if (relX < 0.33) {
-          shiftX = dxFor(wristL, baseWristL);
-          shiftY = dyFor(wristL, baseWristL);
-        } else if (relX > 0.67) {
-          shiftX = dxFor(wristR, baseWristR);
-          shiftY = dyFor(wristR, baseWristR);
-        } else {
-          const t = (relY - 0.25) / 0.31;
-          shiftX = dxFor(chestJ, baseChest) * (1 - t) + dxFor(pelvisJ, basePelvis) * t;
-          shiftY = dyFor(chestJ, baseChest) * (1 - t) + dyFor(pelvisJ, basePelvis) * t;
-        }
-      } else {
-        if (relX < 0.5) {
-          shiftX = dxFor(ankleL, baseAnkleL) * ((relY - 0.56) / 0.44);
-          shiftY = dyFor(ankleL, baseAnkleL) * ((relY - 0.56) / 0.44);
-        } else {
-          shiftX = dxFor(ankleR, baseAnkleR) * ((relY - 0.56) / 0.44);
-          shiftY = dyFor(ankleR, baseAnkleR) * ((relY - 0.56) / 0.44);
-        }
-      }
-
-      const tx = Math.round(x + shiftX);
-      const ty = Math.round(y + shiftY);
-      if (tx >= 0 && tx < canvasWidth && ty >= 0 && ty < canvasHeight) {
-        out[ty][tx] = col;
-      }
-    }
-  }
-
-  // Optional 1-pixel hole fill for clean Pixel Perfect silhouettes
-  if (pixelPerfectOutlines) {
-    const filled = out.map((r) => [...r]);
-    for (let y = 1; y < canvasHeight - 1; y++) {
-      for (let x = 1; x < canvasWidth - 1; x++) {
-        if (!out[y][x]) {
-          const up = out[y - 1][x];
-          const down = out[y + 1][x];
-          const left = out[y][x - 1];
-          const right = out[y][x + 1];
-          if (up && down && left && right) {
-            filled[y][x] = up;
-          }
-        }
-      }
-    }
-    return filled;
-  }
-
-  return out;
+  return retargetSpriteGridToPoseDetailed(
+    sourceGrid,
+    pose,
+    canvasWidth,
+    canvasHeight,
+    intensity01,
+    pixelPerfectOutlines,
+    poseFidelity
+  ).grid;
 }
 
 export function interpolateDummiePoses(

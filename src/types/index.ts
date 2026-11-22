@@ -264,6 +264,16 @@ export interface SelectionToolOptions {
   cornerRadius: number;
   perfectCircle: boolean;
   smooth: boolean;
+  rememberBooleanMode?: boolean;
+}
+
+export interface LiveSelectionPreview {
+  opMode: SelectionBooleanMode;
+  shape: 'rect' | 'ellipse' | 'lasso' | 'polygon';
+  box?: { startX: number; startY: number; endX: number; endY: number };
+  incomingMask: boolean[][];
+  constrainRatio?: boolean;
+  fromCenter?: boolean;
 }
 
 export interface MoveToolOptions {
@@ -928,21 +938,35 @@ export interface SmartDeleteCandidate {
   requiresConfirmation: boolean;
 }
 
-export type AiContextualMode = 'keep' | 'adapt' | 'blend';
+export type AiContextualMode = 'keep' | 'auto_detect' | 'custom' | 'adapt' | 'blend';
+
+export type AiCoherenceLevel = 'low' | 'medium' | 'high' | 'max';
+
+export type AiPoseFidelityLevel = 'low' | 'medium' | 'high' | 'exact';
 
 export type AiExternalProfileId =
+  | 'nes'
+  | 'gameboy'
+  | 'snes'
+  | 'sega_genesis'
+  | 'cps1'
+  | 'cps2'
+  | 'snk_neogeo'
   | 'kof'
   | 'sf_alpha'
   | 'darkstalkers'
+  | 'metal_slug'
   | 'guilty_gear'
   | 'blazblue'
-  | 'snk_neogeo'
-  | 'cps2'
   | 'pixel_fantasy'
-  | 'pixel_cyberpunk';
+  | 'pixel_scifi'
+  | 'pixel_cyberpunk'
+  | 'pixel_rpg';
 
 export interface ProjectContextAnalysis {
   visualStyle: string;
+  detectedProfileId: AiExternalProfileId;
+  era: string;
   activePalette: string[];
   resolution: string;
   uniqueColors: number;
@@ -950,7 +974,55 @@ export interface ProjectContextAnalysis {
   gameGenre: string;
   lineThickness: number;
   shadingType: 'flat' | 'cel' | 'gradient_dither';
+  antiAliasLevel: 'none' | 'subtle' | 'heavy';
+  lightDirection: 'top-left' | 'top-right' | 'top' | 'front' | 'rim';
+  detailLevel: 'low' | 'medium' | 'high' | 'ultra';
   characterBounds?: { w: number; h: number } | null;
+}
+
+export interface ProjectAiTrainingProfile {
+  trainedAt: number;
+  projectName: string;
+  detectedProfileId: AiExternalProfileId;
+  visualStyle: string;
+  era: string;
+  masterPalette: string[];
+  uniqueColors: number;
+  lineThickness: number;
+  shadingType: 'flat' | 'cel' | 'gradient_dither';
+  antiAliasLevel: 'none' | 'subtle' | 'heavy';
+  lightDirection: 'top-left' | 'top-right' | 'top' | 'front' | 'rim';
+  detailLevel: 'low' | 'medium' | 'high' | 'ultra';
+  spriteLayerCount: number;
+  stageLayerCount: number;
+  hudLayerCount: number;
+  fxLayerCount: number;
+  activeReferenceCount: number;
+  summary: string;
+}
+
+export interface AiPixelValidationStats {
+  removedOrphans: number;
+  filledHoles: number;
+  prunedFragments: number;
+  repairedEdges: number;
+  quantizedColors: number;
+  totalPixelsAfter: number;
+}
+
+export interface AiExplanationReport {
+  detectedStyle: string;
+  targetStyleLabel: string;
+  paletteCount: number;
+  detectedPalette: string[];
+  outlineThickness: number;
+  shadingType: string;
+  lightDirection: string;
+  referenceUsed: string;
+  coherenceLevel: AiCoherenceLevel;
+  poseFidelity?: AiPoseFidelityLevel;
+  validationStats?: AiPixelValidationStats;
+  generatedAt: number;
 }
 
 export type DitherPatternType =
@@ -1292,6 +1364,8 @@ export interface DummieApplyConfig {
   pixelPerfectOutlines: boolean;
   useAiRetarget: boolean;
   aiAdaptationIntensity: number; // 0..100
+  poseFidelity?: AiPoseFidelityLevel;
+  coherenceLevel?: AiCoherenceLevel;
   layerBaseName: string;
 }
 

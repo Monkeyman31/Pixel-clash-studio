@@ -1557,10 +1557,38 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
       );
     }
 
+    const renderSelectionBooleanControls = () => (
+      <>
+        {(
+          [
+            ['replace', 'Nueva selección', Scan, 'Nueva selección', 'accent'],
+            ['add', 'Añadir selección', Plus, 'Añadir selección (Shift)', 'emerald'],
+            ['subtract', 'Restar selección', Minus, 'Restar selección (Alt)', 'rose'],
+            ['intersect', 'Intersecar selección', Combine, 'Intersecar selección (Shift + Alt)', 'amber'],
+          ] as const
+        ).map(([op, lbl, Ic, tip, tone]) => (
+          <ToggleBtn
+            key={op}
+            active={selectionOptions.opMode === op}
+            onClick={() =>
+              onChangeSelectionOptions({ ...selectionOptions, opMode: op as SelectionBooleanMode })
+            }
+            label={lbl}
+            title={tip}
+            tone={tone}
+            keywords={`booleano modo ${lbl} seleccion`}
+            icon={Ic}
+          />
+        ))}
+      </>
+    );
+
     // 8. VARITA MÁGICA (Magic Wand)
     if (activeContextMode === 'magic_wand') {
       return (
         <>
+          {renderSelectionBooleanControls()}
+          <Sep />
           <SliderField
             label="Tolerancia"
             keywords="tolerancia color varita"
@@ -1581,18 +1609,6 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
             label="Todas las capas"
             keywords="todas capas"
             icon={Layers}
-          />
-          <ToggleBtn
-            active={magicWandOptions.continuousSelection}
-            onClick={() =>
-              onChangeMagicWandOptions({
-                ...magicWandOptions,
-                continuousSelection: !magicWandOptions.continuousSelection,
-              })
-            }
-            label="Sel. continua"
-            keywords="seleccion continua acumular anadir"
-            icon={Plus}
           />
           <ToggleBtn
             active={magicWandOptions.smooth}
@@ -1652,23 +1668,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
             icon={Circle}
           />
           <Sep />
-          {(
-            [
-              ['replace', 'Nueva', Scan],
-              ['add', 'Añadir', Plus],
-              ['subtract', 'Restar', Minus],
-              ['intersect', 'Intersección', Combine],
-            ] as const
-          ).map(([op, lbl, Ic]) => (
-            <ToggleBtn
-              key={op}
-              active={selectionOptions.opMode === op}
-              onClick={() => onChangeSelectionOptions({ ...selectionOptions, opMode: op as SelectionBooleanMode })}
-              label={lbl}
-              keywords={`booleano modo ${lbl}`}
-              icon={Ic}
-            />
-          ))}
+          {renderSelectionBooleanControls()}
           <Sep />
           <ToggleBtn
             active={selectionOptions.fixedRatio}
@@ -1736,23 +1736,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
             icon={Circle}
           />
           <Sep />
-          {(
-            [
-              ['replace', 'Nueva', Scan],
-              ['add', 'Añadir', Plus],
-              ['subtract', 'Restar', Minus],
-              ['intersect', 'Intersección', Combine],
-            ] as const
-          ).map(([op, lbl, Ic]) => (
-            <ToggleBtn
-              key={op}
-              active={selectionOptions.opMode === op}
-              onClick={() => onChangeSelectionOptions({ ...selectionOptions, opMode: op as SelectionBooleanMode })}
-              label={lbl}
-              keywords={`booleano ${lbl}`}
-              icon={Ic}
-            />
-          ))}
+          {renderSelectionBooleanControls()}
           <Sep />
           <ToggleBtn
             active={selectionOptions.perfectCircle}
@@ -1799,26 +1783,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
             icon={Magnet}
           />
           <Sep />
-          <ToggleBtn
-            active={selectionOptions.opMode === 'replace'}
-            onClick={() => onChangeSelectionOptions({ ...selectionOptions, opMode: 'replace' })}
-            label="Nueva"
-            keywords="nueva seleccion"
-          />
-          <ToggleBtn
-            active={selectionOptions.opMode === 'add'}
-            onClick={() => onChangeSelectionOptions({ ...selectionOptions, opMode: 'add' })}
-            label="Añadir selección"
-            keywords="anadir sumar seleccion"
-            icon={Plus}
-          />
-          <ToggleBtn
-            active={selectionOptions.opMode === 'subtract'}
-            onClick={() => onChangeSelectionOptions({ ...selectionOptions, opMode: 'subtract' })}
-            label="Restar selección"
-            keywords="restar quitar seleccion"
-            icon={Minus}
-          />
+          {renderSelectionBooleanControls()}
         </>
       );
     }

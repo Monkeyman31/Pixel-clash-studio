@@ -247,6 +247,11 @@ import {
   retargetSpriteGridToPose,
 } from './utils/dummieRigEngine';
 import {
+  analyzeProjectContext,
+  pixelsToGrid,
+  validateAndCleanAiPixelGrid,
+} from './utils/projectContextAi';
+import {
   applyHQScaleInCanvas,
   applyTransformToGrid,
   applyTransformWithOffCanvas,
@@ -698,6 +703,31 @@ export default function App() {
   const [bucketOptions, setBucketOptions] = useState<BucketToolOptions>(DEFAULT_BUCKET_OPTIONS);
   const [magicWandOptions, setMagicWandOptions] = useState<MagicWandOptions>(DEFAULT_MAGIC_WAND_OPTIONS);
   const [selectionOptions, setSelectionOptions] = useState<SelectionToolOptions>(DEFAULT_SELECTION_OPTIONS);
+  const lastSelectionBooleanOpRef = useRef<'replace' | 'add' | 'subtract' | 'intersect'>('replace');
+
+  const handleChangeSelectionOptions = useCallback((next: SelectionToolOptions) => {
+    if (next.opMode !== 'replace') {
+      lastSelectionBooleanOpRef.current = next.opMode;
+    }
+    setSelectionOptions(next);
+    setMagicWandOptions((prev) =>
+      prev.continuousSelection === (next.opMode === 'add')
+        ? prev
+        : { ...prev, continuousSelection: next.opMode === 'add' }
+    );
+  }, []);
+
+  const handleChangeMagicWandOptions = useCallback((next: MagicWandOptions) => {
+    setMagicWandOptions((prev) => {
+      if (next.continuousSelection !== prev.continuousSelection) {
+        const nextOp = next.continuousSelection ? 'add' : 'replace';
+        if (nextOp !== 'replace') lastSelectionBooleanOpRef.current = nextOp;
+        setSelectionOptions((selPrev) => ({ ...selPrev, opMode: nextOp }));
+      }
+      return next;
+    });
+  }, []);
+
   const [moveOptions, setMoveOptions] = useState<MoveToolOptions>(DEFAULT_MOVE_OPTIONS);
   const [selectedParametricShapeId, setSelectedParametricShapeId] = useState<string | null>(null);
   const [shapeRasterPolicy, setShapeRasterPolicy] = useState<ShapeRasterConfirmMode>('keep_editable');
@@ -1119,13 +1149,25 @@ export default function App() {
   const [savedCustomLayouts, setSavedCustomLayouts] = useState<SavedCustomLayout[]>(() => loadSavedCustomLayouts());
   const [studioStyle, setStudioStyle] = useState<StudioStyleConfig>(() => loadStudioStyle());
   const [layoutModalOpen, setLayoutModalOpen] = useState<boolean>(false);
-  const [layoutModalTab, setLayoutModalTab] = useState<'layout' | 'style' | 'selections'>('layout');
+  const [layoutModalTab, setLayoutModalTab] = useState<'layout' | 'style' | 'selections' | 'minipreview'>('layout');
 
   // Linked movement across all frames
   const [linkMoveAllFrames, setLinkMoveAllFrames] = useState<boolean>(false);
 
   // Selection, Clipboard & Asset Library Browser State
   const [selection, setSelection] = useState<SelectionArea | null>(null);
+  const prevHasSelectionRef = useRef<boolean>(false);
+  useEffect(() => {
+    const hasSel = Boolean(selection && selection.active);
+    if (prevHasSelectionRef.current && !hasSel) {
+      setSelectionOptions((prev) =>
+        prev.opMode === 'subtract' || prev.opMode === 'intersect'
+          ? { ...prev, opMode: 'replace' }
+          : prev
+      );
+    }
+    prevHasSelectionRef.current = hasSel;
+  }, [selection]);
   const [clipboard, setClipboard] = useState<ClipboardData | null>(null);
   const [userLibraryItems, setUserLibraryItems] = useState<AssetLibraryItem[]>(() => loadUserAssetLibrary());
   const [assetFolders, setAssetFolders] = useState<string[]>(() => loadAssetFolders());
@@ -1437,9 +1479,50 @@ export default function App() {
     }
   });
 
-  const openLayoutModal = useCallback((tab: 'layout' | 'style' | 'selections' = 'layout') => {
+  const openLayoutModal = useCallback((tab: 'layout' | 'style' | 'selections' | 'minipreview' = 'layout') => {
     setLayoutModalTab(tab);
     setLayoutModalOpen(true);
+  }, []);
+
+  const handleUpdateMiniPreviewState = useCallback(
+    (patch: {
+      showMiniPlayer?: boolean;
+      miniPreviewCollapsed?: boolean;
+      miniPreviewWidth?: number;
+      miniPreviewHeight?: number;
+      miniPreviewPosition?: { x: number; y: number } | null;
+    }) => {
+      setWorkspaceLayout((prev) => ({
+        ...prev,
+        ...patch,
+        templateId: 'custom',
+      }));
+    },
+    []
+  );
+
+  const handleDockMiniPreviewToSidebar = useCallback(() => {
+    setWorkspaceLayout((prev) => ({
+      ...prev,
+      showMiniPlayer: false,
+      rightPanels: prev.rightPanels.map((p) =>
+        p.id === 'preview' ? { ...p, visible: true, expanded: true } : p
+      ),
+      templateId: 'custom',
+    }));
+    setRightSidebarOpen(true);
+  }, []);
+
+  const handleFloatMiniPreviewToCanvas = useCallback(() => {
+    setWorkspaceLayout((prev) => ({
+      ...prev,
+      showMiniPlayer: true,
+      miniPreviewCollapsed: false,
+      rightPanels: prev.rightPanels.map((p) =>
+        p.id === 'preview' ? { ...p, visible: false } : p
+      ),
+      templateId: 'custom',
+    }));
   }, []);
 
   // Persist workspace layout
@@ -1563,7 +1646,13 @@ export default function App() {
   };
 
   const handleLoadCustomLayout = (saved: SavedCustomLayout) => {
-    setWorkspaceLayout(JSON.parse(JSON.stringify(saved.layout)));
+    const cloned = JSON.parse(JSON.stringify(saved.layout));
+    setWorkspaceLayout((prev) => ({
+      ...cloned,
+      showMiniPlayer: prev.miniPreviewPrefs?.neverAutoOpen !== false ? prev.showMiniPlayer : Boolean(cloned.showMiniPlayer),
+      miniPreviewCollapsed: prev.miniPreviewPrefs?.startCollapsed !== false ? true : Boolean(cloned.miniPreviewCollapsed),
+      miniPreviewPrefs: prev.miniPreviewPrefs || cloned.miniPreviewPrefs,
+    }));
     if (saved.layout.sidebarPosition !== 'hidden') {
       setRightSidebarOpen(true);
     }
@@ -1728,7 +1817,13 @@ export default function App() {
   const handleApplyWorkspacePreset = useCallback((templateId: string) => {
     const tpl = WORKSPACE_TEMPLATES.find((t) => t.id === templateId);
     if (!tpl) return;
-    setWorkspaceLayout(JSON.parse(JSON.stringify(tpl.layout)));
+    const cloned = JSON.parse(JSON.stringify(tpl.layout));
+    setWorkspaceLayout((prev) => ({
+      ...cloned,
+      showMiniPlayer: prev.miniPreviewPrefs?.neverAutoOpen !== false ? prev.showMiniPlayer : false,
+      miniPreviewCollapsed: prev.miniPreviewPrefs?.startCollapsed !== false ? true : prev.miniPreviewCollapsed,
+      miniPreviewPrefs: prev.miniPreviewPrefs || cloned.miniPreviewPrefs,
+    }));
     if (tpl.layout.sidebarPosition !== 'hidden') {
       setRightSidebarOpen(true);
     }
@@ -5541,13 +5636,9 @@ export default function App() {
       });
       const data = await res.json();
 
-      const newPixels = createEmptyGrid(canvasWidth, canvasHeight);
+      let newPixels = createEmptyGrid(canvasWidth, canvasHeight);
       if (data.pixels && Array.isArray(data.pixels)) {
-        data.pixels.forEach((p: any) => {
-          if (p.x >= 0 && p.x < canvasWidth && p.y >= 0 && p.y < canvasHeight) {
-            newPixels[p.y][p.x] = p.color;
-          }
-        });
+        newPixels = pixelsToGrid(data.pixels, canvasWidth, canvasHeight);
       } else {
         // Smart motion blend fallback
         const gridA = frameA.layers[0]?.pixels;
@@ -5562,6 +5653,11 @@ export default function App() {
           }
         }
       }
+      newPixels = validateAndCleanAiPixelGrid(newPixels, 'sprite', {
+        targetPalette: activePaletteColors,
+        coherenceLevel: 'high',
+        repairOutlines: true,
+      }).grid;
 
       const newFrame: Frame = {
         id: `frame-inbetween-${Date.now()}`,
@@ -6576,7 +6672,8 @@ export default function App() {
             canvasWidth,
             canvasHeight,
             (config.aiAdaptationIntensity || 85) / 100,
-            config.pixelPerfectOutlines
+            config.pixelPerfectOutlines,
+            config.poseFidelity || 'high'
           );
           extraFrames.push({
             id: `frame-pose-tween-${Date.now()}-${k}`,
@@ -8041,6 +8138,14 @@ export default function App() {
       }
       setImportNotification(`Generando ${categoryLabel} con IA...`);
       try {
+        const ctxAnalysis = analyzeProjectContext(
+          framesRef.current,
+          canvasWidth,
+          canvasHeight,
+          activePaletteColors,
+          layerGroups,
+          currentFrameIndex
+        );
         const endpoint = kind === 'stage' ? '/api/ai/stage-generate' : '/api/ai/hud-generate';
         const body =
           kind === 'stage'
@@ -8049,14 +8154,22 @@ export default function App() {
                 biome: categoryLabel,
                 width: canvasWidth,
                 height: canvasHeight,
-                style: 'arcade_cps2',
+                styleMode: 'keep',
+                styleProfile: ctxAnalysis.detectedProfileId,
+                style: ctxAnalysis.detectedProfileId,
+                palette: ctxAnalysis.activePalette,
+                contextAnalysis: ctxAnalysis,
               }
             : {
                 prompt: promptHint,
                 elementCategory: categoryLabel,
                 width: canvasWidth,
                 height: canvasHeight,
-                style: 'arcade_cps2',
+                styleMode: 'keep',
+                styleProfile: ctxAnalysis.detectedProfileId,
+                style: ctxAnalysis.detectedProfileId,
+                palette: ctxAnalysis.activePalette,
+                contextAnalysis: ctxAnalysis,
               };
         const res = await fetch(endpoint, {
           method: 'POST',
@@ -8073,14 +8186,11 @@ export default function App() {
         if (rawPixels.length === 0) {
           throw new Error('La IA no devolvió píxeles válidos.');
         }
-        const grid = createEmptyGrid(canvasWidth, canvasHeight);
-        for (const p of rawPixels) {
-          const px = Math.round(p.x);
-          const py = Math.round(p.y);
-          if (px >= 0 && px < canvasWidth && py >= 0 && py < canvasHeight && p.color) {
-            grid[py][px] = p.color;
-          }
-        }
+        const grid = validateAndCleanAiPixelGrid(
+          pixelsToGrid(rawPixels, canvasWidth, canvasHeight),
+          kind,
+          { targetPalette: ctxAnalysis.activePalette, coherenceLevel: 'high' }
+        ).grid;
         const newLayer: Layer = {
           id: `layer-ai-mode-${Date.now()}`,
           name: `${kind === 'stage' ? '[Stage IA]' : '[HUD IA]'} ${categoryLabel}`,
@@ -11505,7 +11615,7 @@ export default function App() {
         gradientConfig={gradientConfig}
         onChangeGradientConfig={setGradientConfig}
         magicWandOptions={magicWandOptions}
-        onChangeMagicWandOptions={setMagicWandOptions}
+        onChangeMagicWandOptions={handleChangeMagicWandOptions}
         onMorphSelection={handleMorphSelection}
         hasActiveSelection={Boolean(selection && selection.active)}
         selectionSubTool={selectionSubTool}
@@ -11513,7 +11623,7 @@ export default function App() {
         marqueeShape={marqueeShape}
         onChangeMarqueeShape={setMarqueeShape}
         selectionOptions={selectionOptions}
-        onChangeSelectionOptions={setSelectionOptions}
+        onChangeSelectionOptions={handleChangeSelectionOptions}
         lassoMode={lassoMode}
         onChangeLassoMode={setLassoMode}
         moveSubTool={moveSubTool}
@@ -11954,6 +12064,7 @@ export default function App() {
         onDuplicateLayerToSelectedFrames={handleDuplicateLayerToSelectedFrames}
         onDuplicateLayerToAllFrames={handleDuplicateLayerToAllFrames}
         onDuplicateGroupToAllFrames={handleDuplicateGroupToAllFrames}
+        onFloatMiniPreviewToCanvas={handleFloatMiniPreviewToCanvas}
         activeTool={activeTool}
         transformParams={transformSession?.params || null}
         onChangeTransformParams={(nextParams) =>
@@ -12228,6 +12339,12 @@ export default function App() {
             linkMoveAllFrames={linkMoveAllFrames}
             onShiftAllFramesLayer={handleShiftAllFramesLayer}
             showMiniPlayerProp={workspaceLayout.showMiniPlayer}
+            miniPreviewCollapsedProp={workspaceLayout.miniPreviewCollapsed ?? true}
+            miniPreviewWidthProp={workspaceLayout.miniPreviewWidth ?? 176}
+            miniPreviewHeightProp={workspaceLayout.miniPreviewHeight ?? 140}
+            miniPreviewPositionProp={workspaceLayout.miniPreviewPosition ?? null}
+            onUpdateMiniPreviewState={handleUpdateMiniPreviewState}
+            onDockMiniPreviewToSidebar={handleDockMiniPreviewToSidebar}
             brushSettings={brushSettings}
             selection={selection}
             onChangeSelection={setSelection}
@@ -13117,6 +13234,14 @@ export default function App() {
             category: 'Interfaz',
             keywords: 'preferencias seleccion hormigas relleno contorno grosor velocidad opacidad',
             onExecute: () => openLayoutModal('selections'),
+          },
+          {
+            id: 'prefs.mini_preview_open',
+            title: 'Preferencias → Interfaz → Mini Preview',
+            subtitle: 'Recordar último estado, Iniciar contraída, No abrir automáticamente, Solo bajo demanda',
+            category: 'Interfaz',
+            keywords: 'preferencias mini preview reproductor flotante contraida tamaño automatico',
+            onExecute: () => openLayoutModal('minipreview'),
           },
           {
             id: 'ref.pureref_toggle',

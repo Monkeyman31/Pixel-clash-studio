@@ -69,8 +69,10 @@ import {
   PureRefConfig,
   ReferenceGroup,
   ReferenceItem,
+  LiveSelectionPreview,
   SampledColorInfo,
   SelectionArea,
+  SelectionBooleanMode,
   SelectionDisplayConfig,
   SelectionSubTool,
   SelectionToolOptions,
@@ -194,15 +196,22 @@ import {
   EdgeMapData,
   advancedFloodFill,
   advancedMagicWandMask,
+  buildPolygonSelectionMask,
   buildSelectionMaskFromShape,
+  cloneSelectionArea,
   combineSelectionMasks,
   computeCanvasEdgeMap,
+  computeConstrainedMarqueeBox,
   computeUniversalDitherPixel,
   evaluateBrushTextureFactor,
   evaluateDitherThreshold,
+  isPointInsideSelection,
   renderGradientToGrid,
+  resolveSelectionOpMode,
+  selectionToBooleanMask,
   snapPointToStrongestEdge,
   traceMagneticLassoSegment,
+  translateSelectionArea,
 } from '../utils/toolEngines';
 import {
   ParametricHandleKind,
@@ -1054,13 +1063,42 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   const [hoveredHitboxId, setHoveredHitboxId] = useState<string | null>(null);
   const [hoveredPivot, setHoveredPivot] = useState<boolean>(false);
 
-  // Freehand / Polygonal / Magnetic Lasso & Marching Ants Selection State
+  // Freehand / Polygonal / Magnetic Lasso, Live Preview & Marching Ants Selection State
   const [lassoSites, setLassoSites] = useState<{ x: number; y: number }[]>([]);
   const [polygonLassoPts, setPolygonLassoPts] = useState<{ x: number; y: number }[]>([]);
   const [magneticLassoPts, setMagneticLassoPts] = useState<{ x: number; y: number }[]>([]);
   const [magneticPreviewSeg, setMagneticPreviewSeg] = useState<{ x: number; y: number }[]>([]);
   const magneticEdgeMapRef = useRef<EdgeMapData | null>(null);
   const marchingAntsOffsetRef = useRef<number>(0);
+
+  // Unified Selection Modifiers, Live Preview, Marquee Stroke & Ctrl Quick-Move State
+  const [activeKeyMods, setActiveKeyMods] = useState<{ shift: boolean; alt: boolean; ctrl: boolean }>({
+    shift: false,
+    alt: false,
+    ctrl: false,
+  });
+  const [selectionLivePreview, setSelectionLivePreview] = useState<LiveSelectionPreview | null>(null);
+  const selectionLivePreviewRef = useRef<LiveSelectionPreview | null>(null);
+  const updateSelectionLivePreview = useCallback((next: LiveSelectionPreview | null) => {
+    selectionLivePreviewRef.current = next;
+    setSelectionLivePreview(next);
+  }, []);
+  const selectionStrokeRef = useRef<{
+    opMode: SelectionBooleanMode;
+    downShift: boolean;
+    downAlt: boolean;
+    altReleasedDuringDrag: boolean;
+    startGrid: { x: number; y: number };
+    lastEndGrid: { x: number; y: number };
+    startClient: { x: number; y: number };
+    didDrag: boolean;
+    shape: 'rect' | 'ellipse';
+  } | null>(null);
+  const lassoStrokeOpModeRef = useRef<SelectionBooleanMode>('replace');
+  const quickSelectionMoveRef = useRef<{
+    startGrid: { x: number; y: number };
+    origSelection: SelectionArea;
+  } | null>(null);
 
   // Temporary Ctrl -> Direct Select while Line tool is active
   const [isCtrlTempDirectSelect, setIsCtrlTempDirectSelect] = useState<boolean>(false);
@@ -1608,7 +1646,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     }
   }, [width, height]);
 
-  // Sync temporary Ctrl -> Direct Select when activeTool changes
+  // Sync temporary Ctrl -> Direct Select & clear transient selection previews when activeTool/lassoMode changes
   useEffect(() => {
     if (activeTool !== 'line') {
       setIsCtrlTempDirectSelect(false);
@@ -1618,66 +1656,106 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       setMagneticPreviewSeg([]);
       magneticEdgeMapRef.current = null;
     }
+    if (activeTool !== 'lasso' || lassoMode !== 'polygon') {
+      setPolygonLassoPts([]);
+    }
+    if (!['select', 'lasso'].includes(activeTool)) {
+      updateSelectionLivePreview(null);
+      selectionStrokeRef.current = null;
+      quickSelectionMoveRef.current = null;
+      setLassoSites([]);
+    } else if (activeTool === 'lasso') {
+      updateSelectionLivePreview(null);
+      selectionStrokeRef.current = null;
+    }
     if (activeTool !== 'move') {
       setMoveDisambigMenu(null);
     }
-  }, [activeTool, lassoMode]);
+  }, [activeTool, lassoMode, updateSelectionLivePreview]);
 
   const commitPolygonPointsToSelection = useCallback(
-    (pts: { x: number; y: number }[], shape: 'polygon' | 'lasso') => {
+    (
+      pts: { x: number; y: number }[],
+      shape: 'polygon' | 'lasso',
+      opModeOverride?: SelectionBooleanMode
+    ) => {
       if (pts.length < 3) return;
-      let minX = width - 1,
-        maxX = 0,
-        minY = height - 1,
-        maxY = 0;
-      const mask: boolean[][] = Array.from({ length: height }, () => Array(width).fill(false));
-      for (let py = 0; py < height; py++) {
-        for (let px = 0; px < width; px++) {
-          let inside = false;
-          for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
-            const xi = pts[i].x,
-              yi = pts[i].y;
-            const xj = pts[j].x,
-              yj = pts[j].y;
-            const intersect =
-              (yi > py) !== (yj > py) && px < ((xj - xi) * (py - yi)) / (yj - yi || 1e-6) + xi;
-            if (intersect) inside = !inside;
-          }
-          if (inside) {
-            mask[py][px] = true;
-            if (px < minX) minX = px;
-            if (px > maxX) maxX = px;
-            if (py < minY) minY = py;
-            if (py > maxY) maxY = py;
-          }
-        }
-      }
-      for (const pt of pts) {
-        if (pt.x >= 0 && pt.x < width && pt.y >= 0 && pt.y < height) {
-          mask[pt.y][pt.x] = true;
-          if (pt.x < minX) minX = pt.x;
-          if (pt.x > maxX) maxX = pt.x;
-          if (pt.y < minY) minY = pt.y;
-          if (pt.y > maxY) maxY = pt.y;
-        }
-      }
-      setSelection({
-        active: true,
-        startX: Math.max(0, minX),
-        startY: Math.max(0, minY),
-        endX: Math.min(width - 1, maxX),
-        endY: Math.min(height - 1, maxY),
-        shape,
-        mask,
-      });
+      const mask = buildPolygonSelectionMask(pts, width, height);
+      const effOp = opModeOverride ?? lassoStrokeOpModeRef.current ?? selectionOptions.opMode;
+      const combined = combineSelectionMasks(selection, mask, width, height, effOp, shape);
+      setSelection(combined);
+      updateSelectionLivePreview(null);
     },
-    [width, height, setSelection]
+    [width, height, selection, selectionOptions.opMode, setSelection, updateSelectionLivePreview]
   );
 
-  // Keyboard listener for Spacebar pan, Ctrl temp Direct Select on Line, Ctrl+D / Escape / Enter / Delete
+  // Re-snap marquee live preview immediately if user presses/releases Shift or Alt mid-drag without moving pointer
+  useEffect(() => {
+    const st = selectionStrokeRef.current;
+    if (!st || !isDrawing || activeTool !== 'select') return;
+    const constrainRatio =
+      activeKeyMods.shift ||
+      (st.shape === 'ellipse' && selectionOptions.perfectCircle) ||
+      (st.shape === 'rect' && selectionOptions.fixedRatio);
+    const rw = st.shape === 'rect' && selectionOptions.fixedRatio ? Math.max(1, selectionOptions.ratioW) : 1;
+    const rh = st.shape === 'rect' && selectionOptions.fixedRatio ? Math.max(1, selectionOptions.ratioH) : 1;
+    const fromCenter =
+      activeKeyMods.alt &&
+      (!st.downAlt || st.altReleasedDuringDrag || !prevSelectionBeforeDragRef.current?.active);
+    const box = computeConstrainedMarqueeBox(st.startGrid, st.lastEndGrid, {
+      constrainRatio,
+      ratioW: rw,
+      ratioH: rh,
+      fromCenter,
+      width,
+      height,
+    });
+    const incomingMask = buildSelectionMaskFromShape(
+      box.startX,
+      box.startY,
+      box.endX,
+      box.endY,
+      width,
+      height,
+      st.shape,
+      st.shape === 'rect' && selectionOptions.roundedCorners,
+      selectionOptions.cornerRadius
+    );
+    updateSelectionLivePreview({
+      opMode: st.opMode,
+      shape: st.shape,
+      box,
+      incomingMask,
+      constrainRatio,
+      fromCenter,
+    });
+  }, [
+    activeKeyMods.shift,
+    activeKeyMods.alt,
+    activeTool,
+    isDrawing,
+    selectionOptions.perfectCircle,
+    selectionOptions.fixedRatio,
+    selectionOptions.ratioW,
+    selectionOptions.ratioH,
+    selectionOptions.roundedCorners,
+    selectionOptions.cornerRadius,
+    width,
+    height,
+    updateSelectionLivePreview,
+  ]);
+
+  // Keyboard listener for Spacebar pan, live selection modifiers, Ctrl temp Direct Select on Line, Ctrl+D / Escape / Enter / Delete
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const isInput = ['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement).tagName);
+      if (!isInput) {
+        setActiveKeyMods((prev) =>
+          prev.shift === e.shiftKey && prev.alt === e.altKey && prev.ctrl === (e.ctrlKey || e.metaKey)
+            ? prev
+            : { shift: e.shiftKey, alt: e.altKey, ctrl: e.ctrlKey || e.metaKey }
+        );
+      }
       if (e.code === 'Space' && !isInput) {
         e.preventDefault();
         setIsSpaceDown(true);
@@ -1689,6 +1767,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       if (!isInput && ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd')) {
         e.preventDefault();
         setSelection(null);
+        updateSelectionLivePreview(null);
       }
       if (!isInput && e.key === 'Escape') {
         if (moveDisambigMenu) {
@@ -1712,10 +1791,16 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           return;
         }
         setSelection(null);
+        updateSelectionLivePreview(null);
+        selectionStrokeRef.current = null;
+        quickSelectionMoveRef.current = null;
+        setIsDrawing(false);
+        setDragStartPoint(null);
         setLassoSites([]);
         setPolygonLassoPts([]);
         setMagneticLassoPts([]);
         setMagneticPreviewSeg([]);
+        magneticEdgeMapRef.current = null;
         setGradientDrag(null);
         setZoomRegionDrag(null);
         setSelectedHitboxId(null);
@@ -1734,7 +1819,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       }
       if (!isInput && e.key === 'Enter' && effTool === 'lasso' && polygonLassoPts.length >= 3) {
         e.preventDefault();
-        commitPolygonPointsToSelection(polygonLassoPts, 'polygon');
+        commitPolygonPointsToSelection(polygonLassoPts, 'polygon', lassoStrokeOpModeRef.current);
         setPolygonLassoPts([]);
         return;
       }
@@ -1746,7 +1831,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           const closing = traceMagneticLassoSegment(finalPts[finalPts.length - 1], finalPts[0], edgeMap);
           finalPts = [...finalPts, ...closing];
         }
-        commitPolygonPointsToSelection(finalPts, 'lasso');
+        commitPolygonPointsToSelection(finalPts, 'lasso', lassoStrokeOpModeRef.current);
         setMagneticLassoPts([]);
         setMagneticPreviewSeg([]);
         magneticEdgeMapRef.current = null;
@@ -1807,10 +1892,19 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       if (e.key === 'Control' || e.key === 'Meta') {
         setIsCtrlTempDirectSelect(false);
       }
+      if (e.key === 'Alt' && selectionStrokeRef.current) {
+        selectionStrokeRef.current.altReleasedDuringDrag = true;
+      }
+      setActiveKeyMods((prev) =>
+        prev.shift === e.shiftKey && prev.alt === e.altKey && prev.ctrl === (e.ctrlKey || e.metaKey)
+          ? prev
+          : { shift: e.shiftKey, alt: e.altKey, ctrl: e.ctrlKey || e.metaKey }
+      );
     };
     const handleBlur = () => {
       setIsSpaceDown(false);
       setIsCtrlTempDirectSelect(false);
+      setActiveKeyMods({ shift: false, alt: false, ctrl: false });
     };
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
@@ -2973,8 +3067,152 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       ctx.fillText(`PIVOT (${globalPivot.x},${globalPivot.y})${isDraggingPivot ? ' [MOVIENDO]' : ''}`, px + 8, py - 4);
     }
 
-    // 10. Customizable Selection Visualization (Marching Ants / Fill / Both / Outline)
-    if (selection && selection.active) {
+    // 10. Customizable Selection Visualization + Real-Time Multi-Zone Boolean Preview
+    const activePreview = selectionLivePreviewRef.current;
+    if (activePreview) {
+      const hasPrev = Boolean(selection && selection.active);
+      const origMask = hasPrev ? selectionToBooleanMask(selection, width, height) : null;
+      const inMask = activePreview.incomingMask;
+      const op = activePreview.opMode;
+      const vx0 = Math.max(0, virtualRect.minWorldX);
+      const vx1 = Math.min(width - 1, virtualRect.maxWorldX);
+      const vy0 = Math.max(0, virtualRect.minWorldY);
+      const vy1 = Math.min(height - 1, virtualRect.maxWorldY);
+
+      const isOrig = (px: number, py: number) =>
+        px >= 0 && px < width && py >= 0 && py < height && Boolean(origMask?.[py]?.[px]);
+      const isIn = (px: number, py: number) =>
+        px >= 0 && px < width && py >= 0 && py < height && Boolean(inMask[py]?.[px]);
+
+      ctx.save();
+      for (let py = vy0; py <= vy1; py++) {
+        for (let px = vx0; px <= vx1; px++) {
+          const a = isOrig(px, py);
+          const b = isIn(px, py);
+          if (!a && !b) continue;
+          if (op === 'replace') {
+            if (b) {
+              ctx.fillStyle = 'rgba(56, 189, 248, 0.24)';
+              ctx.fillRect(px * zoom, py * zoom, zoom, zoom);
+            } else if (a) {
+              ctx.fillStyle = 'rgba(148, 163, 184, 0.14)';
+              ctx.fillRect(px * zoom, py * zoom, zoom, zoom);
+            }
+          } else if (op === 'add') {
+            if (a && !b) {
+              ctx.fillStyle = 'rgba(56, 189, 248, 0.22)';
+              ctx.fillRect(px * zoom, py * zoom, zoom, zoom);
+            } else if (a && b) {
+              ctx.fillStyle = 'rgba(34, 211, 238, 0.28)';
+              ctx.fillRect(px * zoom, py * zoom, zoom, zoom);
+            } else if (b) {
+              ctx.fillStyle = 'rgba(16, 185, 129, 0.36)';
+              ctx.fillRect(px * zoom, py * zoom, zoom, zoom);
+            }
+          } else if (op === 'subtract') {
+            if (a && b) {
+              ctx.fillStyle = 'rgba(244, 63, 94, 0.44)';
+              ctx.fillRect(px * zoom, py * zoom, zoom, zoom);
+            } else if (a && !b) {
+              ctx.fillStyle = 'rgba(56, 189, 248, 0.24)';
+              ctx.fillRect(px * zoom, py * zoom, zoom, zoom);
+            } else if (b) {
+              ctx.fillStyle = 'rgba(244, 63, 94, 0.12)';
+              ctx.fillRect(px * zoom, py * zoom, zoom, zoom);
+            }
+          } else if (op === 'intersect') {
+            if (hasPrev) {
+              if (a && b) {
+                ctx.fillStyle = 'rgba(168, 85, 247, 0.42)';
+                ctx.fillRect(px * zoom, py * zoom, zoom, zoom);
+              } else if (a) {
+                ctx.fillStyle = 'rgba(148, 163, 184, 0.15)';
+                ctx.fillRect(px * zoom, py * zoom, zoom, zoom);
+              } else if (b) {
+                ctx.fillStyle = 'rgba(192, 132, 252, 0.12)';
+                ctx.fillRect(px * zoom, py * zoom, zoom, zoom);
+              }
+            } else if (b) {
+              ctx.fillStyle = 'rgba(168, 85, 247, 0.34)';
+              ctx.fillRect(px * zoom, py * zoom, zoom, zoom);
+            }
+          }
+        }
+      }
+
+      const traceMaskEdge = (predicate: (px: number, py: number) => boolean) => {
+        ctx.beginPath();
+        for (let py = vy0; py <= vy1; py++) {
+          for (let px = vx0; px <= vx1; px++) {
+            if (!predicate(px, py)) continue;
+            const sx = px * zoom;
+            const sy = py * zoom;
+            if (!predicate(px, py - 1)) { ctx.moveTo(sx, sy); ctx.lineTo(sx + zoom, sy); }
+            if (!predicate(px, py + 1)) { ctx.moveTo(sx, sy + zoom); ctx.lineTo(sx + zoom, sy + zoom); }
+            if (!predicate(px - 1, py)) { ctx.moveTo(sx, sy); ctx.lineTo(sx, sy + zoom); }
+            if (!predicate(px + 1, py)) { ctx.moveTo(sx + zoom, sy); ctx.lineTo(sx + zoom, sy + zoom); }
+          }
+        }
+      };
+
+      // Original selection crisp outline (when present)
+      if (hasPrev) {
+        traceMaskEdge(isOrig);
+        ctx.lineWidth = op === 'replace' ? 1 : 1.3;
+        ctx.strokeStyle = op === 'replace' ? 'rgba(148, 163, 184, 0.55)' : 'rgba(56, 189, 248, 0.9)';
+        ctx.setLineDash(op === 'replace' ? [3, 3] : []);
+        ctx.stroke();
+      }
+
+      // Incoming / Added / Subtracted / Intersected live outline
+      const highlightColor =
+        op === 'add'
+          ? '#34d399'
+          : op === 'subtract'
+          ? '#fb7185'
+          : op === 'intersect'
+          ? '#c084fc'
+          : '#38bdf8';
+
+      traceMaskEdge(isIn);
+      ctx.lineWidth = 1.6;
+      ctx.strokeStyle = highlightColor;
+      ctx.setLineDash([]);
+      ctx.stroke();
+
+      ctx.strokeStyle = '#090d16';
+      ctx.setLineDash([4, 4]);
+      ctx.lineDashOffset = -marchingAntsOffsetRef.current;
+      ctx.stroke();
+
+      // Highlight final resulting boolean zone explicitly in subtract/intersect
+      if (hasPrev && (op === 'subtract' || op === 'intersect')) {
+        const resultZone = (px: number, py: number) =>
+          op === 'intersect' ? isOrig(px, py) && isIn(px, py) : isOrig(px, py) && isIn(px, py);
+        traceMaskEdge(resultZone);
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = op === 'intersect' ? '#fbbf24' : '#f43f5e';
+        ctx.setLineDash([]);
+        ctx.stroke();
+      }
+
+      // Symmetrical center crosshair cue when Alt center-mode is active
+      if (activePreview.fromCenter && selectionStrokeRef.current) {
+        const scx = (selectionStrokeRef.current.startGrid.x + 0.5) * zoom;
+        const scy = (selectionStrokeRef.current.startGrid.y + 0.5) * zoom;
+        ctx.setLineDash([]);
+        ctx.strokeStyle = '#fbbf24';
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        ctx.moveTo(scx - 6, scy);
+        ctx.lineTo(scx + 6, scy);
+        ctx.moveTo(scx, scy - 6);
+        ctx.lineTo(scx, scy + 6);
+        ctx.stroke();
+      }
+
+      ctx.restore();
+    } else if (selection && selection.active) {
       const minX = Math.max(0, Math.min(selection.startX, selection.endX));
       const maxX = Math.min(width - 1, Math.max(selection.startX, selection.endX));
       const minY = Math.max(0, Math.min(selection.startY, selection.endY));
@@ -4120,6 +4358,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     vectorDraftSession,
     showPixelPerfectVectorPreview,
     selectionDisplayConfig,
+    selectionLivePreview,
     magneticLassoPts,
     magneticPreviewSeg,
     gradientDrag,
@@ -4575,7 +4814,16 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
-    if (activeTool === 'hand' || isSpaceDown || e.button === 1 || e.button === 2 || e.altKey) {
+    const isSelectionToolActive =
+      ['select', 'lasso', 'magic_wand'].includes(activeTool) && !isDirectSelectActive;
+
+    if (
+      activeTool === 'hand' ||
+      isSpaceDown ||
+      e.button === 1 ||
+      e.button === 2 ||
+      (e.altKey && !isSelectionToolActive)
+    ) {
       setIsPanning(true);
       setPanStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
       return;
@@ -5005,18 +5253,42 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
-    // Deselect if clicking outside existing selection with selection tools (marquee, lasso, magic wand)
-    if (selection && selection.active && ['select', 'lasso', 'magic_wand'].includes(activeTool)) {
-      const minX = Math.min(selection.startX, selection.endX);
-      const maxX = Math.max(selection.startX, selection.endX);
-      const minY = Math.min(selection.startY, selection.endY);
-      const maxY = Math.max(selection.startY, selection.endY);
-      const isInside = coords.x >= minX && coords.x <= maxX && coords.y >= minY && coords.y <= maxY;
-      if (!isInside) {
-        setSelection(null);
-        setLassoSites([]);
+    // Quick Selection Move Mode (Ctrl + Drag over existing selection moves ONLY selection bounds/mask, zero pixel edits)
+    if (
+      isSelectionToolActive &&
+      (e.ctrlKey || e.metaKey) &&
+      selection &&
+      selection.active &&
+      isPointInsideSelection(selection, coords.x, coords.y)
+    ) {
+      const cloned = cloneSelectionArea(selection);
+      if (cloned) {
+        quickSelectionMoveRef.current = {
+          startGrid: coords,
+          origSelection: cloned,
+        };
         return;
       }
+    }
+
+    // Outside click preservation: boolean modifiers/modes and ongoing polygon/magnetic paths must NOT clear existing selection!
+    // In 'replace' mode for 'select', allow immediate drag to replace OR single-click on release to deselect.
+    if (
+      selection &&
+      selection.active &&
+      isSelectionToolActive &&
+      !e.shiftKey &&
+      !e.altKey &&
+      !e.ctrlKey &&
+      !e.metaKey &&
+      selectionOptions.opMode === 'replace' &&
+      activeTool === 'lasso' &&
+      polygonLassoPts.length === 0 &&
+      magneticLassoPts.length === 0 &&
+      !isPointInsideSelection(selection, coords.x, coords.y)
+    ) {
+      // Allow starting a brand-new lasso directly outside without requiring an extra dead click
+      prevSelectionBeforeDragRef.current = cloneSelectionArea(selection);
     }
 
     // Shift + Click to position Root Pivot
@@ -5477,11 +5749,14 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
-    // LASSO TOOL (Freehand, Polygonal OR Magnetic Contour Snapping)
+    // LASSO TOOL (Freehand, Polygonal OR Magnetic Contour Snapping — unified boolean modes & live preview)
     if (effTool === 'lasso') {
+      const resolvedLassoOp = resolveSelectionOpMode(e.shiftKey, e.altKey, selectionOptions.opMode);
+
       if (lassoMode === 'magnetic') {
         let edgeMap = magneticEdgeMapRef.current;
         if (!edgeMap || magneticLassoPts.length === 0) {
+          lassoStrokeOpModeRef.current = resolvedLassoOp;
           edgeMap = computeCanvasEdgeMap(
             compositeFrame(currentFrame, width, height, currentFrameIndex, false, layerGroups)
           );
@@ -5505,7 +5780,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             edgeMap
           );
           const closedPts = [...magneticLassoPts, ...closingSeg];
-          commitPolygonPointsToSelection(closedPts, 'lasso');
+          commitPolygonPointsToSelection(closedPts, 'lasso', lassoStrokeOpModeRef.current);
           setMagneticLassoPts([]);
           setMagneticPreviewSeg([]);
           magneticEdgeMapRef.current = null;
@@ -5514,22 +5789,52 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
         const lastAnchor = magneticLassoPts[magneticLassoPts.length - 1];
         const seg = traceMagneticLassoSegment(lastAnchor, snapPt, edgeMap);
-        setMagneticLassoPts((prev) => [...prev, ...seg]);
+        const nextMagPts = [...magneticLassoPts, ...seg];
+        setMagneticLassoPts(nextMagPts);
         setMagneticPreviewSeg([]);
+        if (nextMagPts.length >= 3) {
+          updateSelectionLivePreview({
+            opMode: lassoStrokeOpModeRef.current,
+            shape: 'lasso',
+            incomingMask: buildPolygonSelectionMask(nextMagPts, width, height),
+          });
+        }
         return;
       }
 
       if (lassoMode === 'polygon') {
-        const nextPts = [...polygonLassoPts, coords];
-        if (e.detail >= 2 && nextPts.length >= 3) {
-          commitPolygonPointsToSelection(nextPts, 'polygon');
+        if (polygonLassoPts.length === 0) {
+          lassoStrokeOpModeRef.current = resolvedLassoOp;
+        }
+        const firstPoly = polygonLassoPts[0];
+        const closeToStart =
+          firstPoly &&
+          polygonLassoPts.length >= 3 &&
+          Math.hypot(coords.x - firstPoly.x, coords.y - firstPoly.y) <= 2.2;
+        if (closeToStart || (e.detail >= 2 && polygonLassoPts.length >= 3)) {
+          commitPolygonPointsToSelection(polygonLassoPts, 'polygon', lassoStrokeOpModeRef.current);
           setPolygonLassoPts([]);
-        } else {
-          setPolygonLassoPts(nextPts);
+          return;
+        }
+        const nextPts = [...polygonLassoPts, coords];
+        setPolygonLassoPts(nextPts);
+        if (nextPts.length >= 3) {
+          updateSelectionLivePreview({
+            opMode: lassoStrokeOpModeRef.current,
+            shape: 'polygon',
+            incomingMask: buildPolygonSelectionMask(nextPts, width, height),
+          });
         }
         return;
       }
+
+      lassoStrokeOpModeRef.current = resolvedLassoOp;
       setLassoSites([coords]);
+      updateSelectionLivePreview({
+        opMode: resolvedLassoOp,
+        shape: 'lasso',
+        incomingMask: buildPolygonSelectionMask([coords], width, height),
+      });
       setIsDrawing(true);
       return;
     }
@@ -5728,18 +6033,18 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
-    // Magic Wand color selection mask (respects Tolerance, Contiguous, All Layers, Continuous Selection & Smooth)
+    // Magic Wand color selection mask (unified boolean modifiers + Tolerance, Contiguous, All Layers & Smooth)
     if (activeTool === 'magic_wand') {
       isPaintingMaskRef.current = false;
       const sampleGrid = magicWandOptions.allLayers
         ? compositeFrame(currentFrame, width, height, currentFrameIndex, false, layerGroups)
         : currentLayer.pixels;
       const wandMask = advancedMagicWandMask(coords.x, coords.y, sampleGrid, magicWandOptions);
-      const opMode = e.altKey
-        ? 'subtract'
-        : e.shiftKey || magicWandOptions.continuousSelection
-        ? 'add'
-        : 'replace';
+      const fallbackOp =
+        selectionOptions.opMode === 'replace' && magicWandOptions.continuousSelection
+          ? 'add'
+          : selectionOptions.opMode;
+      const opMode = resolveSelectionOpMode(e.shiftKey, e.altKey, fallbackOp);
       const combined = combineSelectionMasks(
         selection,
         wandMask,
@@ -5776,6 +6081,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       isPaintingMaskRef.current = false;
 
       if (selectionSubTool === 'objects') {
+        const effObjOp = resolveSelectionOpMode(e.shiftKey, e.altKey, selectionOptions.opMode);
         const hitboxes = currentFrame.hitboxes || [];
         const hitHb = showHitboxes
           ? [...hitboxes]
@@ -5784,14 +6090,18 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           : null;
         if (hitHb) {
           setSelectedHitboxId(hitHb.id);
-          setSelection({
-            active: true,
-            startX: Math.max(0, hitHb.x),
-            startY: Math.max(0, hitHb.y),
-            endX: Math.min(width - 1, hitHb.x + hitHb.w - 1),
-            endY: Math.min(height - 1, hitHb.y + hitHb.h - 1),
-            shape: 'rect',
-          });
+          const hbMask = buildSelectionMaskFromShape(
+            Math.max(0, hitHb.x),
+            Math.max(0, hitHb.y),
+            Math.min(width - 1, hitHb.x + hitHb.w - 1),
+            Math.min(height - 1, hitHb.y + hitHb.h - 1),
+            width,
+            height,
+            'rect',
+            false,
+            0
+          );
+          setSelection(combineSelectionMasks(selection, hbMask, width, height, effObjOp, 'rect'));
           setIsDrawing(false);
           return;
         }
@@ -5802,7 +6112,6 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           const mask: boolean[][] = Array.from({ length: height }, () => Array(width).fill(false));
           const visited = new Uint8Array(width * height);
           const stack: [number, number][] = [[coords.x, coords.y]];
-          let minX = coords.x, maxX = coords.x, minY = coords.y, maxY = coords.y;
           while (stack.length > 0) {
             const [fx, fy] = stack.pop()!;
             const idx = fy * width + fx;
@@ -5810,10 +6119,6 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             visited[idx] = 1;
             if (!src[fy]?.[fx]) continue;
             mask[fy][fx] = true;
-            if (fx < minX) minX = fx;
-            if (fx > maxX) maxX = fx;
-            if (fy < minY) minY = fy;
-            if (fy > maxY) maxY = fy;
             for (const [nx, ny] of [
               [fx + 1, fy],
               [fx - 1, fy],
@@ -5829,21 +6134,14 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
               }
             }
           }
-          setSelection({
-            active: true,
-            startX: minX,
-            startY: minY,
-            endX: maxX,
-            endY: maxY,
-            shape: 'magic_wand',
-            mask,
-          });
+          setSelection(combineSelectionMasks(selection, mask, width, height, effObjOp, 'magic_wand'));
         }
         setIsDrawing(false);
         return;
       }
 
       if (selectionSubTool === 'layers') {
+        const effLayerOp = resolveSelectionOpMode(e.shiftKey, e.altKey, selectionOptions.opMode);
         // Find top-most visible layer with pixel at click, select that layer and mask its silhouette
         for (let li = currentFrame.layers.length - 1; li >= 0; li--) {
           const lyr = currentFrame.layers[li];
@@ -5851,30 +6149,17 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           if (lyr.pixels[coords.y]?.[coords.x]) {
             onSelectLayerIndex?.(li);
             const mask: boolean[][] = Array.from({ length: height }, () => Array(width).fill(false));
-            let minX = width - 1, maxX = 0, minY = height - 1, maxY = 0;
             let count = 0;
             for (let py = 0; py < height; py++) {
               for (let px = 0; px < width; px++) {
                 if (lyr.pixels[py]?.[px]) {
                   mask[py][px] = true;
                   count++;
-                  if (px < minX) minX = px;
-                  if (px > maxX) maxX = px;
-                  if (py < minY) minY = py;
-                  if (py > maxY) maxY = py;
                 }
               }
             }
             if (count > 0) {
-              setSelection({
-                active: true,
-                startX: minX,
-                startY: minY,
-                endX: maxX,
-                endY: maxY,
-                shape: 'magic_wand',
-                mask,
-              });
+              setSelection(combineSelectionMasks(selection, mask, width, height, effLayerOp, 'magic_wand'));
             }
             break;
           }
@@ -5943,9 +6228,21 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         return;
       }
 
-      // Default: 'general' Rectangular or Elliptical marquee with boolean mode, fixed ratio & rounded corners
-      prevSelectionBeforeDragRef.current = selection ? { ...selection } : null;
-      const effOp = e.altKey ? 'subtract' : e.shiftKey ? 'add' : selectionOptions.opMode;
+      // Default: 'general' Rectangular or Elliptical marquee with unified boolean modifiers, Shift 1:1, Alt center & live preview
+      const prevClone = cloneSelectionArea(selection);
+      prevSelectionBeforeDragRef.current = prevClone;
+      const effOp = resolveSelectionOpMode(e.shiftKey, e.altKey, selectionOptions.opMode);
+      selectionStrokeRef.current = {
+        opMode: effOp,
+        downShift: e.shiftKey,
+        downAlt: e.altKey,
+        altReleasedDuringDrag: false,
+        startGrid: coords,
+        lastEndGrid: coords,
+        startClient: { x: e.clientX, y: e.clientY },
+        didDrag: false,
+        shape: marqueeShape,
+      };
       const initMask = buildSelectionMaskFromShape(
         coords.x,
         coords.y,
@@ -5957,27 +6254,17 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         marqueeShape === 'rect' && selectionOptions.roundedCorners,
         selectionOptions.cornerRadius
       );
-      if (effOp === 'replace' && marqueeShape === 'rect' && !selectionOptions.roundedCorners) {
-        setSelection({
-          active: true,
-          startX: coords.x,
-          startY: coords.y,
-          endX: coords.x,
-          endY: coords.y,
-          shape: 'rect',
-        });
-      } else {
-        setSelection(
-          combineSelectionMasks(
-            prevSelectionBeforeDragRef.current,
-            initMask,
-            width,
-            height,
-            effOp,
-            marqueeShape
-          )
-        );
-      }
+      updateSelectionLivePreview({
+        opMode: effOp,
+        shape: marqueeShape,
+        box: { startX: coords.x, startY: coords.y, endX: coords.x, endY: coords.y },
+        incomingMask: initMask,
+        constrainRatio:
+          e.shiftKey ||
+          (marqueeShape === 'ellipse' && selectionOptions.perfectCircle) ||
+          (marqueeShape === 'rect' && selectionOptions.fixedRatio),
+        fromCenter: Boolean(e.altKey && !prevClone?.active),
+      });
       return;
     }
 
@@ -6398,7 +6685,39 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       }
     }
 
-    // Magnetic Lasso live contour hugging while moving cursor between anchors
+    setActiveKeyMods((prev) =>
+      prev.shift === e.shiftKey && prev.alt === e.altKey && prev.ctrl === (e.ctrlKey || e.metaKey)
+        ? prev
+        : { shift: e.shiftKey, alt: e.altKey, ctrl: e.ctrlKey || e.metaKey }
+    );
+
+    // Quick Selection Move Mode (Ctrl + Drag moves ONLY selection bounds/mask cleanly)
+    if (quickSelectionMoveRef.current && unclampedCoords) {
+      const qm = quickSelectionMoveRef.current;
+      let dx = unclampedCoords.x - qm.startGrid.x;
+      let dy = unclampedCoords.y - qm.startGrid.y;
+      if (e.shiftKey) {
+        if (Math.abs(dx) >= Math.abs(dy)) dy = 0;
+        else dx = 0;
+      }
+      setSelection(translateSelectionArea(qm.origSelection, dx, dy, width, height));
+      renderCanvas();
+      return;
+    }
+
+    // Polygonal Lasso live multi-zone boolean preview while moving cursor between vertices
+    if (effTool === 'lasso' && lassoMode === 'polygon' && polygonLassoPts.length >= 2 && coords) {
+      const previewMask = buildPolygonSelectionMask([...polygonLassoPts, coords], width, height);
+      updateSelectionLivePreview({
+        opMode: lassoStrokeOpModeRef.current,
+        shape: 'polygon',
+        incomingMask: previewMask,
+      });
+      renderCanvas();
+      return;
+    }
+
+    // Magnetic Lasso live contour hugging + live boolean preview while moving cursor between anchors
     if (
       effTool === 'lasso' &&
       lassoMode === 'magnetic' &&
@@ -6411,11 +6730,21 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       const lastAnchor = magneticLassoPts[magneticLassoPts.length - 1];
       const seg = traceMagneticLassoSegment(lastAnchor, { x: snapped.x, y: snapped.y }, edgeMap);
       const dist = Math.hypot(snapped.x - lastAnchor.x, snapped.y - lastAnchor.y);
+      let nextPts = magneticLassoPts;
       if (dist >= 7 && snapped.edgeScore >= 0.45 && seg.length > 0) {
-        setMagneticLassoPts((prev) => [...prev, ...seg]);
+        nextPts = [...magneticLassoPts, ...seg];
+        setMagneticLassoPts(nextPts);
         setMagneticPreviewSeg([]);
       } else {
         setMagneticPreviewSeg(seg);
+        nextPts = [...magneticLassoPts, ...seg];
+      }
+      if (nextPts.length >= 3) {
+        updateSelectionLivePreview({
+          opMode: lassoStrokeOpModeRef.current,
+          shape: 'lasso',
+          incomingMask: buildPolygonSelectionMask(nextPts, width, height),
+        });
       }
       renderCanvas();
       return;
@@ -7348,11 +7677,17 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
-    // 4. Freehand Lasso Tool
+    // 4. Freehand Lasso Tool (with live multi-zone boolean preview)
     if (effTool === 'lasso' && isDrawing && coords) {
       const last = lassoSites[lassoSites.length - 1];
       if (!last || last.x !== coords.x || last.y !== coords.y) {
-        setLassoSites((prev) => [...prev, coords]);
+        const nextSites = [...lassoSites, coords];
+        setLassoSites(nextSites);
+        updateSelectionLivePreview({
+          opMode: lassoStrokeOpModeRef.current,
+          shape: 'lasso',
+          incomingMask: buildPolygonSelectionMask(nextSites, width, height),
+        });
         renderCanvas();
       }
       return;
@@ -7360,56 +7695,60 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
     if (!isDrawing || !coords) return;
 
-    if (effTool === 'select' && dragStartPoint) {
+    if (effTool === 'select' && dragStartPoint && selectionStrokeRef.current) {
+      const st = selectionStrokeRef.current;
       const snappedEnd = applyGuideSnap(coords.x, coords.y, e.altKey);
-      let endX = Math.max(0, Math.min(width - 1, snappedEnd.x));
-      let endY = Math.max(0, Math.min(height - 1, snappedEnd.y));
+      const rawEnd = {
+        x: Math.max(0, Math.min(width - 1, snappedEnd.x)),
+        y: Math.max(0, Math.min(height - 1, snappedEnd.y)),
+      };
+      st.lastEndGrid = rawEnd;
       if (
-        e.shiftKey ||
-        (marqueeShape === 'ellipse' && selectionOptions.perfectCircle) ||
-        (marqueeShape === 'rect' && selectionOptions.fixedRatio)
+        rawEnd.x !== st.startGrid.x ||
+        rawEnd.y !== st.startGrid.y ||
+        Math.hypot(e.clientX - st.startClient.x, e.clientY - st.startClient.y) >= 3
       ) {
-        const rw = marqueeShape === 'rect' && selectionOptions.fixedRatio ? Math.max(1, selectionOptions.ratioW) : 1;
-        const rh = marqueeShape === 'rect' && selectionOptions.fixedRatio ? Math.max(1, selectionOptions.ratioH) : 1;
-        const dxAbs = Math.abs(endX - dragStartPoint.x);
-        const dyAbs = Math.abs(endY - dragStartPoint.y);
-        const unit = Math.max(dxAbs / rw, dyAbs / rh);
-        endX = Math.max(0, Math.min(width - 1, Math.round(dragStartPoint.x + (endX >= dragStartPoint.x ? unit * rw : -unit * rw))));
-        endY = Math.max(0, Math.min(height - 1, Math.round(dragStartPoint.y + (endY >= dragStartPoint.y ? unit * rh : -unit * rh))));
+        st.didDrag = true;
       }
-      const effOp = e.altKey ? 'subtract' : e.shiftKey ? 'add' : selectionOptions.opMode;
-      const incomingMask = buildSelectionMaskFromShape(
-        dragStartPoint.x,
-        dragStartPoint.y,
-        endX,
-        endY,
+
+      const constrainRatio =
+        e.shiftKey ||
+        (st.shape === 'ellipse' && selectionOptions.perfectCircle) ||
+        (st.shape === 'rect' && selectionOptions.fixedRatio);
+      const rw = st.shape === 'rect' && selectionOptions.fixedRatio ? Math.max(1, selectionOptions.ratioW) : 1;
+      const rh = st.shape === 'rect' && selectionOptions.fixedRatio ? Math.max(1, selectionOptions.ratioH) : 1;
+      const fromCenter =
+        e.altKey && (!st.downAlt || st.altReleasedDuringDrag || !prevSelectionBeforeDragRef.current?.active);
+
+      const box = computeConstrainedMarqueeBox(st.startGrid, rawEnd, {
+        constrainRatio,
+        ratioW: rw,
+        ratioH: rh,
+        fromCenter,
         width,
         height,
-        marqueeShape,
-        marqueeShape === 'rect' && selectionOptions.roundedCorners,
+      });
+
+      const incomingMask = buildSelectionMaskFromShape(
+        box.startX,
+        box.startY,
+        box.endX,
+        box.endY,
+        width,
+        height,
+        st.shape,
+        st.shape === 'rect' && selectionOptions.roundedCorners,
         selectionOptions.cornerRadius
       );
-      if (effOp === 'replace' && marqueeShape === 'rect' && !selectionOptions.roundedCorners) {
-        setSelection({
-          active: true,
-          startX: dragStartPoint.x,
-          startY: dragStartPoint.y,
-          endX,
-          endY,
-          shape: 'rect',
-        });
-      } else {
-        setSelection(
-          combineSelectionMasks(
-            prevSelectionBeforeDragRef.current,
-            incomingMask,
-            width,
-            height,
-            effOp,
-            marqueeShape
-          )
-        );
-      }
+
+      updateSelectionLivePreview({
+        opMode: st.opMode,
+        shape: st.shape,
+        box,
+        incomingMask,
+        constrainRatio,
+        fromCenter,
+      });
       renderCanvas();
       return;
     }
@@ -7940,49 +8279,73 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
-    // Finalize Freehand Lasso with full pixel polygon mask
+    // Release Quick Selection Move Mode (Ctrl + Drag)
+    if (quickSelectionMoveRef.current) {
+      quickSelectionMoveRef.current = null;
+      return;
+    }
+
+    // Finalize Marquee Selection (Rect / Ellipse) from live preview
+    if (effTool === 'select' && selectionStrokeRef.current) {
+      const st = selectionStrokeRef.current;
+      const preview = selectionLivePreviewRef.current;
+      selectionStrokeRef.current = null;
+      updateSelectionLivePreview(null);
+      setIsDrawing(false);
+      setDragStartPoint(null);
+
+      if (!st.didDrag && st.opMode === 'replace' && prevSelectionBeforeDragRef.current?.active) {
+        setSelection(null);
+        prevSelectionBeforeDragRef.current = null;
+        return;
+      }
+
+      if (preview) {
+        if (
+          st.opMode === 'replace' &&
+          st.shape === 'rect' &&
+          !selectionOptions.roundedCorners &&
+          preview.box
+        ) {
+          setSelection({
+            active: true,
+            startX: Math.min(preview.box.startX, preview.box.endX),
+            startY: Math.min(preview.box.startY, preview.box.endY),
+            endX: Math.max(preview.box.startX, preview.box.endX),
+            endY: Math.max(preview.box.startY, preview.box.endY),
+            shape: 'rect',
+          });
+        } else {
+          setSelection(
+            combineSelectionMasks(
+              prevSelectionBeforeDragRef.current,
+              preview.incomingMask,
+              width,
+              height,
+              st.opMode,
+              st.shape
+            )
+          );
+        }
+      }
+      prevSelectionBeforeDragRef.current = null;
+      return;
+    }
+
+    // Finalize Freehand Lasso with full pixel polygon mask & unified boolean mode
     if (effTool === 'lasso' && lassoMode === 'free' && lassoSites.length >= 2) {
       setIsDrawing(false);
-      let minX = width - 1, maxX = 0, minY = height - 1, maxY = 0;
-      const mask: boolean[][] = Array.from({ length: height }, () => Array(width).fill(false));
-      if (lassoSites.length >= 3) {
-        for (let py = 0; py < height; py++) {
-          for (let px = 0; px < width; px++) {
-            let inside = false;
-            for (let i = 0, j = lassoSites.length - 1; i < lassoSites.length; j = i++) {
-              const xi = lassoSites[i].x, yi = lassoSites[i].y;
-              const xj = lassoSites[j].x, yj = lassoSites[j].y;
-              const intersect = (yi > py) !== (yj > py) && px < ((xj - xi) * (py - yi)) / ((yj - yi) || 1e-6) + xi;
-              if (intersect) inside = !inside;
-            }
-            if (inside) {
-              mask[py][px] = true;
-              if (px < minX) minX = px;
-              if (px > maxX) maxX = px;
-              if (py < minY) minY = py;
-              if (py > maxY) maxY = py;
-            }
-          }
-        }
-      }
-      for (const pt of lassoSites) {
-        if (pt.x >= 0 && pt.x < width && pt.y >= 0 && pt.y < height) {
-          mask[pt.y][pt.x] = true;
-          if (pt.x < minX) minX = pt.x;
-          if (pt.x > maxX) maxX = pt.x;
-          if (pt.y < minY) minY = pt.y;
-          if (pt.y > maxY) maxY = pt.y;
-        }
-      }
+      const mask = buildPolygonSelectionMask(lassoSites, width, height);
       const combined = combineSelectionMasks(
         selection,
         mask,
         width,
         height,
-        selectionOptions.opMode,
+        lassoStrokeOpModeRef.current,
         'lasso'
       );
       setSelection(combined);
+      updateSelectionLivePreview(null);
       setLassoSites([]);
       return;
     }
@@ -8147,6 +8510,16 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     transformSession && (transformHoverRotCorner || transformDragRef.current?.kind === 'rotate')
   );
 
+  const isQuickMoveHover = Boolean(
+    ['select', 'lasso', 'magic_wand'].includes(activeTool) &&
+      !isDirectSelectActive &&
+      (quickSelectionMoveRef.current ||
+        (activeKeyMods.ctrl &&
+          selection?.active &&
+          cursorPos &&
+          isPointInsideSelection(selection, cursorPos.x, cursorPos.y)))
+  );
+
   const cursorClass = isPanning
     ? 'cursor-grabbing'
     : isSpaceDown || activeTool === 'hand'
@@ -8157,6 +8530,8 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       : 'cursor-zoom-in'
     : isDirectSelectActive
     ? 'cursor-default'
+    : isQuickMoveHover
+    ? 'cursor-move'
     : activeTool === 'move'
     ? hoveredPivot || hoveredHitboxId || isDraggingPivot || draggingHitboxId
       ? 'cursor-move'
@@ -8240,10 +8615,19 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         }
       }}
       onPointerDown={(e) => {
-        // If clicking on container background outside the canvas, clear active selection & guide selection
+        // If clicking on container background outside the canvas, clear active selection only in replace mode without modifiers
         if (e.target === containerRef.current) {
-          if (selection) {
+          const keepExistingSelection =
+            e.shiftKey ||
+            e.altKey ||
+            e.ctrlKey ||
+            e.metaKey ||
+            selectionOptions.opMode !== 'replace' ||
+            polygonLassoPts.length > 0 ||
+            magneticLassoPts.length > 0;
+          if (selection && !keepExistingSelection) {
             setSelection(null);
+            updateSelectionLivePreview(null);
             setLassoSites([]);
           }
           if (selectedGuideId) {
@@ -8253,6 +8637,11 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       }}
       onPointerMove={(e) => {
         setCursorClientPos({ x: e.clientX, y: e.clientY });
+        setActiveKeyMods((prev) =>
+          prev.shift === e.shiftKey && prev.alt === e.altKey && prev.ctrl === (e.ctrlKey || e.metaKey)
+            ? prev
+            : { shift: e.shiftKey, alt: e.altKey, ctrl: e.ctrlKey || e.metaKey }
+        );
       }}
       onPointerLeave={() => {
         setCursorClientPos(null);
@@ -9990,6 +10379,85 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           </div>
         );
       })()}
+
+      {/* Unified Selection Cursor Helper Badge ([ + Añadir ], [ - Restar ], [ ∩ Intersecar ], [ ✥ Mover selección ]) */}
+      {['select', 'lasso', 'magic_wand'].includes(activeTool) &&
+        !isDirectSelectActive &&
+        !isSpaceDown &&
+        !isPanning &&
+        cursorClientPos &&
+        containerRef.current &&
+        (() => {
+          const rect = containerRef.current.getBoundingClientRect();
+          const relX = cursorClientPos.x - rect.left;
+          const relY = cursorClientPos.y - rect.top;
+          if (relX < 0 || relY < 0 || relX > rect.width || relY > rect.height) return null;
+
+          const activeOp: SelectionBooleanMode = selectionLivePreview
+            ? selectionLivePreview.opMode
+            : resolveSelectionOpMode(
+                activeKeyMods.shift,
+                activeKeyMods.alt,
+                activeTool === 'magic_wand' &&
+                  selectionOptions.opMode === 'replace' &&
+                  magicWandOptions.continuousSelection
+                  ? 'add'
+                  : selectionOptions.opMode
+              );
+
+          const isQuickMove = isQuickMoveHover;
+          const box = selectionLivePreview?.box;
+          const dimText = box
+            ? `${Math.abs(box.endX - box.startX) + 1}×${Math.abs(box.endY - box.startY) + 1}px`
+            : null;
+          const constraintTags: string[] = [];
+          if (selectionLivePreview?.constrainRatio) constraintTags.push('1:1');
+          if (selectionLivePreview?.fromCenter) constraintTags.push('Centro');
+
+          const badgeInfo = isQuickMove
+            ? { glyph: '✥', label: 'Mover selección', border: '#38bdf8', color: '#7dd3fc' }
+            : activeOp === 'add'
+            ? { glyph: '+', label: 'Añadir', border: '#10b981', color: '#6ee7b7' }
+            : activeOp === 'subtract'
+            ? { glyph: '−', label: 'Restar', border: '#f43f5e', color: '#fda4af' }
+            : activeOp === 'intersect'
+            ? { glyph: '∩', label: 'Intersecar', border: '#a855f7', color: '#d8b4fe' }
+            : null;
+
+          if (!badgeInfo && !dimText && constraintTags.length === 0) return null;
+
+          const left = Math.min(rect.width - 165, Math.max(8, relX + 16));
+          const top = Math.min(rect.height - 36, Math.max(8, relY + 16));
+
+          return (
+            <div
+              className="pointer-events-none absolute z-40 px-2 py-0.5 rounded border shadow-xl backdrop-blur-md flex items-center gap-1.5 text-[10px] font-mono tabular-nums whitespace-nowrap"
+              style={{
+                left,
+                top,
+                backgroundColor: 'rgba(11, 15, 25, 0.92)',
+                borderColor: badgeInfo?.border || 'var(--studio-border-strong)',
+                color: badgeInfo?.color || 'var(--studio-text)',
+              }}
+            >
+              {badgeInfo && (
+                <span className="font-bold flex items-center gap-1">
+                  <span>{badgeInfo.glyph}</span>
+                  <span>{badgeInfo.label}</span>
+                </span>
+              )}
+              {dimText && (
+                <span className="text-slate-200 font-semibold">
+                  {badgeInfo ? '· ' : ''}
+                  {dimText}
+                </span>
+              )}
+              {constraintTags.length > 0 && (
+                <span className="text-amber-300">· {constraintTags.join(' · ')}</span>
+              )}
+            </div>
+          );
+        })()}
 
       {/* Smart Move Floating Disambiguation Menu (Overlapping Objects Portal) */}
       {moveDisambigMenu &&

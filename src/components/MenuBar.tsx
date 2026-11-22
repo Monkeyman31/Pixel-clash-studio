@@ -170,7 +170,7 @@ interface MenuBarProps {
   onToggleClipOutsideCanvas?: () => void;
   onOpenShortcuts: () => void;
   onOpenSpriteSheetTemplate?: () => void;
-  onOpenLayoutModal?: (tab?: 'layout' | 'style' | 'selections') => void;
+  onOpenLayoutModal?: (tab?: 'layout' | 'style' | 'selections' | 'minipreview') => void;
   onTriggerZoomAction?: (type: 'in' | 'out' | 'fit' | 'percent', percent?: number) => void;
   showOptionsBar?: boolean;
   onToggleOptionsBar?: () => void;
@@ -2864,14 +2864,24 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             )}
 
             {onOpenLayoutModal && (
-              <button
-                type="button"
-                onClick={() => handleItemClick(() => onOpenLayoutModal('layout'))}
-                className="px-3 py-1.5 flex items-center gap-2 hover:bg-[#20273a] transition-colors text-left"
-              >
-                <LayoutTemplate className="w-3.5 h-3.5 text-amber-400" />
-                <span>Administrar Espacios de Trabajo...</span>
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={() => handleItemClick(() => onOpenLayoutModal('layout'))}
+                  className="px-3 py-1.5 flex items-center gap-2 hover:bg-[#20273a] transition-colors text-left"
+                >
+                  <LayoutTemplate className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Administrar Espacios de Trabajo...</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleItemClick(() => onOpenLayoutModal('minipreview'))}
+                  className="px-3 py-1.5 flex items-center gap-2 hover:bg-[#20273a] transition-colors text-left"
+                >
+                  <Eye className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>Preferencias de Mini Preview...</span>
+                </button>
+              </>
             )}
 
             {workspaceLayout && onApplyWorkspacePreset && (
@@ -2941,11 +2951,16 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 <button
                   type="button"
                   onClick={() =>
-                    onUpdateWorkspaceLayout((prev) => ({
-                      ...prev,
-                      showMiniPlayer: !prev.showMiniPlayer,
-                      templateId: 'custom',
-                    }))
+                    onUpdateWorkspaceLayout((prev) => {
+                      const nextShow = !prev.showMiniPlayer;
+                      const startCollapsed = prev.miniPreviewPrefs?.startCollapsed ?? true;
+                      return {
+                        ...prev,
+                        showMiniPlayer: nextShow,
+                        miniPreviewCollapsed: nextShow ? startCollapsed : prev.miniPreviewCollapsed ?? true,
+                        templateId: 'custom',
+                      };
+                    })
                   }
                   className="px-3 py-1.5 flex items-center justify-between hover:bg-[#20273a] text-left"
                 >

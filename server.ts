@@ -46,15 +46,23 @@ const ai = apiKey
   : null;
 
 const STYLE_PROFILE_DIRECTIVES: Record<string, string> = {
+  nes: 'Authentic 8-bit NES Famicom pixel art: strict 3-4 color ramps per sprite, blocky pure pixel clusters, crisp 1px black outlines, zero anti-aliasing.',
+  gameboy: 'Nintendo Game Boy DMG-01 4-shade olive-green pixel art: strict 4 tones (#0f380f, #306230, #8bac0f, #9bbc0f) and crisp Bayer dithering.',
+  snes: 'Super Nintendo (SNES) 16-bit pixel art: 12-15 color hue-shifted shading ramps, crisp 1px tinted dark outlines, warm expressive readability.',
+  sega_genesis: 'SEGA Genesis / Mega Drive 16-bit pixel art: bold metallic speculars, cobalt/crimson contrast, intentional vertical and checkerboard dithering.',
+  cps1: 'Capcom CPS-1 arcade pixel art (SF2 / Final Fight): chunky muscular volume, firm 1px black outlines, bold sunlit primary hues.',
+  cps2: 'Capcom CPS-2 16-color indexed sprite palette: vibrant saturated cel-shaded hues, high readability against detailed arcade backgrounds.',
+  snk_neogeo: '1990s SNK Neo Geo MVS 16-bit pixel art: subtle artisanal dithering, gritty warm earth and metallic tones, authentic arcade contrast.',
   kof: 'The King of Fighters arcade pixel art aesthetic: crisp 1px dark outlines, dramatic directional rim light, dynamic Neo-Geo fighting silhouettes.',
   sf_alpha: 'Street Fighter Alpha 3 CPS-2 anime pixel art style: bold muscular shapes, clean cel-shaded color ramps, bright tournament-readable highlights.',
   darkstalkers: 'Darkstalkers Vampire Savior style: exaggerated gothic arcade animation, saturated violet/magenta shadows and eerie emerald highlights.',
-  guilty_gear: 'Guilty Gear anime fighting game aesthetic: sharp angular cel-shading, heavy contrast shadows, neon magenta and electric cyan energy arcs.',
+  metal_slug: 'Metal Slug SNK/Nazca masterclass pixel art: dense weathered metallic/fabric micro-texture, warm olive drab, rust, smoky orange bursts.',
+  guilty_gear: 'Guilty Gear anime fighting game aesthetic: sharp 1-2px angular outlines, heavy contrast shadows, neon magenta and electric cyan energy.',
   blazblue: 'BlazBlue 2D anime fighter sprite aesthetic: crystalline azure and royal blue lighting, ornate gold trim, razor-sharp arcane energy bursts.',
-  snk_neogeo: 'Classic 1990s SNK Neo Geo MVS 16-bit pixel art: subtle checkerboard dithering, gritty warm earth and metallic tones, authentic arcade contrast.',
-  cps2: 'Capcom CPS-2 16-color indexed sprite palette: punchy primary hues, high readability against detailed arcade backgrounds.',
   pixel_fantasy: 'Handcrafted Pixel Fantasy action/fighter sprite style: crisp steel highlights, emerald and arcane gold magic runes, rich wood/leather tones.',
-  pixel_cyberpunk: 'Cyberpunk pixel art aesthetic: deep midnight shadows with intense cyan, hot pink, and lime neon rim-lighting and holographic accents.',
+  pixel_scifi: 'Sci-Fi Cyberpunk pixel art aesthetic: deep midnight shadows with intense cyan, hot pink, and lime neon rim-lighting and holographic accents.',
+  pixel_cyberpunk: 'Sci-Fi Cyberpunk pixel art aesthetic: deep midnight shadows with intense cyan, hot pink, and lime neon rim-lighting and holographic accents.',
+  pixel_rpg: 'Classic Pixel RPG sprite style: balanced readable proportions, warm skin/cloth shading, clean 1px dark sepia/indigo outlines.',
 };
 
 function buildContextualDirective(
@@ -62,21 +70,58 @@ function buildContextualDirective(
   styleProfile: string = 'kof',
   blendRatio: number = 0.5,
   contextAnalysis?: any,
-  palette: string[] = []
+  palette: string[] = [],
+  options?: {
+    trainedProfile?: any;
+    coherenceLevel?: string;
+    poseFidelity?: string;
+  }
 ): string {
-  const profileDesc = STYLE_PROFILE_DIRECTIVES[styleProfile] || STYLE_PROFILE_DIRECTIVES.kof;
-  const ctxSummary = contextAnalysis
-    ? `Active Project Context -> Visual Style: ${contextAnalysis.visualStyle}, Resolution: ${contextAnalysis.resolution}, Colors Used: ${contextAnalysis.uniqueColors}, Animation Type: ${contextAnalysis.animationType}, Genre: ${contextAnalysis.gameGenre}, Palette: ${(contextAnalysis.activePalette || palette).slice(0, 12).join(', ')}.`
-    : `Project Palette: ${palette.slice(0, 12).join(', ')}.`;
+  const effectiveProfileKey =
+    styleMode === 'auto_detect' && contextAnalysis?.detectedProfileId
+      ? contextAnalysis.detectedProfileId
+      : styleProfile === 'pixel_cyberpunk'
+      ? 'pixel_scifi'
+      : styleProfile;
+  const profileDesc = STYLE_PROFILE_DIRECTIVES[effectiveProfileKey] || STYLE_PROFILE_DIRECTIVES.kof;
 
-  if (styleMode === 'adapt') {
-    return `${ctxSummary} MODE: ADAPT COMPLETELY TO EXTERNAL PROFILE (${styleProfile}). ${profileDesc}`;
-  }
-  if (styleMode === 'blend') {
+  const ctxSummary = contextAnalysis
+    ? `Active Project Visual Analysis -> Style: ${contextAnalysis.visualStyle} (${contextAnalysis.era || 'Arcade'}), Detected Profile: ${contextAnalysis.detectedProfileId || effectiveProfileKey}, Resolution: ${contextAnalysis.resolution}, Colors Used: ${contextAnalysis.uniqueColors}, Outline: ${contextAnalysis.lineThickness ?? 1}px, Shading: ${contextAnalysis.shadingType || 'cel'}, Light Direction: ${contextAnalysis.lightDirection || 'top-left'}, Anti-Alias: ${contextAnalysis.antiAliasLevel || 'none'}, Detail Level: ${contextAnalysis.detailLevel || 'medium'}, Animation: ${contextAnalysis.animationType}, Palette: ${(contextAnalysis.activePalette || palette).slice(0, 14).join(', ')}.`
+    : `Project Palette: ${palette.slice(0, 14).join(', ')}.`;
+
+  const trainedNote = options?.trainedProfile
+    ? ` TRAINED PROJECT BASELINE (${options.trainedProfile.summary}): Enforce master project palette [${(options.trainedProfile.masterPalette || []).slice(0, 12).join(', ')}], outline ${options.trainedProfile.lineThickness}px, light ${options.trainedProfile.lightDirection}, shading ${options.trainedProfile.shadingType}.`
+    : '';
+
+  const coherence = options?.coherenceLevel || 'high';
+  const coherenceRule =
+    coherence === 'max'
+      ? 'COHERENCE: MAXIMUM — Strictly lock colors to the active palette, preserve exact outline width, ZERO stray 1px orphan noise dots, ZERO interior holes, ZERO blurry semi-transparent anti-alias pixels.'
+      : coherence === 'high'
+      ? 'COHERENCE: HIGH — Keep clean contiguous silhouettes, zero accidental 1px holes or isolated stray noise pixels, and crisp solid hex colors.'
+      : 'COHERENCE: BALANCED — Maintain clean pixel clusters and readable fighting-game silhouettes without stray single-pixel noise.';
+
+  const fidelity = options?.poseFidelity;
+  const fidelityRule =
+    fidelity === 'exact'
+      ? ' POSE FIDELITY: EXACT — Match silhouette proportions, limb inclination, perspective, hand gesture, and character posture strictly as one holistic connected figure; NEVER cut or fragment limbs into disconnected pieces.'
+      : fidelity === 'high'
+      ? ' POSE FIDELITY: HIGH — Interpret the entire character coherently with accurate limb angles and intact body continuity.'
+      : '';
+
+  let modeDirective = '';
+  if (styleMode === 'adapt' || styleMode === 'custom') {
+    modeDirective = `MODE: CUSTOM/ADAPT TO PROFILE (${effectiveProfileKey}). ${profileDesc}`;
+  } else if (styleMode === 'auto_detect') {
+    modeDirective = `MODE: AUTO-DETECTED PROJECT STYLE (${effectiveProfileKey}). ${profileDesc} Harmonize with project lighting and outline thickness.`;
+  } else if (styleMode === 'blend') {
     const pct = Math.round(Math.max(0, Math.min(1, blendRatio)) * 100);
-    return `${ctxSummary} MODE: BLEND STYLES (${100 - pct}% Current Project Style + ${pct}% External Profile "${styleProfile}": ${profileDesc}). Fuse both palettes and shading rules seamlessly.`;
+    modeDirective = `MODE: BLEND STYLES (${100 - pct}% Current Project + ${pct}% Profile "${effectiveProfileKey}": ${profileDesc}).`;
+  } else {
+    modeDirective = `MODE: KEEP CURRENT PROJECT STYLE strictly. Match existing palette, outline thickness, shading, and light direction.`;
   }
-  return `${ctxSummary} MODE: KEEP CURRENT PROJECT STYLE strictly. Match the active palette, contrast, and shading discipline of the existing sprite.`;
+
+  return `${ctxSummary}${trainedNote} ${modeDirective} ${coherenceRule}${fidelityRule}`;
 }
 
 function appendReferenceGuideImages(parts: any[], referenceImagesBase64?: unknown) {
@@ -104,6 +149,8 @@ app.post('/api/ai/vfx-generate', async (req, res) => {
       styleProfile = 'kof',
       blendRatio = 0.5,
       contextAnalysis,
+      trainedProfile,
+      coherenceLevel = 'high',
       referenceImagesBase64 = [],
       effectType,
       detailLevel,
@@ -135,7 +182,8 @@ app.post('/api/ai/vfx-generate', async (req, res) => {
       resolvedStyle,
       blendRatio,
       contextAnalysis,
-      palette
+      palette,
+      { trainedProfile, coherenceLevel }
     );
 
     const assistDirectiveMap: Record<string, string> = {
@@ -498,6 +546,9 @@ app.post('/api/ai/frame-remix', async (req, res) => {
       styleProfile = 'kof',
       blendRatio = 0.5,
       contextAnalysis,
+      trainedProfile,
+      coherenceLevel = 'high',
+      poseFidelity = 'high',
     } = req.body;
 
     if (!ai) {
@@ -530,11 +581,12 @@ app.post('/api/ai/frame-remix', async (req, res) => {
       styleProfile,
       blendRatio,
       contextAnalysis,
-      palette
+      palette,
+      { trainedProfile, coherenceLevel, poseFidelity }
     );
 
     const systemInstruction = `You are an elite retro fighting game sprite artist and animator.
-Analyze the provided sprite frame, active AI guide references, and prompt instructions.
+Analyze the provided sprite frame, active AI guide references, and prompt instructions holistically before generating.
 ${contextualDirective}
 Output ONLY a valid JSON object matching this schema:
 {
@@ -558,10 +610,11 @@ Output ONLY a valid JSON object matching this schema:
 }
 Rules:
 - Canvas dimensions: ${width}x${height} (0 to ${width - 1} for x, 0 to ${height - 1} for y).
-- Return between 60 and 300 pixels forming a clean, coherent modification.`;
+- Interpret the ENTIRE character holistically: NEVER split limbs into disconnected pieces, NEVER drop parts of the sprite silhouette, NEVER leave random 1px noise or holes.
+- Return crisp solid #rrggbb hex colors strictly forming a clean, coherent pixel-art result.`;
 
     parts.push({
-      text: `Instructions: "${prompt}". Grid size is ${width}x${height}. Modify or restyle the fighting game character according to the reference guides and prompt.`
+      text: `Instructions: "${prompt}". Grid size is ${width}x${height}. Modify or restyle the fighting game character according to the reference guides, coherence (${coherenceLevel}), pose fidelity (${poseFidelity}), and prompt.`
     });
 
     const response = await ai.models.generateContent({
@@ -639,6 +692,8 @@ app.post('/api/ai/stage-generate', async (req, res) => {
       styleProfile = 'kof',
       blendRatio = 0.5,
       contextAnalysis,
+      trainedProfile,
+      coherenceLevel = 'high',
       mood = 'night',
       layerMode = 'full',
       biome = '',
@@ -658,15 +713,16 @@ app.post('/api/ai/stage-generate', async (req, res) => {
       styleProfile || stylePreset,
       blendRatio,
       contextAnalysis,
-      palette
+      palette,
+      { trainedProfile, coherenceLevel }
     );
 
     const systemInstruction = `You are a master retro fighting game background & stage pixel artist.
-Generate a pixel-art fighting game stage composition for a ${width}x${height} canvas.
+Generate a cohesive pixel-art fighting game stage composition for a ${width}x${height} canvas that strictly adapts to the target visual style (${styleProfile || stylePreset}) and project training context.
 ${contextualDirective}
 ${biome ? `Stage Category / Biome: ${biome}.` : ''}
 Atmosphere/Mood: ${mood}. Layer Mode: ${layerMode}.
-If reference images are provided, draw visual composition and color inspiration from them.
+If reference images are provided, analyze their palette, lighting direction, outline thickness, and visual era before generating.
 Output ONLY a valid JSON object:
 {
   "name": string,
@@ -678,13 +734,14 @@ Output ONLY a valid JSON object:
 }
 Rules:
 - Coordinates MUST be within 0..${width - 1} for x and 0..${height - 1} for y.
-- Leave clean fighting readability: darker ground floor at bottom ~20% of canvas, atmospheric architecture/sky/neon/dojo props above.
-- Return 180 to 900 crisp pixels forming recognizable retro fighting game stage scenery.`;
+- Adapt architectural details, sky shading/dithering, and ground floor cleanly to the active style profile (${styleProfile || stylePreset}).
+- Keep clean fighting readability: darker grounded floor at bottom ~25% of canvas, atmospheric architecture/sky/props above. Zero random stray 1px noise.
+- Return 180 to 900 crisp solid #rrggbb hex pixels forming recognizable retro fighting game stage scenery.`;
 
     const parts: any[] = [];
     appendReferenceGuideImages(parts, referenceImagesBase64);
     parts.push({
-      text: `Generate pixel art fighting stage: "${prompt}".${biome ? ` Biome: ${biome}.` : ''} Style: ${styleProfile || stylePreset}, Mode: ${styleMode}, Mood: ${mood}, Size: ${width}x${height}.`,
+      text: `Generate pixel art fighting stage: "${prompt}".${biome ? ` Biome: ${biome}.` : ''} Style: ${styleProfile || stylePreset}, Mode: ${styleMode}, Coherence: ${coherenceLevel}, Mood: ${mood}, Size: ${width}x${height}.`,
     });
 
     const response = await ai.models.generateContent({
@@ -717,6 +774,8 @@ app.post('/api/ai/hud-generate', async (req, res) => {
       styleProfile = 'cps2',
       blendRatio = 0.5,
       contextAnalysis,
+      trainedProfile,
+      coherenceLevel = 'high',
       includeElements = ['healthbars', 'timer', 'super'],
       elementCategory = '',
       palette = [],
@@ -736,11 +795,12 @@ app.post('/api/ai/hud-generate', async (req, res) => {
       styleProfile || activeTheme,
       blendRatio,
       contextAnalysis,
-      palette
+      palette,
+      { trainedProfile, coherenceLevel }
     );
 
     const systemInstruction = `You are an expert arcade fighting game UI/HUD pixel designer.
-Generate a retro pixel-art fighting game HUD layout overlay on a transparent ${width}x${height} grid.
+Generate a retro pixel-art fighting game HUD layout overlay on a transparent ${width}x${height} grid tailored authentically to the target visual style (${styleProfile || activeTheme}).
 ${contextualDirective}
 ${elementCategory ? `UI Element Category: ${elementCategory}.` : ''}
 Include elements: ${Array.isArray(includeElements) ? includeElements.join(', ') : 'healthbars, timer, super'}.
@@ -756,13 +816,14 @@ Output ONLY a valid JSON object:
 }
 Rules:
 - Coordinates strictly 0..${width - 1} for x and 0..${height - 1} for y.
+- Match frame bevels, typography blocks, color contrast, and bar styling strictly to the target style (e.g. Neo Geo brushed steel & amber/crimson, CPS2 bright yellow/cyan bars, Guilty Gear angular heavy-metal crimson/silver, 8-bit 4-color gauges).
 - Keep the center combat area transparent so fighters remain visible; place life bars/portraits/timer near top rows and super/combo meters near bottom rows.
-- Return 90 to 550 crisp pixel coordinates with sharp metallic/neon contrast.`;
+- Return 90 to 550 crisp #rrggbb hex pixels with zero stray orphan specks.`;
 
     const parts: any[] = [];
     appendReferenceGuideImages(parts, referenceImagesBase64);
     parts.push({
-      text: `Design fighting game HUD overlay: "${prompt}".${elementCategory ? ` Category: ${elementCategory}.` : ''} Theme: ${activeTheme}, Mode: ${styleMode}, Size: ${width}x${height}.`,
+      text: `Design fighting game HUD overlay: "${prompt}".${elementCategory ? ` Category: ${elementCategory}.` : ''} Theme: ${activeTheme}, Style: ${styleProfile || activeTheme}, Coherence: ${coherenceLevel}, Size: ${width}x${height}.`,
     });
 
     const response = await ai.models.generateContent({
@@ -843,6 +904,10 @@ app.post('/api/ai/pose-retarget', async (req, res) => {
       height = 48,
       palette = [],
       intensity = 75,
+      poseFidelity = 'high',
+      coherenceLevel = 'high',
+      contextAnalysis,
+      trainedProfile,
     } = req.body;
 
     if (!ai) {
@@ -852,12 +917,32 @@ app.post('/api/ai/pose-retarget', async (req, res) => {
       });
     }
 
-    const systemInstruction = `You are an expert 2D fighting game pixel artist specializing in character pose retargeting.
-Look at the attached character sprite image and adapt the character strictly into the requested target pose ("${poseName}", Rig: ${rigType}, Adaptation Intensity: ${intensity}%).
+    const contextualDirective = buildContextualDirective(
+      'keep',
+      contextAnalysis?.detectedProfileId || 'kof',
+      0.5,
+      contextAnalysis,
+      palette,
+      { trainedProfile, coherenceLevel, poseFidelity }
+    );
+
+    const fidelityNote =
+      poseFidelity === 'exact'
+        ? 'EXACT FIDELITY: Match the target joint coordinates, body lean, perspective, limb angles, and silhouette geometry strictly.'
+        : poseFidelity === 'high'
+        ? 'HIGH FIDELITY: Align all limbs, torso tilt, head gaze, and stance accurately to the target skeleton.'
+        : 'BALANCED FIDELITY: Adapt naturally toward the target pose while prioritizing silhouette balance.';
+
+    const systemInstruction = `You are an expert 2D fighting game pixel artist specializing in holistic character pose retargeting.
+Look at the attached character sprite image and adapt the ENTIRE character cohesively into the requested target pose ("${poseName}", Rig: ${rigType}, Adaptation Intensity: ${intensity}%).
+${contextualDirective}
+${fidelityNote}
 Target Joint Coordinates (normalized 0..1): ${jointSummary}
-CRITICAL RULES:
-- Preserve the EXACT character design: hair, colors, clothing, weapon/accessories, proportions, and Pixel Art shading style.
+CRITICAL ANTI-FRAGMENTATION & PIXEL INTEGRITY RULES:
+- Reinterpret the character as ONE continuous, intact body: NEVER split, chop, or leave floating disconnected limbs, head, or torso pieces.
+- Preserve the EXACT character identity: hair, face, clothing, weapon/accessories, proportions, outline width (${contextAnalysis?.lineThickness ?? 1}px), light direction (${contextAnalysis?.lightDirection || 'top-left'}), and Pixel Art shading style.
 - Use colors strictly from the character's existing colors and Project Palette: ${palette.slice(0, 16).join(', ')}.
+- Zero 1px stray orphan dots, zero interior pixel holes, zero semi-transparent anti-alias smudge.
 - Output ONLY valid JSON:
 {
   "name": string,
@@ -876,7 +961,7 @@ CRITICAL RULES:
       }
     }
     parts.push({
-      text: `Retarget the attached pixel character to pose "${poseName}" (${rigType}) at ${intensity}% adaptation on a ${width}x${height} grid.`,
+      text: `Holistically retarget the ENTIRE pixel character to pose "${poseName}" (${rigType}) with ${poseFidelity} pose fidelity at ${intensity}% adaptation on a ${width}x${height} grid without splitting any body parts.`,
     });
 
     const response = await ai.models.generateContent({

@@ -124,6 +124,7 @@ export const DEFAULT_SELECTION_OPTIONS: SelectionToolOptions = {
   cornerRadius: 4,
   perfectCircle: false,
   smooth: false,
+  rememberBooleanMode: true,
 };
 
 export const DEFAULT_MOVE_OPTIONS: MoveToolOptions = {
@@ -1485,6 +1486,238 @@ export function combineSelectionMasks(
     endY: maxY,
     shape: shapeLabel,
     mask: out,
+  };
+}
+
+/**
+ * Resolves the active boolean selection operation consistently across ALL selection tools
+ * (Magic Wand, Free/Polygonal/Magnetic Lasso, Rect/Elliptical Marquee).
+ */
+export function resolveSelectionOpMode(
+  shiftKey: boolean,
+  altKey: boolean,
+  fallbackMode: SelectionBooleanMode = 'replace'
+): SelectionBooleanMode {
+  if (shiftKey && altKey) return 'intersect';
+  if (shiftKey) return 'add';
+  if (altKey) return 'subtract';
+  return fallbackMode;
+}
+
+/**
+ * Computes marquee bounding box supporting 1:1 / fixed ratio (Shift) and symmetrical
+ * expansion from center (Alt), or both combined (Shift + Alt).
+ */
+export function computeConstrainedMarqueeBox(
+  start: { x: number; y: number },
+  end: { x: number; y: number },
+  opts: {
+    constrainRatio: boolean;
+    ratioW: number;
+    ratioH: number;
+    fromCenter: boolean;
+    width: number;
+    height: number;
+  }
+): { startX: number; startY: number; endX: number; endY: number } {
+  const { constrainRatio, ratioW, ratioH, fromCenter, width, height } = opts;
+  const maxW = Math.max(0, width - 1);
+  const maxH = Math.max(0, height - 1);
+  const clampX = (v: number) => Math.max(0, Math.min(maxW, Math.round(v)));
+  const clampY = (v: number) => Math.max(0, Math.min(maxH, Math.round(v)));
+
+  let rawDx = end.x - start.x;
+  let rawDy = end.y - start.y;
+
+  if (constrainRatio) {
+    const rw = Math.max(1, ratioW || 1);
+    const rh = Math.max(1, ratioH || 1);
+    const unit = Math.max(Math.abs(rawDx) / rw, Math.abs(rawDy) / rh);
+    rawDx = (rawDx >= 0 ? 1 : -1) * unit * rw;
+    rawDy = (rawDy >= 0 ? 1 : -1) * unit * rh;
+  }
+
+  if (fromCenter) {
+    const hx = Math.round(Math.abs(rawDx));
+    const hy = Math.round(Math.abs(rawDy));
+    return {
+      startX: clampX(start.x - hx),
+      startY: clampY(start.y - hy),
+      endX: clampX(start.x + hx),
+      endY: clampY(start.y + hy),
+    };
+  }
+
+  return {
+    startX: clampX(start.x),
+    startY: clampY(start.y),
+    endX: clampX(start.x + rawDx),
+    endY: clampY(start.y + rawDy),
+  };
+}
+
+/**
+ * Builds a clean pixel-accurate boolean mask from closed polygon/lasso points,
+ * including Bresenham perimeter pixels so thin shapes never drop pixels.
+ */
+export function buildPolygonSelectionMask(
+  pts: { x: number; y: number }[],
+  width: number,
+  height: number
+): boolean[][] {
+  const mask: boolean[][] = Array.from({ length: height }, () => Array(width).fill(false));
+  if (pts.length === 0 || width <= 0 || height <= 0) return mask;
+
+  if (pts.length >= 3) {
+    let minX = width - 1;
+    let maxX = 0;
+    let minY = height - 1;
+    let maxY = 0;
+    for (const pt of pts) {
+      if (pt.x < minX) minX = pt.x;
+      if (pt.x > maxX) maxX = pt.x;
+      if (pt.y < minY) minY = pt.y;
+      if (pt.y > maxY) maxY = pt.y;
+    }
+    minX = Math.max(0, Math.floor(minX));
+    maxX = Math.min(width - 1, Math.ceil(maxX));
+    minY = Math.max(0, Math.floor(minY));
+    maxY = Math.min(height - 1, Math.ceil(maxY));
+
+    for (let py = minY; py <= maxY; py++) {
+      for (let px = minX; px <= maxX; px++) {
+        let inside = false;
+        for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+          const xi = pts[i].x;
+          const yi = pts[i].y;
+          const xj = pts[j].x;
+          const yj = pts[j].y;
+          const intersect =
+            (yi > py) !== (yj > py) && px < ((xj - xi) * (py - yi)) / (yj - yi || 1e-6) + xi;
+          if (intersect) inside = !inside;
+        }
+        if (inside) mask[py][px] = true;
+      }
+    }
+  }
+
+  const drawSegment = (x0: number, y0: number, x1: number, y1: number) => {
+    let cx = Math.round(x0);
+    let cy = Math.round(y0);
+    const tx = Math.round(x1);
+    const ty = Math.round(y1);
+    const dx = Math.abs(tx - cx);
+    const dy = Math.abs(ty - cy);
+    const sx = cx < tx ? 1 : -1;
+    const sy = cy < ty ? 1 : -1;
+    let err = dx - dy;
+    while (true) {
+      if (cx >= 0 && cx < width && cy >= 0 && cy < height) {
+        mask[cy][cx] = true;
+      }
+      if (cx === tx && cy === ty) break;
+      const e2 = 2 * err;
+      if (e2 > -dy) {
+        err -= dy;
+        cx += sx;
+      }
+      if (e2 < dx) {
+        err += dx;
+        cy += sy;
+      }
+    }
+  };
+
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i];
+    const b = pts[(i + 1) % pts.length];
+    if (i < pts.length - 1 || pts.length >= 3) {
+      drawSegment(a.x, a.y, b.x, b.y);
+    } else if (a.x >= 0 && a.x < width && a.y >= 0 && a.y < height) {
+      mask[Math.round(a.y)][Math.round(a.x)] = true;
+    }
+  }
+
+  return mask;
+}
+
+export function cloneSelectionArea(sel: SelectionArea | null | undefined): SelectionArea | null {
+  if (!sel) return null;
+  return {
+    ...sel,
+    mask: sel.mask ? sel.mask.map((row) => [...row]) : undefined,
+    pixels: sel.pixels ? sel.pixels.map((row) => [...row]) : undefined,
+  };
+}
+
+export function isPointInsideSelection(
+  sel: SelectionArea | null | undefined,
+  x: number,
+  y: number
+): boolean {
+  if (!sel || !sel.active) return false;
+  const minX = Math.min(sel.startX, sel.endX);
+  const maxX = Math.max(sel.startX, sel.endX);
+  const minY = Math.min(sel.startY, sel.endY);
+  const maxY = Math.max(sel.startY, sel.endY);
+  if (x < minX || x > maxX || y < minY || y > maxY) return false;
+  if (sel.mask) {
+    return Boolean(sel.mask[y]?.[x]);
+  }
+  if (sel.shape === 'ellipse') {
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    const rx = Math.max(0.5, (maxX - minX) / 2 + 0.5);
+    const ry = Math.max(0.5, (maxY - minY) / 2 + 0.5);
+    return ((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2 <= 1;
+  }
+  return true;
+}
+
+export function translateSelectionArea(
+  sel: SelectionArea,
+  dx: number,
+  dy: number,
+  width: number,
+  height: number
+): SelectionArea {
+  if (!sel.mask) {
+    return {
+      ...sel,
+      startX: sel.startX + dx,
+      endX: sel.endX + dx,
+      startY: sel.startY + dy,
+      endY: sel.endY + dy,
+    };
+  }
+  const shiftedMask: boolean[][] = Array.from({ length: height }, () => Array(width).fill(false));
+  let minX = width;
+  let maxX = -1;
+  let minY = height;
+  let maxY = -1;
+  for (let py = 0; py < sel.mask.length; py++) {
+    const row = sel.mask[py];
+    if (!row) continue;
+    for (let px = 0; px < row.length; px++) {
+      if (!row[px]) continue;
+      const nx = px + dx;
+      const ny = py + dy;
+      if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+        shiftedMask[ny][nx] = true;
+        if (nx < minX) minX = nx;
+        if (nx > maxX) maxX = nx;
+        if (ny < minY) minY = ny;
+        if (ny > maxY) maxY = ny;
+      }
+    }
+  }
+  return {
+    ...sel,
+    startX: maxX >= minX ? minX : sel.startX + dx,
+    startY: maxY >= minY ? minY : sel.startY + dy,
+    endX: maxX >= minX ? maxX : sel.endX + dx,
+    endY: maxY >= minY ? maxY : sel.endY + dy,
+    mask: shiftedMask,
   };
 }
 

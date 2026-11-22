@@ -24,6 +24,7 @@ import {
   Unlock,
   Share2,
   Scan,
+  Monitor,
 } from 'lucide-react';
 import { SelectionDisplayConfig, SelectionDisplayMode } from '../types';
 import { DEFAULT_SELECTION_DISPLAY_CONFIG } from '../utils/toolEngines';
@@ -33,11 +34,18 @@ import {
   ButtonStyleId,
   CornerStyleId,
   CustomUiColors,
+  DEFAULT_MINI_PREVIEW_PREFS,
   DEFAULT_STUDIO_STYLE,
   DEFAULT_WORKSPACE_LAYOUT,
   DockOrientation,
   IconSizeId,
   IconStyleId,
+  MINI_PREVIEW_DEFAULT_HEIGHT,
+  MINI_PREVIEW_DEFAULT_WIDTH,
+  MINI_PREVIEW_MAX_HEIGHT,
+  MINI_PREVIEW_MAX_WIDTH,
+  MINI_PREVIEW_MIN_HEIGHT,
+  MINI_PREVIEW_MIN_WIDTH,
   PANEL_REGISTRY,
   PanelCollapseDisplayMode,
   PanelDockZone,
@@ -62,7 +70,7 @@ import {
 
 interface WorkspaceLayoutModalProps {
   isOpen: boolean;
-  initialTab?: 'layout' | 'style' | 'selections';
+  initialTab?: 'layout' | 'style' | 'selections' | 'minipreview';
   onClose: () => void;
   layout: WorkspaceLayoutConfig;
   onChangeLayout: (next: WorkspaceLayoutConfig) => void;
@@ -183,7 +191,7 @@ export const WorkspaceLayoutModal: React.FC<WorkspaceLayoutModalProps> = ({
   selectionDisplayConfig = DEFAULT_SELECTION_DISPLAY_CONFIG,
   onChangeSelectionDisplayConfig,
 }) => {
-  const [activeTab, setActiveTab] = useState<'layout' | 'style' | 'selections'>(initialTab);
+  const [activeTab, setActiveTab] = useState<'layout' | 'style' | 'selections' | 'minipreview'>(initialTab);
   const [customLayoutName, setCustomLayoutName] = useState<string>('');
   const importLayoutRef = useRef<HTMLInputElement>(null);
   const importThemeRef = useRef<HTMLInputElement>(null);
@@ -355,6 +363,17 @@ export const WorkspaceLayoutModal: React.FC<WorkspaceLayoutModalProps> = ({
               >
                 <Scan className="w-3.5 h-3.5" />
                 <span>Selecciones</span>
+              </button>
+              <button
+                onClick={() => setActiveTab('minipreview')}
+                className="px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap"
+                style={{
+                  backgroundColor: activeTab === 'minipreview' ? 'var(--studio-accent)' : 'transparent',
+                  color: activeTab === 'minipreview' ? 'var(--studio-accent-text)' : 'var(--studio-text-muted)',
+                }}
+              >
+                <Monitor className="w-3.5 h-3.5" />
+                <span>Mini Preview</span>
               </button>
             </div>
 
@@ -876,7 +895,16 @@ export const WorkspaceLayoutModal: React.FC<WorkspaceLayoutModalProps> = ({
                       <input
                         type="checkbox"
                         checked={layout.showMiniPlayer}
-                        onChange={(e) => onChangeLayout({ ...layout, showMiniPlayer: e.target.checked, templateId: 'custom' })}
+                        onChange={(e) => {
+                          const checked = e.target.checked;
+                          const startCollapsed = layout.miniPreviewPrefs?.startCollapsed ?? true;
+                          onChangeLayout({
+                            ...layout,
+                            showMiniPlayer: checked,
+                            miniPreviewCollapsed: checked ? startCollapsed : layout.miniPreviewCollapsed ?? true,
+                            templateId: 'custom',
+                          });
+                        }}
                         className="accent-amber-400"
                       />
                     </label>
@@ -1910,6 +1938,266 @@ export const WorkspaceLayoutModal: React.FC<WorkspaceLayoutModalProps> = ({
               </div>
             </section>
           )}
+
+          {activeTab === 'minipreview' && (() => {
+            const prefs = {
+              ...DEFAULT_MINI_PREVIEW_PREFS,
+              ...(layout.miniPreviewPrefs || {}),
+            };
+            const updatePrefs = (patch: Partial<typeof prefs>) => {
+              onChangeLayout({
+                ...layout,
+                miniPreviewPrefs: { ...prefs, ...patch },
+                templateId: 'custom',
+              });
+            };
+            const curW = layout.miniPreviewWidth ?? MINI_PREVIEW_DEFAULT_WIDTH;
+            const curH = layout.miniPreviewHeight ?? MINI_PREVIEW_DEFAULT_HEIGHT;
+            return (
+              <section className="flex flex-col gap-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-sm font-bold flex items-center gap-2">
+                      <Monitor className="w-4 h-4" style={{ color: 'var(--studio-accent)' }} />
+                      <span>Preferencias → Interfaz → Mini Preview</span>
+                    </h3>
+                    <p className="text-[11px] mt-0.5" style={{ color: 'var(--studio-text-muted)' }}>
+                      Controla cómo aparece, recuerda su estado y se dimensiona el panel de Mini Previsualización sin invadir tu área de dibujo.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onChangeLayout({
+                        ...layout,
+                        showMiniPlayer: false,
+                        miniPreviewCollapsed: true,
+                        miniPreviewWidth: MINI_PREVIEW_DEFAULT_WIDTH,
+                        miniPreviewHeight: MINI_PREVIEW_DEFAULT_HEIGHT,
+                        miniPreviewPosition: null,
+                        miniPreviewPrefs: { ...DEFAULT_MINI_PREVIEW_PREFS },
+                        templateId: 'custom',
+                      })
+                    }
+                    className="px-2.5 py-1 rounded-lg border text-[11px] font-mono flex items-center gap-1.5 hover:opacity-90 whitespace-nowrap"
+                    style={{
+                      backgroundColor: 'var(--studio-bg-card)',
+                      borderColor: 'var(--studio-border-strong)',
+                    }}
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    <span>Restaurar Predeterminado</span>
+                  </button>
+                </div>
+
+                {/* Behavior & Persistence Checkboxes */}
+                <div
+                  className="p-4 rounded-xl border flex flex-col gap-3"
+                  style={{
+                    backgroundColor: 'var(--studio-bg-card)',
+                    borderColor: 'var(--studio-border)',
+                  }}
+                >
+                  <h4 className="text-xs font-bold uppercase tracking-wider" style={{ color: 'var(--studio-text-muted)' }}>
+                    Reglas de Apertura y Persistencia
+                  </h4>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
+                    {[
+                      {
+                        key: 'rememberLastState' as const,
+                        label: 'Recordar último estado',
+                        hint: 'Guarda entre sesiones si quedó oculta, contraída o abierta con su último tamaño.',
+                      },
+                      {
+                        key: 'startCollapsed' as const,
+                        label: 'Iniciar contraída',
+                        hint: 'Al abrirse o mostrarse por primera vez, inicia como barra compacta sin cubrir el lienzo.',
+                      },
+                      {
+                        key: 'neverAutoOpen' as const,
+                        label: 'No abrir automáticamente',
+                        hint: 'Nunca se abre sola al cargar PSD, PNG, WEBP, GIF, Spritesheets o proyectos recientes.',
+                      },
+                      {
+                        key: 'openOnDemandOnly' as const,
+                        label: 'Abrir solo bajo demanda',
+                        hint: 'Solo se muestra cuando el usuario la solicita explícitamente desde el menú o la interfaz.',
+                      },
+                    ].map((opt) => (
+                      <label
+                        key={opt.key}
+                        className="p-3 rounded-lg border flex items-start justify-between gap-3 cursor-pointer"
+                        style={{
+                          backgroundColor: 'var(--studio-bg-elevated)',
+                          borderColor: prefs[opt.key] ? 'var(--studio-accent)' : 'var(--studio-border)',
+                        }}
+                      >
+                        <div className="flex flex-col gap-0.5">
+                          <span className="font-semibold text-xs">{opt.label}</span>
+                          <span className="text-[10px]" style={{ color: 'var(--studio-text-muted)' }}>
+                            {opt.hint}
+                          </span>
+                        </div>
+                        <input
+                          type="checkbox"
+                          checked={prefs[opt.key]}
+                          onChange={(e) => updatePrefs({ [opt.key]: e.target.checked })}
+                          className="accent-amber-400 mt-0.5 shrink-0"
+                        />
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Size Limits & Live State Controls */}
+                <div
+                  className="p-4 rounded-xl border flex flex-col gap-4"
+                  style={{
+                    backgroundColor: 'var(--studio-bg-card)',
+                    borderColor: 'var(--studio-border)',
+                  }}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h4 className="text-xs font-bold uppercase tracking-wider" style={{ color: 'var(--studio-text-muted)' }}>
+                      Tamaño Inicial y Comportamiento de Panel
+                    </h4>
+                    <span
+                      className="px-2 py-0.5 rounded text-[10px] font-mono border"
+                      style={{
+                        backgroundColor: 'var(--studio-bg-elevated)',
+                        borderColor: 'var(--studio-border-strong)',
+                        color: 'var(--studio-accent)',
+                      }}
+                    >
+                      Estado actual: {!layout.showMiniPlayer ? 'Oculta' : layout.miniPreviewCollapsed ? 'Contraída' : `Abierta (${curW}×${curH} px)`}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 font-mono">
+                    <StudioSlider
+                      variant="panel"
+                      label="Ancho de ventana (px)"
+                      value={curW}
+                      min={MINI_PREVIEW_MIN_WIDTH}
+                      max={MINI_PREVIEW_MAX_WIDTH}
+                      step={4}
+                      unit=" px"
+                      defaultValue={MINI_PREVIEW_DEFAULT_WIDTH}
+                      onChange={(v) =>
+                        onChangeLayout({
+                          ...layout,
+                          miniPreviewWidth: Math.round(v),
+                          templateId: 'custom',
+                        })
+                      }
+                    />
+                    <StudioSlider
+                      variant="panel"
+                      label="Alto de ventana (px)"
+                      value={curH}
+                      min={MINI_PREVIEW_MIN_HEIGHT}
+                      max={MINI_PREVIEW_MAX_HEIGHT}
+                      step={4}
+                      unit=" px"
+                      defaultValue={MINI_PREVIEW_DEFAULT_HEIGHT}
+                      onChange={(v) =>
+                        onChangeLayout({
+                          ...layout,
+                          miniPreviewHeight: Math.round(v),
+                          templateId: 'custom',
+                        })
+                      }
+                    />
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onChangeLayout({
+                          ...layout,
+                          showMiniPlayer: !layout.showMiniPlayer,
+                          miniPreviewCollapsed: !layout.showMiniPlayer ? prefs.startCollapsed : layout.miniPreviewCollapsed,
+                          templateId: 'custom',
+                        })
+                      }
+                      className="px-3 py-1.5 rounded-lg border text-xs font-semibold flex items-center gap-1.5"
+                      style={{
+                        backgroundColor: layout.showMiniPlayer ? 'var(--studio-accent)' : 'var(--studio-bg-elevated)',
+                        color: layout.showMiniPlayer ? 'var(--studio-accent-text)' : 'var(--studio-text)',
+                        borderColor: 'var(--studio-border-strong)',
+                      }}
+                    >
+                      {layout.showMiniPlayer ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                      <span>{layout.showMiniPlayer ? 'Ocultar Mini Preview' : 'Mostrar Mini Preview'}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onChangeLayout({
+                          ...layout,
+                          showMiniPlayer: true,
+                          miniPreviewCollapsed: !(layout.miniPreviewCollapsed ?? true),
+                          templateId: 'custom',
+                        })
+                      }
+                      className="px-3 py-1.5 rounded-lg border text-xs font-semibold"
+                      style={{
+                        backgroundColor: 'var(--studio-bg-elevated)',
+                        borderColor: 'var(--studio-border-strong)',
+                      }}
+                    >
+                      {layout.miniPreviewCollapsed ? 'Expandir sobre Lienzo' : 'Contraer'}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onChangeLayout({
+                          ...layout,
+                          showMiniPlayer: false,
+                          rightPanels: layout.rightPanels.map((p) =>
+                            p.id === 'preview' ? { ...p, visible: true, expanded: true } : p
+                          ),
+                          templateId: 'custom',
+                        })
+                      }
+                      className="px-3 py-1.5 rounded-lg border text-xs font-semibold flex items-center gap-1.5"
+                      style={{
+                        backgroundColor: 'var(--studio-bg-elevated)',
+                        borderColor: 'var(--studio-border-strong)',
+                      }}
+                    >
+                      <PanelRight className="w-3.5 h-3.5" />
+                      <span>Acoplar en Barra Lateral</span>
+                    </button>
+
+                    {layout.miniPreviewPosition && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onChangeLayout({
+                            ...layout,
+                            miniPreviewPosition: null,
+                            templateId: 'custom',
+                          })
+                        }
+                        className="px-3 py-1.5 rounded-lg border text-xs font-mono"
+                        style={{
+                          backgroundColor: 'var(--studio-bg-elevated)',
+                          borderColor: 'var(--studio-border-strong)',
+                        }}
+                      >
+                        Restablecer posición
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </section>
+            );
+          })()}
         </div>
       </div>
     </div>

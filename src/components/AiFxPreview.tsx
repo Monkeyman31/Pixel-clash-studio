@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Play, Pause, ChevronLeft, ChevronRight, Sparkles, Flame, Layers } from 'lucide-react';
 import { AiExternalProfileId } from '../types';
+import { getAiStyleProfile, hexToRgb } from '../utils/projectContextAi';
 
 export interface FxPreset {
   id: string;
@@ -220,80 +221,41 @@ export const FX_PRESETS: FxPreset[] = [
   },
 ];
 
-// Helper to remap colors to chosen style
+// Helper to remap FX pixels cleanly by luminance ramp into chosen style
 export function remapFxPixelsToStyle(
   pixels: { x: number; y: number; color: string }[],
   styleMode: AiStyleMode = 'inherit',
   characterPalette: string[] = []
 ): { x: number; y: number; color: string }[] {
-  if (styleMode === 'inherit' && characterPalette.length >= 2) {
-    const palette = characterPalette.slice(0, 12);
-    return pixels.map((p, idx) => {
-      const mappedColor = palette[idx % palette.length];
-      return { ...p, color: mappedColor };
-    });
+  const lum = (hex: string) => {
+    const [r, g, b] = hexToRgb(hex);
+    return 0.299 * r + 0.587 * g + 0.114 * b;
+  };
+
+  let targetRamp: string[] = [];
+  if (styleMode === 'inherit') {
+    if (characterPalette.length < 2) return pixels;
+    targetRamp = [...characterPalette.slice(0, 12)];
+  } else {
+    const mappedId =
+      styleMode === '8bit'
+        ? 'nes'
+        : styleMode === 'guiltygear'
+        ? 'guilty_gear'
+        : styleMode;
+    const profile = getAiStyleProfile(mappedId);
+    // Keep crisp core highlight + profile hues
+    targetRamp = ['#ffffff', ...profile.palette.filter((c) => c.toLowerCase() !== '#ffffff')];
   }
 
-  if (styleMode === 'kof') {
-    // KOF Palette: blazing fire, deep reds, warm embers
-    const kofRamp = ['#ffffff', '#ffeb3b', '#ff9800', '#f44336', '#b71c1c'];
-    return pixels.map((p, idx) => ({ ...p, color: kofRamp[idx % kofRamp.length] }));
-  }
-
-  if (styleMode === 'cps2') {
-    // Capcom CPS2: vibrant plasma cyan, magenta, electric yellow
-    const cps2Ramp = ['#ffffff', '#00f0ff', '#ff00aa', '#ffea00', '#0077ff'];
-    return pixels.map((p, idx) => ({ ...p, color: cps2Ramp[idx % cps2Ramp.length] }));
-  }
-
-  if (styleMode === '8bit') {
-    // Retro NES 8-bit strict 4 colors
-    const nesRamp = ['#ffffff', '#ff0000', '#ffaa00', '#000000'];
-    return pixels.map((p, idx) => ({ ...p, color: nesRamp[idx % nesRamp.length] }));
-  }
-
-  if (styleMode === 'snes') {
-    // 16-bit SNES: emerald and gold combat flares
-    const snesRamp = ['#ffffff', '#4ade80', '#16a34a', '#facc15', '#065f46'];
-    return pixels.map((p, idx) => ({ ...p, color: snesRamp[idx % snesRamp.length] }));
-  }
-
-  if (styleMode === 'guiltygear' || styleMode === 'guilty_gear') {
-    const ggRamp = ['#ffffff', '#a855f7', '#ec4899', '#3b82f6', '#1e1b4b'];
-    return pixels.map((p, idx) => ({ ...p, color: ggRamp[idx % ggRamp.length] }));
-  }
-
-  if (styleMode === 'sf_alpha') {
-    const sfaRamp = ['#ffffff', '#38bdf8', '#2563eb', '#facc15', '#f43f5e'];
-    return pixels.map((p, idx) => ({ ...p, color: sfaRamp[idx % sfaRamp.length] }));
-  }
-
-  if (styleMode === 'darkstalkers') {
-    const dsRamp = ['#ffffff', '#c084fc', '#9333ea', '#10b981', '#2e1065'];
-    return pixels.map((p, idx) => ({ ...p, color: dsRamp[idx % dsRamp.length] }));
-  }
-
-  if (styleMode === 'blazblue') {
-    const bbRamp = ['#ffffff', '#22d3ee', '#0284c7', '#e0f2fe', '#0f172a'];
-    return pixels.map((p, idx) => ({ ...p, color: bbRamp[idx % bbRamp.length] }));
-  }
-
-  if (styleMode === 'snk_neogeo') {
-    const snkRamp = ['#ffffff', '#fb923c', '#ef4444', '#facc15', '#7f1d1d'];
-    return pixels.map((p, idx) => ({ ...p, color: snkRamp[idx % snkRamp.length] }));
-  }
-
-  if (styleMode === 'pixel_fantasy') {
-    const pfRamp = ['#ffffff', '#fde047', '#34d399', '#059669', '#064e3b'];
-    return pixels.map((p, idx) => ({ ...p, color: pfRamp[idx % pfRamp.length] }));
-  }
-
-  if (styleMode === 'pixel_cyberpunk') {
-    const pcRamp = ['#ffffff', '#22d3ee', '#f472b6', '#a855f7', '#0f172a'];
-    return pixels.map((p, idx) => ({ ...p, color: pcRamp[idx % pcRamp.length] }));
-  }
-
-  return pixels;
+  if (targetRamp.length === 0) return pixels;
+  // Sort ascending dark -> bright so luminance preserves core glow hierarchy
+  const sortedRamp = [...targetRamp].sort((a, b) => lum(a) - lum(b));
+  return pixels.map((p) => {
+    const srcLum = lum(p.color || '#ffffff') / 255;
+    const idx = Math.max(0, Math.min(sortedRamp.length - 1, Math.round(srcLum * (sortedRamp.length - 1))));
+    return { ...p, color: sortedRamp[idx] };
+  });
 }
 
 interface AiFxPreviewProps {

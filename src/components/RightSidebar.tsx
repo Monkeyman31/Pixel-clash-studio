@@ -59,8 +59,11 @@ import {
 } from 'lucide-react';
 import { 
   ActionTag, 
+  AiCoherenceLevel,
   AiContextualMode,
+  AiExplanationReport,
   AiExternalProfileId,
+  AiPoseFidelityLevel,
   AssetCategory,
   AssetLibraryItem,
   BrushSettings,
@@ -90,6 +93,7 @@ import {
   LayerType,
   PalettePreset,
   PerformanceMode,
+  ProjectAiTrainingProfile,
   ProjectState,
   ProjectWorkMode,
   PureRefConfig,
@@ -163,8 +167,16 @@ import { DEFAULT_EYEDROPPER_CONFIG } from '../utils/eyedropperEngine';
 import {
   AI_EXTERNAL_PROFILES,
   analyzeProjectContext,
+  analyzeReferenceImageDataUrl,
   applyContextualStyleToGrid,
+  buildExplainableAiReport,
+  getAiStyleProfile,
+  gridToPixels,
+  pixelsToGrid,
+  trainAiOnCurrentProject,
+  validateAndCleanAiPixelGrid,
 } from '../utils/projectContextAi';
+import { ExplainableAiCard } from './ExplainableAiCard';
 import { StudioSlider } from './StudioSlider';
 import { CustomBrushPreset } from '../utils/customBrushStorage';
 import { getCachedPixelGridCanvas } from '../utils/renderCache';
@@ -191,14 +203,25 @@ const PixelGridMiniPreview: React.FC<{ grid: (string | null)[][]; width: number;
   return <canvas ref={ref} className={`pixel-canvas canvas-checkerboard ${className}`} />;
 });
 
-function generateFallbackStageGrid(w: number, h: number, mood: string, style: string): (string | null)[][] {
+function generateFallbackStageGrid(
+  w: number,
+  h: number,
+  mood: string,
+  style: string,
+  paletteOverride?: string[]
+): (string | null)[][] {
   const g = createEmptyGrid(w, h);
-  const skyTop = mood === 'night' ? '#0b1026' : mood === 'day' ? '#1d4ed8' : mood === 'storm' ? '#1e293b' : '#431407';
-  const skyMid = mood === 'night' ? '#1e1b4b' : mood === 'day' ? '#38bdf8' : mood === 'storm' ? '#334155' : '#ea580c';
-  const sunCol = mood === 'night' ? '#e2e8f0' : mood === 'storm' ? '#94a3b8' : '#fde047';
-  const floorTop = style === 'cyberpunk' ? '#0f172a' : '#78350f';
-  const floorBot = style === 'cyberpunk' ? '#1e1b4b' : '#451a03';
-  const lineCol = style === 'cyberpunk' ? '#22d3ee' : '#b45309';
+  const profile = getAiStyleProfile(style === 'cyberpunk' ? 'pixel_scifi' : style === 'dojo' ? 'kof' : style === '8bit' ? 'nes' : style);
+  const pal = paletteOverride && paletteOverride.length >= 4 ? paletteOverride : profile.palette;
+
+  const isCyber = profile.id === 'pixel_scifi' || style === 'cyberpunk';
+  const isRetro8 = profile.id === 'nes' || profile.id === 'gameboy';
+  const skyTop = mood === 'night' ? (pal[0] || '#0b1026') : mood === 'day' ? '#1d4ed8' : mood === 'storm' ? '#1e293b' : '#431407';
+  const skyMid = isRetro8 ? (pal[1] || '#306230') : mood === 'night' ? (pal[1] || '#1e1b4b') : mood === 'day' ? '#38bdf8' : mood === 'storm' ? '#334155' : (pal[2] || '#ea580c');
+  const sunCol = isRetro8 ? (pal[pal.length - 1] || '#9bbc0f') : mood === 'night' ? '#e2e8f0' : mood === 'storm' ? '#94a3b8' : (pal[4] || '#fde047');
+  const floorTop = isCyber ? '#0f172a' : (pal[1] || '#78350f');
+  const floorBot = pal[0] || '#451a03';
+  const lineCol = isCyber ? (pal[3] || '#22d3ee') : (pal[2] || '#b45309');
 
   const horizon = Math.floor(h * 0.65);
   for (let y = 0; y < h; y++) {
@@ -206,11 +229,11 @@ function generateFallbackStageGrid(w: number, h: number, mood: string, style: st
       if (y < horizon) {
         g[y][x] = y < Math.floor(horizon * 0.5) ? skyTop : skyMid;
       } else {
-        g[y][x] = y % 3 === 0 ? lineCol : y < Math.floor((h + horizon) / 2) ? floorTop : floorBot;
+        const isDither = profile.shading === 'gradient_dither' && (x + y) % 2 === 0;
+        g[y][x] = y % 3 === 0 ? lineCol : y < Math.floor((h + horizon) / 2) ? (isDither ? floorBot : floorTop) : floorBot;
       }
     }
   }
-  // Sun / Moon
   const sx = Math.floor(w * 0.5);
   const sy = Math.floor(horizon * 0.45);
   for (let dy = -3; dy <= 3; dy++) {
@@ -220,11 +243,10 @@ function generateFallbackStageGrid(w: number, h: number, mood: string, style: st
       }
     }
   }
-  // Side Pillars / Dojo Beams
   const pLeft = Math.max(2, Math.floor(w * 0.12));
   const pRight = Math.min(w - 3, Math.floor(w * 0.85));
-  const pillarCol = style === 'cyberpunk' ? '#a855f7' : '#7f1d1d';
-  const trimCol = style === 'cyberpunk' ? '#22d3ee' : '#f59e0b';
+  const pillarCol = isCyber ? '#a855f7' : (pal[2] || '#7f1d1d');
+  const trimCol = isCyber ? '#22d3ee' : (pal[4] || '#f59e0b');
   for (let y = Math.floor(h * 0.12); y < horizon; y++) {
     g[y][pLeft] = pillarCol;
     g[y][pLeft + 1] = pillarCol;
@@ -243,13 +265,16 @@ function generateFallbackHudGrid(
   theme: string,
   includeBars: boolean,
   includeTimer: boolean,
-  includeSuper: boolean
+  includeSuper: boolean,
+  paletteOverride?: string[]
 ): (string | null)[][] {
   const g = createEmptyGrid(w, h);
-  const frameCol = theme === 'cyber' ? '#22d3ee' : theme === 'minimal' ? '#e2e8f0' : '#f59e0b';
-  const p1Col = theme === 'cyber' ? '#38bdf8' : '#22c55e';
-  const p2Col = theme === 'kof' ? '#f97316' : '#ef4444';
-  const barBg = '#0f172a';
+  const profile = getAiStyleProfile(theme === 'cyber' ? 'pixel_scifi' : theme === 'minimal' ? 'blazblue' : theme);
+  const pal = paletteOverride && paletteOverride.length >= 4 ? paletteOverride : profile.palette;
+  const frameCol = profile.id === 'gameboy' ? (pal[3] || '#9bbc0f') : theme === 'cyber' ? '#22d3ee' : theme === 'minimal' ? '#e2e8f0' : (pal[4] || '#f59e0b');
+  const p1Col = profile.id === 'gameboy' ? (pal[2] || '#8bac0f') : theme === 'cyber' ? '#38bdf8' : (pal[5] || '#22c55e');
+  const p2Col = profile.id === 'gameboy' ? (pal[1] || '#306230') : (pal[3] || '#ef4444');
+  const barBg = pal[0] || '#0f172a';
   const mid = Math.floor(w / 2);
 
   if (includeBars) {
@@ -257,7 +282,7 @@ function generateFallbackHudGrid(
     const p2Start = Math.min(w - 6, mid + 5);
     for (let y = 2; y <= 6; y++) {
       for (let x = 2; x <= barEnd; x++) {
-        g[y][x] = y === 2 || y === 6 || x === 2 || x === barEnd ? frameCol : y === 3 ? '#fef08a' : p1Col;
+        g[y][x] = y === 2 || y === 6 || x === 2 || x === barEnd ? frameCol : y === 3 ? (pal[pal.length - 1] || '#fef08a') : p1Col;
       }
       for (let x = p2Start; x <= w - 3; x++) {
         g[y][x] = y === 2 || y === 6 || x === p2Start || x === w - 3 ? frameCol : x > p2Start + 2 ? p2Col : barBg;
@@ -269,7 +294,7 @@ function generateFallbackHudGrid(
     for (let y = 1; y <= 7; y++) {
       for (let x = mid - 3; x <= mid + 3; x++) {
         if (x >= 0 && x < w) {
-          g[y][x] = y === 1 || y === 7 || x === mid - 3 || x === mid + 3 ? frameCol : '#1e293b';
+          g[y][x] = y === 1 || y === 7 || x === mid - 3 || x === mid + 3 ? frameCol : barBg;
         }
       }
     }
@@ -287,10 +312,10 @@ function generateFallbackHudGrid(
     const sy = Math.max(10, h - 5);
     for (let y = sy; y <= sy + 2 && y < h; y++) {
       for (let x = 3; x < Math.min(w - 3, mid - 4); x++) {
-        g[y][x] = y === sy || y === sy + 2 ? '#e2e8f0' : '#38bdf8';
+        g[y][x] = y === sy || y === sy + 2 ? '#e2e8f0' : (pal[6] || '#38bdf8');
       }
       for (let x = Math.max(3, mid + 4); x < w - 3; x++) {
-        g[y][x] = y === sy || y === sy + 2 ? '#e2e8f0' : '#a855f7';
+        g[y][x] = y === sy || y === sy + 2 ? '#e2e8f0' : (pal[3] || '#a855f7');
       }
     }
   }
@@ -623,6 +648,7 @@ interface RightSidebarProps {
   onRunConsoleCommand?: (cmd: string) => void;
   autoApplyAllFrames?: boolean;
   onToggleAutoApplyAllFrames?: () => void;
+  onFloatMiniPreviewToCanvas?: () => void;
   symmetryConfig?: SymmetryConfig;
   onChangeSymmetryConfig?: (next: SymmetryConfig) => void;
   // Camera Shake & Camera Keyframes
@@ -963,6 +989,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
   onRunConsoleCommand,
   autoApplyAllFrames = false,
   onToggleAutoApplyAllFrames,
+  onFloatMiniPreviewToCanvas,
   symmetryConfig,
   onChangeSymmetryConfig,
   cameraShake,
@@ -1529,6 +1556,10 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
   const [aiContextMode, setAiContextMode] = useState<AiContextualMode>('keep');
   const [aiExternalProfile, setAiExternalProfile] = useState<AiExternalProfileId>('kof');
   const [aiBlendRatio, setAiBlendRatio] = useState<number>(0.5);
+  const [aiCoherenceLevel, setAiCoherenceLevel] = useState<AiCoherenceLevel>('high');
+  const [aiPoseFidelity, setAiPoseFidelity] = useState<AiPoseFidelityLevel>('high');
+  const [trainedProjectProfile, setTrainedProjectProfile] = useState<ProjectAiTrainingProfile | null>(null);
+  const [lastAiExplanation, setLastAiExplanation] = useState<AiExplanationReport | null>(null);
   const [styleConditioning, setStyleConditioning] = useState<AiStyleMode>('inherit');
   const [selectedFxPresetId, setSelectedFxPresetId] = useState<string>('hadoken_blue');
   const [vfxPrompt, setVfxPrompt] = useState<string>('Bola de fuego Hadoken azul con chispas de energía');
@@ -1545,80 +1576,123 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
   const [vfxPreviewName, setVfxPreviewName] = useState<string>('VFX IA');
   const [vfxPreviewHitbox, setVfxPreviewHitbox] = useState<any>(null);
 
-  const projectAnalysis = useMemo(() => {
-    if (project) return analyzeProjectContext(project);
-    return analyzeProjectContext({
-      name: 'Proyecto',
-      width: canvasWidth,
-      height: canvasHeight,
+  const syntheticProjectState = useMemo<ProjectState>(
+    () =>
+      project || {
+        name: 'Proyecto Actual',
+        width: canvasWidth,
+        height: canvasHeight,
+        frames,
+        layerGroups,
+        clips: [],
+        actionTags,
+        activeClipId: '',
+        activeActionTagId: null,
+        currentFrameIndex,
+        currentLayerIndex,
+        primaryColor,
+        primaryAlpha,
+        secondaryColor,
+        secondaryAlpha: 1,
+        activeTool: 'pencil',
+        brushSize: 1,
+        activePaletteColors,
+        pixelPerfect: false,
+        ditherPattern: 'checkered',
+        activeHitboxType: 'hitbox',
+        symmetryEnabled: false,
+        symmetryAxis: Math.floor(canvasWidth / 2),
+        showGrid: true,
+        showHitboxes: true,
+        showPivot: true,
+        globalPivot: { x: Math.floor(canvasWidth / 2), y: canvasHeight - 4 },
+        stageType,
+        stageOpacity,
+        groundConfig,
+        dummyOpponent,
+        combatFx,
+        onionSkinEnabled: false,
+        onionSkinPrev: 1,
+        onionSkinNext: 0,
+        onionSkinOpacity: 0.35,
+        playbackMode: 'loop',
+      },
+    [
+      project,
+      canvasWidth,
+      canvasHeight,
       frames,
       layerGroups,
-      clips: [],
       actionTags,
-      activeClipId: '',
-      activeActionTagId: null,
       currentFrameIndex,
       currentLayerIndex,
       primaryColor,
       primaryAlpha,
       secondaryColor,
-      secondaryAlpha: 1,
-      activeTool: 'pencil',
-      brushSize: 1,
       activePaletteColors,
-      pixelPerfect: false,
-      ditherPattern: 'checkered',
-      activeHitboxType: 'hitbox',
-      symmetryEnabled: false,
-      symmetryAxis: Math.floor(canvasWidth / 2),
-      showGrid: true,
-      showHitboxes: true,
-      showPivot: true,
-      globalPivot: { x: Math.floor(canvasWidth / 2), y: canvasHeight - 4 },
       stageType,
       stageOpacity,
       groundConfig,
       dummyOpponent,
       combatFx,
-      onionSkinEnabled: false,
-      onionSkinPrev: 1,
-      onionSkinNext: 0,
-      onionSkinOpacity: 0.35,
-      playbackMode: 'loop',
-    });
-  }, [
-    project,
-    canvasWidth,
-    canvasHeight,
-    frames,
-    layerGroups,
-    actionTags,
-    currentFrameIndex,
-    currentLayerIndex,
-    primaryColor,
-    primaryAlpha,
-    secondaryColor,
-    activePaletteColors,
-    stageType,
-    stageOpacity,
-    groundConfig,
-    dummyOpponent,
-    combatFx,
-  ]);
+    ]
+  );
+
+  const projectAnalysis = useMemo(
+    () => analyzeProjectContext(syntheticProjectState),
+    [syntheticProjectState]
+  );
 
   const activeAiGuideRefs = useMemo(
     () => references.filter((r) => r.useAsAiGuide && r.dataUrl),
     [references]
   );
 
+  // Multimodal Reference Image Upload state + deep visual pixel analysis of guide image
+  const [remixPrompt, setRemixPrompt] = useState<string>('Añadir aura dorada de Ki, cinta de karate rasgada ondeando y puños incandescentes');
+  const [referenceImageBase64, setReferenceImageBase64] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [refVisualAnalysis, setRefVisualAnalysis] = useState<ReturnType<typeof analyzeProjectContext> | null>(null);
+
+  useEffect(() => {
+    const src = referenceImageBase64 || activeAiGuideRefs[0]?.dataUrl;
+    if (!src) {
+      setRefVisualAnalysis(null);
+      return;
+    }
+    let cancelled = false;
+    analyzeReferenceImageDataUrl(src).then((info) => {
+      if (!cancelled) setRefVisualAnalysis(info);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [referenceImageBase64, activeAiGuideRefs]);
+
+  const effectiveTargetProfileId = useMemo<AiExternalProfileId>(() => {
+    if (aiContextMode === 'keep') {
+      return trainedProjectProfile?.detectedProfileId || projectAnalysis.detectedProfileId;
+    }
+    if (aiContextMode === 'auto_detect') {
+      return refVisualAnalysis?.detectedProfileId || trainedProjectProfile?.detectedProfileId || projectAnalysis.detectedProfileId;
+    }
+    return aiExternalProfile;
+  }, [aiContextMode, aiExternalProfile, projectAnalysis.detectedProfileId, trainedProjectProfile, refVisualAnalysis]);
+
   // Sync effective styleConditioning for AiFxPreview
   useEffect(() => {
     if (aiContextMode === 'keep') {
       setStyleConditioning('inherit');
     } else {
-      setStyleConditioning(aiExternalProfile);
+      setStyleConditioning(effectiveTargetProfileId);
     }
-  }, [aiContextMode, aiExternalProfile]);
+  }, [aiContextMode, effectiveTargetProfileId]);
+
+  const handleTrainAiOnCurrentProject = useCallback(() => {
+    const trained = trainAiOnCurrentProject(syntheticProjectState, references);
+    setTrainedProjectProfile(trained);
+    setAiExternalProfile(trained.detectedProfileId);
+  }, [syntheticProjectState, references]);
 
   // Stage AI Generator states
   const [stagePrompt, setStagePrompt] = useState<string>('Templo dojo tradicional con columnas de madera, tatami y cielo al atardecer');
@@ -1645,20 +1719,45 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
   const [tweenFrameB, setTweenFrameB] = useState<number>(1);
   const [isTweening, setIsTweening] = useState<boolean>(false);
 
-  // Multimodal Frame Remix with Reference Image
-  const [remixPrompt, setRemixPrompt] = useState<string>('Añadir aura dorada de Ki, cinta de karate rasgada ondeando y puños incandescentes');
-  const [referenceImageBase64, setReferenceImageBase64] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const buildEffectiveContextForAi = useCallback(() => {
+    if (!refVisualAnalysis) return projectAnalysis;
+    return {
+      ...projectAnalysis,
+      lineThickness: refVisualAnalysis.lineThickness,
+      lightDirection: refVisualAnalysis.lightDirection,
+      shadingType: refVisualAnalysis.shadingType,
+    };
+  }, [projectAnalysis, refVisualAnalysis]);
+
+  const activeReferenceLabel = useMemo(() => {
+    const parts: string[] = ['Sprite/Proyecto actual'];
+    if (trainedProjectProfile) {
+      parts.push(`Entrenamiento (${trainedProjectProfile.spriteLayerCount + trainedProjectProfile.stageLayerCount + trainedProjectProfile.hudLayerCount} capas)`);
+    }
+    if (referenceImageBase64) parts.push('Imagen guía');
+    if (activeAiGuideRefs.length > 0) parts.push(`${activeAiGuideRefs.length} Ref(s)`);
+    return parts.join(' + ');
+  }, [trainedProjectProfile, referenceImageBase64, activeAiGuideRefs]);
 
   const handleGenerateStageWithAi = async () => {
     setIsGeneratingStage(true);
     setAiError(null);
     setStageOriginalSnapshot(compositeFrame(currentFrame, canvasWidth, canvasHeight, currentFrameIndex));
+    const chosenProfileId =
+      aiContextMode === 'custom' || aiContextMode === 'adapt' || aiContextMode === 'blend'
+        ? aiExternalProfile
+        : effectiveTargetProfileId;
+    const targetPalette =
+      aiContextMode === 'keep'
+        ? trainedProjectProfile?.masterPalette || projectAnalysis.activePalette
+        : getAiStyleProfile(chosenProfileId).palette;
+
     try {
       const refImages = [
         ...(referenceImageBase64 ? [referenceImageBase64] : []),
         ...activeAiGuideRefs.map((r) => r.dataUrl),
       ].slice(0, 3);
+      const ctxForAi = buildEffectiveContextForAi();
       const res = await fetch('/api/ai/stage-generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1666,46 +1765,80 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
           prompt: stagePrompt,
           width: canvasWidth,
           height: canvasHeight,
-          stylePreset: stageAiStyle,
+          stylePreset: stageAiStyle === 'sync_ai' ? chosenProfileId : stageAiStyle,
           mood: stageAiMood,
-          palette: activePaletteColors && activePaletteColors.length > 0 ? activePaletteColors : FIGHTING_GAME_PALETTES[0].colors,
+          palette: targetPalette.length > 0 ? targetPalette : FIGHTING_GAME_PALETTES[0].colors,
           styleMode: aiContextMode,
-          styleProfile: aiExternalProfile,
+          styleProfile: stageAiStyle === 'sync_ai' ? chosenProfileId : stageAiStyle,
           blendRatio: aiBlendRatio,
-          contextAnalysis: projectAnalysis,
+          contextAnalysis: ctxForAi,
+          trainedProfile: trainedProjectProfile,
+          coherenceLevel: aiCoherenceLevel,
           referenceImagesBase64: refImages,
         }),
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error);
-      let grid = createEmptyGrid(canvasWidth, canvasHeight);
-      if (Array.isArray(data.pixels)) {
-        data.pixels.forEach((p: { x: number; y: number; color: string }) => {
-          if (p.x >= 0 && p.x < canvasWidth && p.y >= 0 && p.y < canvasHeight && p.color) {
-            grid[p.y][p.x] = p.color;
-          }
-        });
-      }
+      let grid = pixelsToGrid(Array.isArray(data.pixels) ? data.pixels : [], canvasWidth, canvasHeight);
       grid = applyContextualStyleToGrid(
         grid,
         aiContextMode,
-        aiExternalProfile,
+        chosenProfileId,
         aiBlendRatio,
-        projectAnalysis.activePalette
+        targetPalette,
+        aiCoherenceLevel,
+        projectAnalysis.detectedProfileId
       );
-      setStagePreviewGrid(grid);
+      const cleaned = validateAndCleanAiPixelGrid(grid, 'stage', {
+        targetPalette,
+        coherenceLevel: aiCoherenceLevel,
+      });
+      setStagePreviewGrid(cleaned.grid);
       setStagePreviewName(data.name || 'Escenario IA');
+      setLastAiExplanation(
+        buildExplainableAiReport({
+          contextAnalysis: ctxForAi,
+          styleMode: aiContextMode,
+          profileId: chosenProfileId,
+          coherenceLevel: aiCoherenceLevel,
+          referenceUsed: activeReferenceLabel,
+          validationStats: cleaned.stats,
+        })
+      );
     } catch {
-      let fallback = generateFallbackStageGrid(canvasWidth, canvasHeight, stageAiMood, stageAiStyle);
+      const fallbackStyle = stageAiStyle === 'sync_ai' ? chosenProfileId : stageAiStyle;
+      let fallback = generateFallbackStageGrid(
+        canvasWidth,
+        canvasHeight,
+        stageAiMood,
+        fallbackStyle,
+        aiContextMode === 'keep' ? targetPalette : undefined
+      );
       fallback = applyContextualStyleToGrid(
         fallback,
         aiContextMode,
-        aiExternalProfile,
+        chosenProfileId,
         aiBlendRatio,
-        projectAnalysis.activePalette
+        targetPalette,
+        aiCoherenceLevel,
+        projectAnalysis.detectedProfileId
       );
-      setStagePreviewGrid(fallback);
-      setStagePreviewName(`Escenario ${stageAiStyle.toUpperCase()}`);
+      const cleaned = validateAndCleanAiPixelGrid(fallback, 'stage', {
+        targetPalette,
+        coherenceLevel: aiCoherenceLevel,
+      });
+      setStagePreviewGrid(cleaned.grid);
+      setStagePreviewName(`Escenario ${getAiStyleProfile(fallbackStyle).name}`);
+      setLastAiExplanation(
+        buildExplainableAiReport({
+          contextAnalysis: buildEffectiveContextForAi(),
+          styleMode: aiContextMode,
+          profileId: chosenProfileId,
+          coherenceLevel: aiCoherenceLevel,
+          referenceUsed: activeReferenceLabel,
+          validationStats: cleaned.stats,
+        })
+      );
     } finally {
       setIsGeneratingStage(false);
     }
@@ -1715,11 +1848,22 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
     setIsGeneratingHud(true);
     setAiError(null);
     setHudOriginalSnapshot(compositeFrame(currentFrame, canvasWidth, canvasHeight, currentFrameIndex));
+    const chosenProfileId =
+      aiContextMode === 'custom' || aiContextMode === 'adapt' || aiContextMode === 'blend'
+        ? aiExternalProfile
+        : effectiveTargetProfileId;
+    const targetPalette =
+      aiContextMode === 'keep'
+        ? trainedProjectProfile?.masterPalette || projectAnalysis.activePalette
+        : getAiStyleProfile(chosenProfileId).palette;
+
     try {
       const refImages = [
         ...(referenceImageBase64 ? [referenceImageBase64] : []),
         ...activeAiGuideRefs.map((r) => r.dataUrl),
       ].slice(0, 3);
+      const ctxForAi = buildEffectiveContextForAi();
+      const resolvedHudTheme = hudTheme === 'sync_ai' ? chosenProfileId : hudTheme;
       const res = await fetch('/api/ai/hud-generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1727,48 +1871,84 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
           prompt: hudPrompt,
           width: canvasWidth,
           height: canvasHeight,
-          theme: hudTheme,
+          theme: resolvedHudTheme,
           includeBars: hudIncludeBars,
           includeTimer: hudIncludeTimer,
           includeSuper: hudIncludeSuper,
-          palette: activePaletteColors && activePaletteColors.length > 0 ? activePaletteColors : FIGHTING_GAME_PALETTES[0].colors,
+          palette: targetPalette.length > 0 ? targetPalette : FIGHTING_GAME_PALETTES[0].colors,
           styleMode: aiContextMode,
-          styleProfile: aiExternalProfile,
+          styleProfile: resolvedHudTheme,
           blendRatio: aiBlendRatio,
-          contextAnalysis: projectAnalysis,
+          contextAnalysis: ctxForAi,
+          trainedProfile: trainedProjectProfile,
+          coherenceLevel: aiCoherenceLevel,
           referenceImagesBase64: refImages,
         }),
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error);
-      let grid = createEmptyGrid(canvasWidth, canvasHeight);
-      if (Array.isArray(data.pixels)) {
-        data.pixels.forEach((p: { x: number; y: number; color: string }) => {
-          if (p.x >= 0 && p.x < canvasWidth && p.y >= 0 && p.y < canvasHeight && p.color) {
-            grid[p.y][p.x] = p.color;
-          }
-        });
-      }
+      let grid = pixelsToGrid(Array.isArray(data.pixels) ? data.pixels : [], canvasWidth, canvasHeight);
       grid = applyContextualStyleToGrid(
         grid,
         aiContextMode,
-        aiExternalProfile,
+        chosenProfileId,
         aiBlendRatio,
-        projectAnalysis.activePalette
+        targetPalette,
+        aiCoherenceLevel,
+        projectAnalysis.detectedProfileId
       );
-      setHudPreviewGrid(grid);
+      const cleaned = validateAndCleanAiPixelGrid(grid, 'hud', {
+        targetPalette,
+        coherenceLevel: aiCoherenceLevel,
+      });
+      setHudPreviewGrid(cleaned.grid);
       setHudPreviewName(data.name || 'HUD Lucha IA');
+      setLastAiExplanation(
+        buildExplainableAiReport({
+          contextAnalysis: ctxForAi,
+          styleMode: aiContextMode,
+          profileId: chosenProfileId,
+          coherenceLevel: aiCoherenceLevel,
+          referenceUsed: activeReferenceLabel,
+          validationStats: cleaned.stats,
+        })
+      );
     } catch {
-      let fallback = generateFallbackHudGrid(canvasWidth, canvasHeight, hudTheme, hudIncludeBars, hudIncludeTimer, hudIncludeSuper);
+      const resolvedHudTheme = hudTheme === 'sync_ai' ? chosenProfileId : hudTheme;
+      let fallback = generateFallbackHudGrid(
+        canvasWidth,
+        canvasHeight,
+        resolvedHudTheme,
+        hudIncludeBars,
+        hudIncludeTimer,
+        hudIncludeSuper,
+        aiContextMode === 'keep' ? targetPalette : undefined
+      );
       fallback = applyContextualStyleToGrid(
         fallback,
         aiContextMode,
-        aiExternalProfile,
+        chosenProfileId,
         aiBlendRatio,
-        projectAnalysis.activePalette
+        targetPalette,
+        aiCoherenceLevel,
+        projectAnalysis.detectedProfileId
       );
-      setHudPreviewGrid(fallback);
-      setHudPreviewName(`HUD ${hudTheme.toUpperCase()}`);
+      const cleaned = validateAndCleanAiPixelGrid(fallback, 'hud', {
+        targetPalette,
+        coherenceLevel: aiCoherenceLevel,
+      });
+      setHudPreviewGrid(cleaned.grid);
+      setHudPreviewName(`HUD ${getAiStyleProfile(resolvedHudTheme).name}`);
+      setLastAiExplanation(
+        buildExplainableAiReport({
+          contextAnalysis: buildEffectiveContextForAi(),
+          styleMode: aiContextMode,
+          profileId: chosenProfileId,
+          coherenceLevel: aiCoherenceLevel,
+          referenceUsed: activeReferenceLabel,
+          validationStats: cleaned.stats,
+        })
+      );
     } finally {
       setIsGeneratingHud(false);
     }
@@ -2048,10 +2228,17 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
     reader.readAsDataURL(file);
   };
 
-  // Generate VFX (Requests full 4-frame animation sequence & opens comparative preview before applying)
+  // Generate VFX (Requests full 4-frame animation sequence & runs post-validation before previewing)
   const handleGenerateVfx = async () => {
     setIsAiLoading(true);
     setAiError(null);
+    const chosenProfileId = effectiveTargetProfileId;
+    const targetPalette =
+      aiContextMode === 'keep'
+        ? trainedProjectProfile?.masterPalette || projectAnalysis.activePalette
+        : getAiStyleProfile(chosenProfileId).palette;
+    const ctxForAi = buildEffectiveContextForAi();
+
     try {
       const refImages = [
         ...(referenceImageBase64 ? [referenceImageBase64] : []),
@@ -2064,27 +2251,52 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
           prompt: vfxPrompt,
           width: canvasWidth,
           height: canvasHeight,
-          palette: activePaletteColors && activePaletteColors.length > 0 ? activePaletteColors : FIGHTING_GAME_PALETTES[0].colors,
+          palette: targetPalette.length > 0 ? targetPalette : FIGHTING_GAME_PALETTES[0].colors,
           stylePreset: styleConditioning,
           styleMode: aiContextMode,
-          styleProfile: aiExternalProfile,
+          styleProfile: chosenProfileId,
           blendRatio: aiBlendRatio,
-          contextAnalysis: projectAnalysis,
+          contextAnalysis: ctxForAi,
+          trainedProfile: trainedProjectProfile,
+          coherenceLevel: aiCoherenceLevel,
           referenceImagesBase64: refImages,
         }),
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error);
 
-      if (data.frames && Array.isArray(data.frames) && data.frames.length > 0) {
-        setVfxPreviewFrames(data.frames);
-        setVfxPreviewName(data.name || 'VFX IA Animado');
-        setVfxPreviewHitbox(data.hitbox);
-      } else if (data.pixels && Array.isArray(data.pixels)) {
-        setVfxPreviewFrames([data.pixels]);
-        setVfxPreviewName(data.name || 'VFX IA');
-        setVfxPreviewHitbox(data.hitbox);
-      }
+      const rawFrames: { x: number; y: number; color: string }[][] =
+        data.frames && Array.isArray(data.frames) && data.frames.length > 0
+          ? data.frames
+          : data.pixels && Array.isArray(data.pixels)
+          ? [data.pixels]
+          : [];
+
+      let lastStats: ReturnType<typeof validateAndCleanAiPixelGrid>['stats'] | undefined;
+      const cleanedFrames = rawFrames.map((f) => {
+        const remapped = remapFxPixelsToStyle(f, styleConditioning, targetPalette);
+        const grid = pixelsToGrid(remapped, canvasWidth, canvasHeight);
+        const cleaned = validateAndCleanAiPixelGrid(grid, 'vfx', {
+          targetPalette,
+          coherenceLevel: aiCoherenceLevel,
+        });
+        lastStats = cleaned.stats;
+        return gridToPixels(cleaned.grid);
+      });
+
+      setVfxPreviewFrames(cleanedFrames);
+      setVfxPreviewName(data.name || 'VFX IA Animado');
+      setVfxPreviewHitbox(data.hitbox);
+      setLastAiExplanation(
+        buildExplainableAiReport({
+          contextAnalysis: ctxForAi,
+          styleMode: aiContextMode,
+          profileId: chosenProfileId,
+          coherenceLevel: aiCoherenceLevel,
+          referenceUsed: activeReferenceLabel,
+          validationStats: lastStats,
+        })
+      );
     } catch {
       const cx = Math.floor(canvasWidth * 0.65);
       const cy = Math.floor(canvasHeight * 0.45);
@@ -2118,13 +2330,31 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
           { x: cx + 9, y: cy, color: '#ffffff' },
         ],
       ];
-      const styledFallback = fallbackFrames.map((f) =>
-        remapFxPixelsToStyle(f, styleConditioning, activePaletteColors)
-      );
+      let lastStats: ReturnType<typeof validateAndCleanAiPixelGrid>['stats'] | undefined;
+      const styledFallback = fallbackFrames.map((f) => {
+        const remapped = remapFxPixelsToStyle(f, styleConditioning, targetPalette);
+        const cleaned = validateAndCleanAiPixelGrid(
+          pixelsToGrid(remapped, canvasWidth, canvasHeight),
+          'vfx',
+          { targetPalette, coherenceLevel: aiCoherenceLevel }
+        );
+        lastStats = cleaned.stats;
+        return gridToPixels(cleaned.grid);
+      });
       setVfxPreviewFrames(styledFallback);
-      setVfxPreviewName('VFX Contextual (4F)');
+      setVfxPreviewName(`VFX ${getAiStyleProfile(chosenProfileId).name} (4F)`);
       setVfxPreviewHitbox({ x: cx - 2, y: cy - 4, width: 12, height: 8 });
-      setAiError('Vista previa comparativa generada localmente. Revisa y aplica al lienzo.');
+      setLastAiExplanation(
+        buildExplainableAiReport({
+          contextAnalysis: ctxForAi,
+          styleMode: aiContextMode,
+          profileId: chosenProfileId,
+          coherenceLevel: aiCoherenceLevel,
+          referenceUsed: activeReferenceLabel,
+          validationStats: lastStats,
+        })
+      );
+      setAiError('Vista previa adaptativa generada localmente. Revisa y aplica al lienzo.');
     } finally {
       setIsAiLoading(false);
     }
@@ -2133,8 +2363,12 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
   // Inject currently selected animated FX preset directly (All 4 Frames with Style Conditioning)
   const handleInjectPresetVfx = () => {
     const activePreset = FX_PRESETS.find((p) => p.id === selectedFxPresetId) || FX_PRESETS[0];
+    const targetPalette =
+      aiContextMode === 'keep'
+        ? trainedProjectProfile?.masterPalette || projectAnalysis.activePalette
+        : getAiStyleProfile(effectiveTargetProfileId).palette;
     const remappedFrames = activePreset.frames.map((framePixels) =>
-      remapFxPixelsToStyle(framePixels, styleConditioning, activePaletteColors)
+      remapFxPixelsToStyle(framePixels, styleConditioning, targetPalette)
     );
 
     onInjectAiVfx(
@@ -2148,7 +2382,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
     );
   };
 
-  // AI Multimodal Frame Remix with Comparative Preview BEFORE Applying
+  // AI Multimodal Frame Remix with Comparative Preview + Holistic Validation BEFORE Applying
   const handleRemixFrameWithAi = async () => {
     setIsAiLoading(true);
     setAiError(null);
@@ -2159,6 +2393,12 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
       ...(referenceImageBase64 ? [referenceImageBase64] : []),
       ...activeAiGuideRefs.map((r) => r.dataUrl),
     ].slice(0, 3);
+    const chosenProfileId = effectiveTargetProfileId;
+    const targetPalette =
+      aiContextMode === 'keep'
+        ? trainedProjectProfile?.masterPalette || projectAnalysis.activePalette
+        : getAiStyleProfile(chosenProfileId).palette;
+    const ctxForAi = buildEffectiveContextForAi();
 
     try {
       const res = await fetch('/api/ai/frame-remix', {
@@ -2171,12 +2411,15 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
           referenceImagesBase64: refImages,
           width: canvasWidth,
           height: canvasHeight,
-          palette: activePaletteColors && activePaletteColors.length > 0 ? activePaletteColors : FIGHTING_GAME_PALETTES[0].colors,
+          palette: targetPalette.length > 0 ? targetPalette : FIGHTING_GAME_PALETTES[0].colors,
           stylePreset: styleConditioning,
           styleMode: aiContextMode,
-          styleProfile: aiExternalProfile,
+          styleProfile: chosenProfileId,
           blendRatio: aiBlendRatio,
-          contextAnalysis: projectAnalysis,
+          contextAnalysis: ctxForAi,
+          trainedProfile: trainedProjectProfile,
+          coherenceLevel: aiCoherenceLevel,
+          poseFidelity: aiPoseFidelity,
         }),
       });
 
@@ -2184,49 +2427,67 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
       if (data.error) throw new Error(data.error);
 
       if (data.pixels && Array.isArray(data.pixels)) {
-        const styledPixels = remapFxPixelsToStyle(data.pixels, styleConditioning, activePaletteColors);
-        let grid = createEmptyGrid(canvasWidth, canvasHeight);
-        for (const p of styledPixels) {
-          if (p.x >= 0 && p.x < canvasWidth && p.y >= 0 && p.y < canvasHeight) {
-            grid[p.y][p.x] = p.color;
-          }
-        }
+        let grid = pixelsToGrid(data.pixels, canvasWidth, canvasHeight);
         grid = applyContextualStyleToGrid(
           grid,
           aiContextMode,
-          aiExternalProfile,
+          chosenProfileId,
           aiBlendRatio,
-          projectAnalysis.activePalette
+          targetPalette,
+          aiCoherenceLevel,
+          projectAnalysis.detectedProfileId
         );
-        setRemixPreviewGrid(grid);
-        setRemixPreviewRawPixels(styledPixels);
+        const cleaned = validateAndCleanAiPixelGrid(grid, 'sprite', {
+          targetPalette,
+          coherenceLevel: aiCoherenceLevel,
+          repairOutlines: true,
+        });
+        setRemixPreviewGrid(cleaned.grid);
+        setRemixPreviewRawPixels(gridToPixels(cleaned.grid));
         setRemixPreviewHitboxes(data.hitboxes);
+        setLastAiExplanation(
+          buildExplainableAiReport({
+            contextAnalysis: ctxForAi,
+            styleMode: aiContextMode,
+            profileId: chosenProfileId,
+            coherenceLevel: aiCoherenceLevel,
+            poseFidelity: aiPoseFidelity,
+            referenceUsed: activeReferenceLabel,
+            validationStats: cleaned.stats,
+          })
+        );
       }
     } catch {
-      const rawFallback: { x: number; y: number; color: string }[] = [];
-      for (let i = 0; i < 20; i++) {
-        const rx = Math.floor(canvasWidth * (0.3 + Math.random() * 0.4));
-        const ry = Math.floor(canvasHeight * (0.2 + Math.random() * 0.6));
-        rawFallback.push({ x: rx, y: ry, color: '#ffde6a' });
-      }
-      const styledFallback = remapFxPixelsToStyle(rawFallback, styleConditioning, activePaletteColors);
-      let grid = createEmptyGrid(canvasWidth, canvasHeight);
-      for (const p of styledFallback) {
-        if (p.x >= 0 && p.x < canvasWidth && p.y >= 0 && p.y < canvasHeight) {
-          grid[p.y][p.x] = p.color;
-        }
-      }
-      grid = applyContextualStyleToGrid(
-        grid,
+      const baseComposite = compositeFrame(currentFrame, canvasWidth, canvasHeight, currentFrameIndex);
+      let grid = applyContextualStyleToGrid(
+        baseComposite,
         aiContextMode,
-        aiExternalProfile,
+        chosenProfileId,
         aiBlendRatio,
-        projectAnalysis.activePalette
+        targetPalette,
+        aiCoherenceLevel,
+        projectAnalysis.detectedProfileId
       );
-      setRemixPreviewGrid(grid);
-      setRemixPreviewRawPixels(styledFallback);
+      const cleaned = validateAndCleanAiPixelGrid(grid, 'sprite', {
+        targetPalette,
+        coherenceLevel: aiCoherenceLevel,
+        repairOutlines: true,
+      });
+      setRemixPreviewGrid(cleaned.grid);
+      setRemixPreviewRawPixels(gridToPixels(cleaned.grid));
       setRemixPreviewHitboxes(undefined);
-      setAiError('Vista previa comparativa generada localmente. Haz clic en "Aplicar al Lienzo" para confirmar.');
+      setLastAiExplanation(
+        buildExplainableAiReport({
+          contextAnalysis: ctxForAi,
+          styleMode: aiContextMode,
+          profileId: chosenProfileId,
+          coherenceLevel: aiCoherenceLevel,
+          poseFidelity: aiPoseFidelity,
+          referenceUsed: activeReferenceLabel,
+          validationStats: cleaned.stats,
+        })
+      );
+      setAiError('Vista previa adaptativa generada localmente respetando la silueta completa.');
     } finally {
       setIsAiLoading(false);
     }
@@ -2716,51 +2977,94 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                             <div className="grid grid-cols-2 gap-1 text-[10px] font-mono" style={{ color: 'var(--studio-text-muted)' }}>
                               <span>Estilo: <b style={{ color: 'var(--studio-text)' }}>{projectAnalysis.visualStyle}</b></span>
                               <span>Colores: <b style={{ color: 'var(--studio-text)' }}>{projectAnalysis.uniqueColors}</b></span>
-                              <span>Contorno: <b style={{ color: 'var(--studio-text)' }}>{projectAnalysis.lineThickness ?? 1}px</b></span>
-                              <span>Sombreado: <b style={{ color: 'var(--studio-text)' }}>{projectAnalysis.shadingType || 'cel'}</b></span>
-                              <span>Anim: <b style={{ color: 'var(--studio-text)' }}>{projectAnalysis.animationType}</b></span>
-                              <span>Proporc.: <b style={{ color: 'var(--studio-text)' }}>{projectAnalysis.characterBounds ? `${projectAnalysis.characterBounds.w}×${projectAnalysis.characterBounds.h}` : '—'}</b></span>
+                              <span>Contorno: <b style={{ color: 'var(--studio-text)' }}>{projectAnalysis.lineThickness} px</b></span>
+                              <span>Sombreado: <b style={{ color: 'var(--studio-text)' }}>{projectAnalysis.shadingType}</b></span>
+                              <span>Luz: <b style={{ color: 'var(--studio-text)' }}>{projectAnalysis.lightDirection}</b></span>
+                              <span>Anti-Alias: <b style={{ color: 'var(--studio-text)' }}>{projectAnalysis.antiAliasLevel}</b></span>
+                              <span>Detalle: <b style={{ color: 'var(--studio-text)' }}>{projectAnalysis.detailLevel}</b></span>
+                              <span>Era: <b style={{ color: 'var(--studio-text)' }}>{projectAnalysis.era}</b></span>
                             </div>
 
-                            <div className="flex items-center gap-1">
+                            {refVisualAnalysis && (
+                              <div className="px-2 py-1 rounded border border-purple-500/40 bg-purple-950/20 text-[9px] font-mono text-purple-200 flex items-center justify-between">
+                                <span>Ref analizada: {refVisualAnalysis.visualStyle} ({refVisualAnalysis.uniqueColors} col)</span>
+                                <span>{refVisualAnalysis.lineThickness}px · {refVisualAnalysis.lightDirection}</span>
+                              </div>
+                            )}
+
+                            <div className="flex items-center gap-1 flex-wrap">
                               <span className="text-[9px] font-mono mr-1" style={{ color: 'var(--studio-text-muted)' }}>Paleta:</span>
-                              {projectAnalysis.activePalette.slice(0, 8).map((c, idx) => (
+                              {(trainedProjectProfile?.masterPalette || projectAnalysis.activePalette).slice(0, 10).map((c, idx) => (
                                 <span
                                   key={`${c}-${idx}`}
                                   className="w-3.5 h-3.5 rounded-sm border border-white/25"
                                   style={{ backgroundColor: c }}
+                                  title={c}
                                 />
                               ))}
                             </div>
 
-                            <div className="grid grid-cols-3 gap-1 text-[10px]">
-                              {(
-                                [
-                                  { id: 'keep', label: 'Mantener Estilo' },
-                                  { id: 'adapt', label: 'Adaptar Perfil' },
-                                  { id: 'blend', label: 'Mezclar Estilos' },
-                                ] as { id: AiContextualMode; label: string }[]
-                              ).map((m) => (
-                                <button
-                                  key={m.id}
-                                  type="button"
-                                  onClick={() => setAiContextMode(m.id)}
-                                  className="py-1 px-1 rounded border font-semibold"
-                                  style={{
-                                    backgroundColor:
-                                      aiContextMode === m.id ? 'var(--studio-accent)' : 'var(--studio-bg-elevated)',
-                                    color:
-                                      aiContextMode === m.id ? 'var(--studio-accent-text)' : 'var(--studio-text)',
-                                    borderColor:
-                                      aiContextMode === m.id ? 'var(--studio-accent)' : 'var(--studio-border)',
-                                  }}
-                                >
-                                  {m.label}
-                                </button>
-                              ))}
+                            {/* Project AI Training Button & Status */}
+                            <button
+                              type="button"
+                              onClick={handleTrainAiOnCurrentProject}
+                              className="w-full py-1.5 px-2.5 rounded-lg border font-bold text-[10px] flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                              style={{
+                                backgroundColor: trainedProjectProfile
+                                  ? 'rgba(16, 185, 129, 0.16)'
+                                  : 'var(--studio-bg-elevated)',
+                                borderColor: trainedProjectProfile ? '#10b981' : 'var(--studio-accent)',
+                                color: trainedProjectProfile ? '#6ee7b7' : 'var(--studio-accent)',
+                              }}
+                            >
+                              <Sparkles className="w-3.5 h-3.5" />
+                              <span>
+                                {trainedProjectProfile
+                                  ? 'Re-entrenar IA con el proyecto actual'
+                                  : 'Entrenar IA con el proyecto actual'}
+                              </span>
+                            </button>
+                            {trainedProjectProfile && (
+                              <div className="px-2 py-1 rounded bg-emerald-950/30 border border-emerald-500/30 text-[9px] font-mono text-emerald-300 leading-snug">
+                                {trainedProjectProfile.summary}
+                              </div>
+                            )}
+
+                            {/* Obligatory Target Style Selector */}
+                            <div className="flex flex-col gap-1">
+                              <span className="text-[10px] font-bold" style={{ color: 'var(--studio-text-muted)' }}>
+                                Estilo objetivo (Obligatorio):
+                              </span>
+                              <div className="grid grid-cols-2 gap-1 text-[10px]">
+                                {(
+                                  [
+                                    { id: 'keep', label: 'Mantener estilo actual' },
+                                    { id: 'auto_detect', label: 'Detectar automáticamente' },
+                                    { id: 'custom', label: 'Personalizado (16)' },
+                                    { id: 'blend', label: 'Mezclar estilos' },
+                                  ] as { id: AiContextualMode; label: string }[]
+                                ).map((m) => (
+                                  <button
+                                    key={m.id}
+                                    type="button"
+                                    onClick={() => setAiContextMode(m.id)}
+                                    className="py-1 px-1.5 rounded border font-semibold truncate"
+                                    style={{
+                                      backgroundColor:
+                                        aiContextMode === m.id ? 'var(--studio-accent)' : 'var(--studio-bg-elevated)',
+                                      color:
+                                        aiContextMode === m.id ? 'var(--studio-accent-text)' : 'var(--studio-text)',
+                                      borderColor:
+                                        aiContextMode === m.id ? 'var(--studio-accent)' : 'var(--studio-border)',
+                                    }}
+                                  >
+                                    {m.label}
+                                  </button>
+                                ))}
+                              </div>
                             </div>
 
-                            {aiContextMode !== 'keep' && (
+                            {(aiContextMode === 'custom' || aiContextMode === 'adapt' || aiContextMode === 'blend') && (
                               <div className="flex flex-col gap-1.5">
                                 <select
                                   value={aiExternalProfile}
@@ -2774,10 +3078,13 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                                 >
                                   {AI_EXTERNAL_PROFILES.map((prof) => (
                                     <option key={prof.id} value={prof.id}>
-                                      {prof.name}
+                                      {prof.name} — {prof.era}
                                     </option>
                                   ))}
                                 </select>
+                                <p className="text-[9px] leading-snug" style={{ color: 'var(--studio-text-muted)' }}>
+                                  {getAiStyleProfile(aiExternalProfile).description}
+                                </p>
                                 {aiContextMode === 'blend' && (
                                   <StudioSlider
                                     variant="panel"
@@ -2793,6 +3100,46 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                                 )}
                               </div>
                             )}
+
+                            {/* Coherence & Pose Fidelity Controls */}
+                            <div className="grid grid-cols-2 gap-1.5 pt-0.5">
+                              <div className="flex flex-col gap-1">
+                                <span className="text-[9px]" style={{ color: 'var(--studio-text-muted)' }}>Nivel de coherencia</span>
+                                <select
+                                  value={aiCoherenceLevel}
+                                  onChange={(e) => setAiCoherenceLevel(e.target.value as AiCoherenceLevel)}
+                                  className="px-1.5 py-1 rounded border text-[10px] font-mono"
+                                  style={{
+                                    backgroundColor: 'var(--studio-bg-elevated)',
+                                    borderColor: 'var(--studio-border-strong)',
+                                    color: 'var(--studio-text)',
+                                  }}
+                                >
+                                  <option value="low">Baja</option>
+                                  <option value="medium">Media</option>
+                                  <option value="high">Alta</option>
+                                  <option value="max">Máxima</option>
+                                </select>
+                              </div>
+                              <div className="flex flex-col gap-1">
+                                <span className="text-[9px]" style={{ color: 'var(--studio-text-muted)' }}>Fidelidad a la pose</span>
+                                <select
+                                  value={aiPoseFidelity}
+                                  onChange={(e) => setAiPoseFidelity(e.target.value as AiPoseFidelityLevel)}
+                                  className="px-1.5 py-1 rounded border text-[10px] font-mono"
+                                  style={{
+                                    backgroundColor: 'var(--studio-bg-elevated)',
+                                    borderColor: 'var(--studio-border-strong)',
+                                    color: 'var(--studio-text)',
+                                  }}
+                                >
+                                  <option value="low">Baja</option>
+                                  <option value="medium">Media</option>
+                                  <option value="high">Alta</option>
+                                  <option value="exact">Exacta</option>
+                                </select>
+                              </div>
+                            </div>
                           </div>
                         )}
                       </div>
@@ -2987,6 +3334,9 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                                 />
                               </div>
                             </div>
+                            {lastAiExplanation && (
+                              <ExplainableAiCard report={lastAiExplanation} compact />
+                            )}
                             <div className="grid grid-cols-2 gap-1">
                               <button
                                 type="button"
@@ -3103,6 +3453,9 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                                 />
                               </div>
                             </div>
+                            {lastAiExplanation && (
+                              <ExplainableAiCard report={lastAiExplanation} compact />
+                            )}
                             <div className="grid grid-cols-2 gap-1">
                               <button
                                 type="button"
@@ -3234,7 +3587,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
 
                             <div className="grid grid-cols-2 gap-1.5">
                               <div className="flex flex-col gap-1">
-                                <span className="text-[10px]" style={{ color: 'var(--studio-text-muted)' }}>Estilo</span>
+                                <span className="text-[10px]" style={{ color: 'var(--studio-text-muted)' }}>Estilo (16 + Proyecto)</span>
                                 <select
                                   value={stageAiStyle}
                                   onChange={(e) => setStageAiStyle(e.target.value)}
@@ -3245,11 +3598,12 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                                     color: 'var(--studio-text)',
                                   }}
                                 >
-                                  <option value="kof">SNK / KOF</option>
-                                  <option value="cps2">Capcom CPS-2</option>
-                                  <option value="cyberpunk">Cyberpunk Neón</option>
-                                  <option value="dojo">Dojo Clásico</option>
-                                  <option value="8bit">Arcade 8-Bit</option>
+                                  <option value="sync_ai">Usar Estilo Objetivo IA</option>
+                                  {AI_EXTERNAL_PROFILES.map((prof) => (
+                                    <option key={prof.id} value={prof.id}>
+                                      {prof.name}
+                                    </option>
+                                  ))}
                                 </select>
                               </div>
                               <div className="flex flex-col gap-1">
@@ -3348,6 +3702,9 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                                   />
                                 </div>
                               </div>
+                              {lastAiExplanation && (
+                                <ExplainableAiCard report={lastAiExplanation} compact />
+                              )}
                               <div className="grid grid-cols-2 gap-1.5">
                                 <button
                                   type="button"
@@ -3427,7 +3784,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                             />
 
                             <div className="flex flex-col gap-1">
-                              <span className="text-[10px]" style={{ color: 'var(--studio-text-muted)' }}>Estilo de Interfaz HUD</span>
+                              <span className="text-[10px]" style={{ color: 'var(--studio-text-muted)' }}>Estilo de Interfaz HUD (16 + Proyecto)</span>
                               <select
                                 value={hudTheme}
                                 onChange={(e) => setHudTheme(e.target.value)}
@@ -3438,10 +3795,12 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                                   color: 'var(--studio-text)',
                                 }}
                               >
-                                <option value="cps2">Capcom CPS-2 Clásico (Amarillo/Rojo)</option>
-                                <option value="kof">SNK KOF / Neo-Geo (Metálico)</option>
-                                <option value="cyber">Futurista Cyberpunk (Cian/Magenta)</option>
-                                <option value="minimal">Torneo Minimalista HD</option>
+                                <option value="sync_ai">Usar Estilo Objetivo IA</option>
+                                {AI_EXTERNAL_PROFILES.map((prof) => (
+                                  <option key={prof.id} value={prof.id}>
+                                    {prof.name} ({prof.era})
+                                  </option>
+                                ))}
                               </select>
                             </div>
 
@@ -3536,6 +3895,9 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                                   />
                                 </div>
                               </div>
+                              {lastAiExplanation && (
+                                <ExplainableAiCard report={lastAiExplanation} compact />
+                              )}
                               <div className="grid grid-cols-2 gap-1.5">
                                 <button
                                   type="button"
@@ -4003,6 +4365,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                       isPlaying={isPlaying}
                       onTogglePlay={() => onTogglePlay?.()}
                       onSelectFrame={(idx) => onSelectFrame?.(idx)}
+                      onFloatToCanvas={onFloatMiniPreviewToCanvas}
                     />
                   )}
 
