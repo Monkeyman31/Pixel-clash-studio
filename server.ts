@@ -54,15 +54,18 @@ const STYLE_PROFILE_DIRECTIVES: Record<string, string> = {
   cps2: 'Capcom CPS-2 16-color indexed sprite palette: vibrant saturated cel-shaded hues, high readability against detailed arcade backgrounds.',
   snk_neogeo: '1990s SNK Neo Geo MVS 16-bit pixel art: subtle artisanal dithering, gritty warm earth and metallic tones, authentic arcade contrast.',
   kof: 'The King of Fighters arcade pixel art aesthetic: crisp 1px dark outlines, dramatic directional rim light, dynamic Neo-Geo fighting silhouettes.',
+  garou: 'Garou: Mark of the Wolves (1999 SNK) master pixel art style: fluid anatomical motion creases, warm directional sunlight vs cool twilight shadows, crisp 1px variable-dark ink outlines.',
   sf_alpha: 'Street Fighter Alpha 3 CPS-2 anime pixel art style: bold muscular shapes, clean cel-shaded color ramps, bright tournament-readable highlights.',
   darkstalkers: 'Darkstalkers Vampire Savior style: exaggerated gothic arcade animation, saturated violet/magenta shadows and eerie emerald highlights.',
   metal_slug: 'Metal Slug SNK/Nazca masterclass pixel art: dense weathered metallic/fabric micro-texture, warm olive drab, rust, smoky orange bursts.',
   guilty_gear: 'Guilty Gear anime fighting game aesthetic: sharp 1-2px angular outlines, heavy contrast shadows, neon magenta and electric cyan energy.',
   blazblue: 'BlazBlue 2D anime fighter sprite aesthetic: crystalline azure and royal blue lighting, ornate gold trim, razor-sharp arcane energy bursts.',
+  skullgirls: 'Skullgirls dark Art Deco fighting game aesthetic rendered in crisp pixel art: thick bold ink outlines, elastic silhouette readability, dramatic plum/crimson/gold cel shading.',
   pixel_fantasy: 'Handcrafted Pixel Fantasy action/fighter sprite style: crisp steel highlights, emerald and arcane gold magic runes, rich wood/leather tones.',
   pixel_scifi: 'Sci-Fi Cyberpunk pixel art aesthetic: deep midnight shadows with intense cyan, hot pink, and lime neon rim-lighting and holographic accents.',
   pixel_cyberpunk: 'Sci-Fi Cyberpunk pixel art aesthetic: deep midnight shadows with intense cyan, hot pink, and lime neon rim-lighting and holographic accents.',
   pixel_rpg: 'Classic Pixel RPG sprite style: balanced readable proportions, warm skin/cloth shading, clean 1px dark sepia/indigo outlines.',
+  custom: 'Follow the artist custom style definition, outline width, shading type, and exact palette colors strictly.',
 };
 
 function buildContextualDirective(
@@ -75,6 +78,8 @@ function buildContextualDirective(
     trainedProfile?: any;
     coherenceLevel?: string;
     poseFidelity?: string;
+    referenceFidelity?: string;
+    customStyleDescription?: string;
   }
 ): string {
   const effectiveProfileKey =
@@ -83,7 +88,10 @@ function buildContextualDirective(
       : styleProfile === 'pixel_cyberpunk'
       ? 'pixel_scifi'
       : styleProfile;
-  const profileDesc = STYLE_PROFILE_DIRECTIVES[effectiveProfileKey] || STYLE_PROFILE_DIRECTIVES.kof;
+  const profileDesc =
+    effectiveProfileKey === 'custom' && options?.customStyleDescription
+      ? `CUSTOM ARTIST STYLE: ${options.customStyleDescription}`
+      : STYLE_PROFILE_DIRECTIVES[effectiveProfileKey] || STYLE_PROFILE_DIRECTIVES.kof;
 
   const ctxSummary = contextAnalysis
     ? `Active Project Visual Analysis -> Style: ${contextAnalysis.visualStyle} (${contextAnalysis.era || 'Arcade'}), Detected Profile: ${contextAnalysis.detectedProfileId || effectiveProfileKey}, Resolution: ${contextAnalysis.resolution}, Colors Used: ${contextAnalysis.uniqueColors}, Outline: ${contextAnalysis.lineThickness ?? 1}px, Shading: ${contextAnalysis.shadingType || 'cel'}, Light Direction: ${contextAnalysis.lightDirection || 'top-left'}, Anti-Alias: ${contextAnalysis.antiAliasLevel || 'none'}, Detail Level: ${contextAnalysis.detailLevel || 'medium'}, Animation: ${contextAnalysis.animationType}, Palette: ${(contextAnalysis.activePalette || palette).slice(0, 14).join(', ')}.`
@@ -101,17 +109,17 @@ function buildContextualDirective(
       ? 'COHERENCE: HIGH — Keep clean contiguous silhouettes, zero accidental 1px holes or isolated stray noise pixels, and crisp solid hex colors.'
       : 'COHERENCE: BALANCED — Maintain clean pixel clusters and readable fighting-game silhouettes without stray single-pixel noise.';
 
-  const fidelity = options?.poseFidelity;
+  const fidelity = options?.referenceFidelity || options?.poseFidelity;
   const fidelityRule =
     fidelity === 'exact'
-      ? ' POSE FIDELITY: EXACT — Match silhouette proportions, limb inclination, perspective, hand gesture, and character posture strictly as one holistic connected figure; NEVER cut or fragment limbs into disconnected pieces.'
+      ? ' FIDELITY: EXACT — Match silhouette, proportions, posture, hair, clothing, accessories, and limb geometry strictly as one holistic connected figure; NEVER cut or fragment limbs.'
       : fidelity === 'high'
-      ? ' POSE FIDELITY: HIGH — Interpret the entire character coherently with accurate limb angles and intact body continuity.'
+      ? ' FIDELITY: HIGH — Interpret the entire character coherently preserving hair, outfit, accessories, proportions, and intact body continuity.'
       : '';
 
   let modeDirective = '';
   if (styleMode === 'adapt' || styleMode === 'custom') {
-    modeDirective = `MODE: CUSTOM/ADAPT TO PROFILE (${effectiveProfileKey}). ${profileDesc}`;
+    modeDirective = `MODE: MANUAL/ADAPT TARGET STYLE (${effectiveProfileKey}). ${profileDesc}`;
   } else if (styleMode === 'auto_detect') {
     modeDirective = `MODE: AUTO-DETECTED PROJECT STYLE (${effectiveProfileKey}). ${profileDesc} Harmonize with project lighting and outline thickness.`;
   } else if (styleMode === 'blend') {
@@ -439,79 +447,75 @@ Output ONLY valid JSON with this schema:
   }
 });
 
-// API: AI In-Between Frame Interpolator (Generates intermediate motion frame between Frame A and Frame B)
+// API: AI In-Between Frame Interpolator (Supports single or multi-frame interpolation + quality controls)
 app.post('/api/ai/tween-frame', async (req, res) => {
   try {
-    const { 
-      frameABase64, 
-      frameBBase64, 
+    const {
+      frameABase64,
+      frameBBase64,
       moveName = 'Ataque de Combate',
-      width = 48, 
-      height = 48, 
-      palette = [] 
+      width = 48,
+      height = 48,
+      palette = [],
+      frameCount = 1,
+      detailLevel = 'high',
+      smoothness = 75,
+      styleMode = 'keep',
+      styleProfile = 'kof',
+      customStyleDescription = '',
+      contextAnalysis,
+      trainedProfile,
+      coherenceLevel = 'high',
     } = req.body;
 
     if (!ai) {
       return res.status(503).json({
         error: 'GEMINI_API_KEY no configurado en el servidor.',
-        fallback: true
+        fallback: true,
       });
     }
 
+    const safeCount = Math.max(1, Math.min(8, Math.round(Number(frameCount) || 1)));
+    const contextualDirective = buildContextualDirective(
+      styleMode,
+      styleProfile,
+      0.5,
+      contextAnalysis,
+      palette,
+      { trainedProfile, coherenceLevel, customStyleDescription }
+    );
+
     const parts: any[] = [];
-
-    // Add Frame A
     if (frameABase64 && typeof frameABase64 === 'string') {
-      const match = frameABase64.match(/^data:(image\/\w+);base64,(.+)$/);
-      if (match) {
-        parts.push({
-          inlineData: { mimeType: match[1], data: match[2] }
-        });
-      }
+      const match = frameABase64.match(/^data:(image\/[a-zA-Z0-9+.-]+);base64,(.+)$/);
+      if (match) parts.push({ inlineData: { mimeType: match[1], data: match[2] } });
     }
-
-    // Add Frame B
     if (frameBBase64 && typeof frameBBase64 === 'string') {
-      const match = frameBBase64.match(/^data:(image\/\w+);base64,(.+)$/);
-      if (match) {
-        parts.push({
-          inlineData: { mimeType: match[1], data: match[2] }
-        });
-      }
+      const match = frameBBase64.match(/^data:(image\/[a-zA-Z0-9+.-]+);base64,(.+)$/);
+      if (match) parts.push({ inlineData: { mimeType: match[1], data: match[2] } });
     }
 
-    const systemInstruction = `You are a legendary fighting game animation director and pixel artist (Capcom Street Fighter III: 3rd Strike, Darkstalkers, Guilty Gear).
-You are given two keyframes of a fighting move:
-- Frame A: Starting/anticipation pose
-- Frame B: Impact/destination pose
-Your task: Generate the intermediate IN-BETWEEN frame (Tween/Smear frame) that connects Frame A and Frame B smoothly.
+    const systemInstruction = `You are a legendary fighting game animation director and pixel artist (Street Fighter III: 3rd Strike, Garou, Darkstalkers, Guilty Gear).
+You are given Frame A (start pose) and Frame B (end pose).
+${contextualDirective}
+Quality Controls -> Frames to generate: ${safeCount}, Detail Level: ${detailLevel}, Smoothness: ${smoothness}%.
+Task: Generate exactly ${safeCount} progressive intermediate IN-BETWEEN frame(s) smoothly connecting Frame A into Frame B with intact silhouettes, zero detached body parts, and crisp solid hex pixels.
 Rules:
 - Size is ${width}x${height} (0 to ${width - 1} for x, 0 to ${height - 1} for y).
-- Maintain consistent color palette with Frame A and B: ${palette.slice(0, 16).join(', ')}.
-- Include dynamic motion lines, limb stretching, or energy blur streaks where the attack is moving.
+- Maintain consistent color palette: ${palette.slice(0, 16).join(', ')}.
 - Output ONLY valid JSON:
 {
   "frameName": string,
   "phase": "startup" | "active" | "recovery",
   "durationTicks": number,
-  "pixels": [
-    {"x": number, "y": number, "color": string}
-  ],
-  "hitboxes": [
-    {
-      "type": "hurtbox" | "hitbox" | "pushbox",
-      "x": number,
-      "y": number,
-      "width": number,
-      "height": number,
-      "name": string
-    }
-  ],
+  "pixels": [{"x": number, "y": number, "color": string}],
+  "frames": [[{"x": number, "y": number, "color": string}]],
+  "hitboxes": [{"type": "hurtbox" | "hitbox" | "pushbox", "x": number, "y": number, "width": number, "height": number, "name": string}],
   "directorNotes": string
 }`;
 
     parts.push({
-      text: `Move: "${moveName}". Generate the perfect in-between transition frame connecting Frame A (anticipation) and Frame B (strike/destination) at ${width}x${height} pixels.`
+      text: `Move: "${moveName}". Generate ${safeCount} smooth in-between frame(s) connecting Frame A and Frame B at ${width}x${height} with detail=${detailLevel}, smoothness=${smoothness}%, style=${styleProfile}.`,
     });
 
     const response = await ai.models.generateContent({
@@ -520,7 +524,7 @@ Rules:
       config: {
         systemInstruction,
         responseMimeType: 'application/json',
-      }
+      },
     });
 
     const parsed = JSON.parse(response.text || '{}');
@@ -528,6 +532,180 @@ Rules:
   } catch (error: any) {
     console.error('Error generating in-between frame:', error);
     return res.status(500).json({ error: error.message || 'Error al generar in-between con IA' });
+  }
+});
+
+// API: Dedicated Character AI Studio Endpoint (Create, Variation, Recolor, Outfit, Anatomy, Reference Adapt)
+app.post('/api/ai/character-generate', async (req, res) => {
+  try {
+    const {
+      taskMode = 'variation',
+      prompt = '',
+      currentFrameBase64,
+      referenceImagesBase64 = [],
+      width = 48,
+      height = 48,
+      palette = [],
+      styleMode = 'keep',
+      styleProfile = 'kof',
+      blendRatio = 0.5,
+      customStyleDescription = '',
+      contextAnalysis,
+      trainedProfile,
+      coherenceLevel = 'high',
+      referenceFidelity = 'high',
+      preserveFlags = {
+        silhouette: true,
+        proportions: true,
+        posture: true,
+        design: true,
+        hair: true,
+        outfit: true,
+        accessories: true,
+      },
+    } = req.body;
+
+    if (!ai) {
+      return res.status(503).json({ error: 'GEMINI_API_KEY not configured on server.', fallback: true });
+    }
+
+    const parts: any[] = [];
+    if (typeof currentFrameBase64 === 'string') {
+      const m = currentFrameBase64.match(/^data:(image\/[a-zA-Z0-9+.-]+);base64,(.+)$/);
+      if (m) parts.push({ inlineData: { mimeType: m[1], data: m[2] } });
+    }
+    appendReferenceGuideImages(parts, referenceImagesBase64);
+
+    const contextualDirective = buildContextualDirective(
+      styleMode,
+      styleProfile,
+      blendRatio,
+      contextAnalysis,
+      palette,
+      { trainedProfile, coherenceLevel, referenceFidelity, customStyleDescription }
+    );
+
+    const preserveList = Object.entries(preserveFlags)
+      .filter(([, v]) => Boolean(v))
+      .map(([k]) => k)
+      .join(', ');
+
+    const modeDirectives: Record<string, string> = {
+      create: 'CHARACTER CREATION: Design a complete original fighting-game pixel-art character matching the target style and proportions.',
+      variation: 'CHARACTER VARIATION: Generate an expressive costume/stance variation while respecting preserved character identity traits.',
+      recolor: 'CHARACTER RECOLOR / 2P PALETTE: Keep linework & shading intact while remapping hue ramps harmonically to target palette.',
+      outfit: 'OUTFIT CHANGE: Change clothing/armor cleanly while keeping face, hair, anatomy, and pose completely intact.',
+      anatomy: 'ANATOMY ADJUSTMENT: Refine muscularity, height/build, or fighting posture cohesively as one intact character.',
+      reference_adapt: 'REFERENCE ADAPTATION: Faithfully adapt the attached reference character into crisp pixel art honoring silhouette, hair, outfit, accessories, and posture.',
+    };
+
+    const systemInstruction = `You are a lead pixel-art character designer for 2D fighting games (Street Fighter, KOF, Garou, Skullgirls, Guilty Gear).
+${modeDirectives[String(taskMode)] || modeDirectives.variation}
+${contextualDirective}
+PRESERVE STRICTLY: ${preserveList || 'silhouette, proportions, design'}.
+REFERENCE FIDELITY: ${referenceFidelity.toUpperCase()} — Respect silhouette, hair, outfit, accessories, proportions, and posture without chopping limbs or adding stray 1px noise.
+Output ONLY valid JSON:
+{
+  "name": string,
+  "description": string,
+  "pixels": [{"x": number, "y": number, "color": string}],
+  "hitboxes": [{"type": "hurtbox" | "pushbox", "x": number, "y": number, "width": number, "height": number, "name": string}]
+}
+Rules: Grid ${width}x${height} (0..${width - 1}, 0..${height - 1}), crisp solid #rrggbb hex colors, transparent background.`;
+
+    parts.push({
+      text: `Character Task (${taskMode}): "${prompt || 'Guerrero pixel art'}". Fidelity: ${referenceFidelity}, Style: ${styleProfile}, Preserve: ${preserveList}, Size: ${width}x${height}.`,
+    });
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-4-hydrogen',
+      contents: parts,
+      config: { systemInstruction, responseMimeType: 'application/json' },
+    });
+    return res.json(JSON.parse(response.text || '{}'));
+  } catch (error: any) {
+    console.error('Error in character-generate:', error);
+    return res.status(500).json({ error: error.message || 'Failed to generate character with AI' });
+  }
+});
+
+// API: Dedicated Animation AI Studio Endpoint (Generate, Fix, Cycle, Transition)
+app.post('/api/ai/animation-generate', async (req, res) => {
+  try {
+    const {
+      taskMode = 'generate',
+      prompt = '',
+      currentFrameBase64,
+      referenceImagesBase64 = [],
+      width = 48,
+      height = 48,
+      frameCount = 4,
+      detailLevel = 'high',
+      smoothness = 80,
+      palette = [],
+      styleMode = 'keep',
+      styleProfile = 'kof',
+      customStyleDescription = '',
+      contextAnalysis,
+      trainedProfile,
+      coherenceLevel = 'high',
+    } = req.body;
+
+    if (!ai) {
+      return res.status(503).json({ error: 'GEMINI_API_KEY not configured on server.', fallback: true });
+    }
+
+    const safeCount = Math.max(2, Math.min(12, Math.round(Number(frameCount) || 4)));
+    const parts: any[] = [];
+    if (typeof currentFrameBase64 === 'string') {
+      const m = currentFrameBase64.match(/^data:(image\/[a-zA-Z0-9+.-]+);base64,(.+)$/);
+      if (m) parts.push({ inlineData: { mimeType: m[1], data: m[2] } });
+    }
+    appendReferenceGuideImages(parts, referenceImagesBase64);
+
+    const contextualDirective = buildContextualDirective(
+      styleMode,
+      styleProfile,
+      0.5,
+      contextAnalysis,
+      palette,
+      { trainedProfile, coherenceLevel, customStyleDescription }
+    );
+
+    const animModeDesc: Record<string, string> = {
+      generate: 'GENERATE FULL ANIMATION: Create anticipation, active strike/action, follow-through, and recovery frames.',
+      fix: 'FIX & POLISH ANIMATION: Stabilize silhouette volume, fix jittery pixels, smooth arcs, and preserve character consistency.',
+      cycle: 'SEAMLESS LOOP CYCLE: Ensure final frame flows smoothly back into frame 1 (idle breathing, walk, run, aura loop).',
+      transition: 'ACTION TRANSITION: Bridge current stance smoothly into target stance with clean weight transfer.',
+    };
+
+    const systemInstruction = `You are a veteran 2D fighting game animation director (CPS-2, KOF XIII, Garou, Skullgirls).
+${animModeDesc[String(taskMode)] || animModeDesc.generate}
+${contextualDirective}
+Quality Controls -> Frames: ${safeCount}, Detail Level: ${detailLevel}, Smoothness: ${smoothness}%.
+Output ONLY valid JSON:
+{
+  "name": string,
+  "description": string,
+  "frames": [[{"x": number, "y": number, "color": string}]],
+  "phaseNames": string[],
+  "directorNotes": string
+}
+Rules: Return exactly ${safeCount} frames in "frames", each ${width}x${height} (0..${width - 1}, 0..${height - 1}), crisp solid #rrggbb pixels, coherent silhouettes.`;
+
+    parts.push({
+      text: `Animation Task (${taskMode}): "${prompt || 'Secuencia de combate fluida'}". Frames: ${safeCount}, Detail: ${detailLevel}, Smoothness: ${smoothness}%, Style: ${styleProfile}.`,
+    });
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-4-hydrogen',
+      contents: parts,
+      config: { systemInstruction, responseMimeType: 'application/json' },
+    });
+    return res.json(JSON.parse(response.text || '{}'));
+  } catch (error: any) {
+    console.error('Error in animation-generate:', error);
+    return res.status(500).json({ error: error.message || 'Failed to generate animation with AI' });
   }
 });
 
@@ -697,6 +875,8 @@ app.post('/api/ai/stage-generate', async (req, res) => {
       mood = 'night',
       layerMode = 'full',
       biome = '',
+      stageCategory = 'escenarios',
+      customStyleDescription = '',
       palette = [],
       referenceImagesBase64 = [],
     } = req.body;
@@ -714,14 +894,15 @@ app.post('/api/ai/stage-generate', async (req, res) => {
       blendRatio,
       contextAnalysis,
       palette,
-      { trainedProfile, coherenceLevel }
+      { trainedProfile, coherenceLevel, customStyleDescription }
     );
 
-    const systemInstruction = `You are a master retro fighting game background & stage pixel artist.
-Generate a cohesive pixel-art fighting game stage composition for a ${width}x${height} canvas that strictly adapts to the target visual style (${styleProfile || stylePreset}) and project training context.
+    const systemInstruction = `You are a master retro fighting game background, environment & tileset pixel artist.
+Generate a cohesive pixel-art environment asset (Category: ${stageCategory}) for a ${width}x${height} canvas that strictly adapts to the target visual style (${styleProfile || stylePreset}) and project training context.
+NEVER draw fighter characters or UI bars here — produce ONLY world scenery/environment pixels.
 ${contextualDirective}
 ${biome ? `Stage Category / Biome: ${biome}.` : ''}
-Atmosphere/Mood: ${mood}. Layer Mode: ${layerMode}.
+Atmosphere/Mood: ${mood}. Layer Mode: ${layerMode}. Category Focus: ${stageCategory} (fondos/skyline | escenarios/arena | decoracion/props | parallax band | seamless tileset | world element).
 If reference images are provided, analyze their palette, lighting direction, outline thickness, and visual era before generating.
 Output ONLY a valid JSON object:
 {
@@ -735,8 +916,7 @@ Output ONLY a valid JSON object:
 Rules:
 - Coordinates MUST be within 0..${width - 1} for x and 0..${height - 1} for y.
 - Adapt architectural details, sky shading/dithering, and ground floor cleanly to the active style profile (${styleProfile || stylePreset}).
-- Keep clean fighting readability: darker grounded floor at bottom ~25% of canvas, atmospheric architecture/sky/props above. Zero random stray 1px noise.
-- Return 180 to 900 crisp solid #rrggbb hex pixels forming recognizable retro fighting game stage scenery.`;
+- Zero random stray 1px noise. Return crisp solid #rrggbb hex pixels forming recognizable pixel-art scenery.`;
 
     const parts: any[] = [];
     appendReferenceGuideImages(parts, referenceImagesBase64);
@@ -778,6 +958,8 @@ app.post('/api/ai/hud-generate', async (req, res) => {
       coherenceLevel = 'high',
       includeElements = ['healthbars', 'timer', 'super'],
       elementCategory = '',
+      hudCategory = 'barras_vida',
+      customStyleDescription = '',
       palette = [],
       referenceImagesBase64 = [],
     } = req.body;
@@ -796,13 +978,14 @@ app.post('/api/ai/hud-generate', async (req, res) => {
       blendRatio,
       contextAnalysis,
       palette,
-      { trainedProfile, coherenceLevel }
+      { trainedProfile, coherenceLevel, customStyleDescription }
     );
 
     const systemInstruction = `You are an expert arcade fighting game UI/HUD pixel designer.
-Generate a retro pixel-art fighting game HUD layout overlay on a transparent ${width}x${height} grid tailored authentically to the target visual style (${styleProfile || activeTheme}).
+Generate a retro pixel-art HUD / UI asset (Category: ${elementCategory || hudCategory}) on a transparent ${width}x${height} grid tailored authentically to the target visual style (${styleProfile || activeTheme}).
+NEVER generate characters or stage backgrounds — ONLY crisp UI/HUD pixel components.
 ${contextualDirective}
-${elementCategory ? `UI Element Category: ${elementCategory}.` : ''}
+UI Element Category: ${elementCategory || hudCategory} (barras_vida | retratos | interfaces | menus | marcadores).
 Include elements: ${Array.isArray(includeElements) ? includeElements.join(', ') : 'healthbars, timer, super'}.
 HUD Theme: ${activeTheme}.
 Output ONLY a valid JSON object:
@@ -816,9 +999,8 @@ Output ONLY a valid JSON object:
 }
 Rules:
 - Coordinates strictly 0..${width - 1} for x and 0..${height - 1} for y.
-- Match frame bevels, typography blocks, color contrast, and bar styling strictly to the target style (e.g. Neo Geo brushed steel & amber/crimson, CPS2 bright yellow/cyan bars, Guilty Gear angular heavy-metal crimson/silver, 8-bit 4-color gauges).
-- Keep the center combat area transparent so fighters remain visible; place life bars/portraits/timer near top rows and super/combo meters near bottom rows.
-- Return 90 to 550 crisp #rrggbb hex pixels with zero stray orphan specks.`;
+- Match frame bevels, typography blocks, color contrast, and bar styling strictly to the target style.
+- Keep non-UI combat center transparent so fighters remain visible; return crisp #rrggbb hex pixels with zero stray orphan specks.`;
 
     const parts: any[] = [];
     appendReferenceGuideImages(parts, referenceImagesBase64);

@@ -39,16 +39,16 @@ export const ExplainableAiCard: React.FC<ExplainableAiCardProps> = ({ report, co
     <div
       className={`rounded-lg border flex flex-col gap-1.5 text-[10px] ${compact ? 'p-2' : 'p-2.5'}`}
       style={{
-        backgroundColor: 'color-mix(in srgb, var(--studio-bg-elevated) 85%, transparent)',
-        borderColor: 'color-mix(in srgb, var(--studio-accent) 45%, var(--studio-border))',
+        backgroundColor: 'var(--studio-bg-elevated)',
+        borderColor: 'var(--studio-border-strong)',
       }}
     >
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex items-center justify-between gap-2 pb-1 border-b" style={{ borderColor: 'var(--studio-border)' }}>
         <span className="font-bold flex items-center gap-1" style={{ color: 'var(--studio-accent)' }}>
           <Info className="w-3 h-3 shrink-0" />
-          <span>IA Explicable</span>
+          <span>Diagnóstico IA</span>
         </span>
-        <span className="font-mono text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
+        <span className="font-mono text-[9px] text-emerald-400 flex items-center gap-1">
           <CheckCircle2 className="w-2.5 h-2.5" />
           <span>Coherencia {COHERENCE_LABELS[report.coherenceLevel] || report.coherenceLevel}</span>
         </span>
@@ -62,26 +62,34 @@ export const ExplainableAiCard: React.FC<ExplainableAiCardProps> = ({ report, co
           Objetivo: <b style={{ color: 'var(--studio-accent)' }}>{report.targetStyleLabel}</b>
         </span>
         <span>
-          Paleta detectada: <b style={{ color: 'var(--studio-text)' }}>{report.paletteCount} colores</b>
+          Paleta detectada: <b className="tabular-nums" style={{ color: 'var(--studio-text)' }}>{report.paletteCount} col.</b>
         </span>
         <span>
-          Contorno: <b style={{ color: 'var(--studio-text)' }}>{report.outlineThickness} px</b>
+          Resolución: <b className="tabular-nums" style={{ color: 'var(--studio-text)' }}>{report.resolution}</b>
+        </span>
+        <span className="col-span-2 truncate">
+          Trazo: <b style={{ color: 'var(--studio-text)' }}>{report.outlineThickness}px</b>
           {' · '}
-          <span className="text-[9px]">{LIGHT_LABELS[report.lightDirection] || report.lightDirection}</span>
+          Sombreado: <b style={{ color: 'var(--studio-text)' }}>{report.shadingType}</b>
+          {' · '}
+          Luz: <b style={{ color: 'var(--studio-text)' }}>{LIGHT_LABELS[report.lightDirection] || report.lightDirection}</b>
         </span>
         <span className="col-span-2 truncate" title={report.referenceUsed}>
           Referencia utilizada: <b style={{ color: 'var(--studio-text)' }}>{report.referenceUsed}</b>
         </span>
         {report.poseFidelity && (
           <span className="col-span-2">
-            Fidelidad de pose: <b className="text-purple-300">{FIDELITY_LABELS[report.poseFidelity] || report.poseFidelity}</b>
+            Nivel de fidelidad aplicado:{' '}
+            <b style={{ color: 'var(--studio-accent)' }}>
+              {FIDELITY_LABELS[report.poseFidelity] || report.poseFidelity}
+            </b>
           </span>
         )}
       </div>
 
       {report.detectedPalette.length > 0 && (
         <div className="flex items-center gap-1 flex-wrap pt-0.5">
-          {report.detectedPalette.slice(0, 10).map((c, idx) => (
+          {report.detectedPalette.slice(0, 12).map((c, idx) => (
             <span
               key={`${c}-${idx}`}
               className="w-3 h-3 rounded-sm border border-white/25"
@@ -98,9 +106,9 @@ export const ExplainableAiCard: React.FC<ExplainableAiCardProps> = ({ report, co
           style={{ borderColor: 'var(--studio-border)', color: 'var(--studio-text-muted)' }}
         >
           <span>
-            Post-validación:{' '}
+            Limpieza:{' '}
             {totalFixes === 0
-              ? 'Silueta limpia (0 artefactos)'
+              ? 'Silueta íntegra (0 artefactos)'
               : `${stats.filledHoles} huecos · ${stats.removedOrphans + stats.prunedFragments} sueltos · ${stats.repairedEdges} bordes`}
           </span>
           <span className="tabular-nums">{stats.totalPixelsAfter} px</span>

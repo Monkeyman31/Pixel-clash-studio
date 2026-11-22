@@ -596,7 +596,7 @@ export const AiConfigPanel: React.FC<{
         </select>
       </div>
       <div className="flex flex-col gap-1">
-        <span className="text-[10px]" style={{ color: 'var(--studio-text-muted)' }}>Perfil de Estilo (16 estilos):</span>
+        <span className="text-[10px]" style={{ color: 'var(--studio-text-muted)' }}>Perfil de Estilo ({AI_EXTERNAL_PROFILES.length} estilos):</span>
         <select
           value={aiProfile}
           onChange={(e) => setAiProfile(e.target.value as AiExternalProfileId)}

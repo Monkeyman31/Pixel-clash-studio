@@ -5702,6 +5702,101 @@ export default function App() {
     }
   };
 
+  const handleInsertInBetweenSequence = (
+    insertAfterIndex: number,
+    grids: (string | null)[][][],
+    labelPrefix: string = 'In-Between'
+  ) => {
+    if (!grids || grids.length === 0) return;
+    const baseInsert = Math.max(0, Math.min(frames.length, insertAfterIndex + 1));
+    const ts = Date.now();
+    const newFrames: Frame[] = grids.map((grid, idx) => ({
+      id: `frame-inbetween-${ts}-${idx}`,
+      name: `${labelPrefix} #${idx + 1}`,
+      durationTicks: 3,
+      phase: 'active',
+      hitboxes: frames[insertAfterIndex]?.hitboxes ? [...frames[insertAfterIndex].hitboxes] : [],
+      layers: [
+        {
+          id: `layer-tween-${ts}-${idx}`,
+          name: `${labelPrefix} ${idx + 1}`,
+          visible: true,
+          locked: false,
+          opacity: 1,
+          pixels: grid,
+        },
+      ],
+    }));
+
+    const nextFrames = [...frames];
+    nextFrames.splice(baseInsert, 0, ...newFrames);
+    setFrames(nextFrames);
+    setCurrentFrameIndex(baseInsert);
+    pushHistory(nextFrames);
+    setImportNotification(`¡${newFrames.length} fotograma(s) intermedio(s) insertado(s) en la línea de tiempo!`);
+    setTimeout(() => setImportNotification(null), 4000);
+  };
+
+  const handleInsertAnimationFrames = (
+    grids: (string | null)[][][],
+    labelPrefix: string,
+    insertMode: 'append_frames' | 'overlay_layers'
+  ) => {
+    if (!grids || grids.length === 0) return;
+    const ts = Date.now();
+    if (insertMode === 'overlay_layers') {
+      const nextFrames = frames.map((f, fIdx) => {
+        const grid = grids[fIdx % grids.length];
+        if (!grid) return f;
+        return {
+          ...f,
+          layers: [
+            ...f.layers,
+            {
+              id: `layer-ai-anim-${ts}-${fIdx}`,
+              name: `${labelPrefix} #${(fIdx % grids.length) + 1}`,
+              visible: true,
+              locked: false,
+              opacity: 1,
+              pixels: grid,
+            },
+          ],
+        };
+      });
+      setFrames(nextFrames);
+      pushHistory(nextFrames);
+      setImportNotification(`Secuencia IA añadida como capas sobre ${nextFrames.length} frames.`);
+      setTimeout(() => setImportNotification(null), 4000);
+      return;
+    }
+
+    const insertPos = Math.min(frames.length, currentFrameIndex + 1);
+    const createdFrames: Frame[] = grids.map((grid, idx) => ({
+      id: `frame-ai-anim-${ts}-${idx}`,
+      name: `${labelPrefix} ${idx + 1}`,
+      durationTicks: 4,
+      phase: idx === 0 ? 'startup' : idx === grids.length - 1 ? 'recovery' : 'active',
+      hitboxes: [],
+      layers: [
+        {
+          id: `layer-ai-anim-${ts}-${idx}`,
+          name: `${labelPrefix} #${idx + 1}`,
+          visible: true,
+          locked: false,
+          opacity: 1,
+          pixels: grid,
+        },
+      ],
+    }));
+    const nextFrames = [...frames];
+    nextFrames.splice(insertPos, 0, ...createdFrames);
+    setFrames(nextFrames);
+    setCurrentFrameIndex(insertPos);
+    pushHistory(nextFrames);
+    setImportNotification(`¡${createdFrames.length} fotogramas de "${labelPrefix}" insertados en la secuencia!`);
+    setTimeout(() => setImportNotification(null), 4000);
+  };
+
   // Action Tags Handlers
   const handleCreateActionTag = (name: string, category: any, color: string) => {
     const newTag: ActionTag = {
@@ -11910,6 +12005,8 @@ export default function App() {
         onRemoveCameraKeyframe={handleRemoveCameraKeyframe}
         onUiContextFocus={(ctx) => setLastActiveUiContext(ctx)}
         onGenerateInBetween={handleGenerateInBetween}
+        onInsertInBetweenSequence={handleInsertInBetweenSequence}
+        onInsertAnimationFrames={handleInsertAnimationFrames}
         activePaletteColors={activePaletteColors}
         onUpdateActivePalette={(colors) => {
           setActivePaletteColors(colors);

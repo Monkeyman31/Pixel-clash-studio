@@ -944,6 +944,71 @@ export type AiCoherenceLevel = 'low' | 'medium' | 'high' | 'max';
 
 export type AiPoseFidelityLevel = 'low' | 'medium' | 'high' | 'exact';
 
+export type AiWorkspaceSection =
+  | 'personajes'
+  | 'poses_dummie'
+  | 'animaciones'
+  | 'inbetweens'
+  | 'fx_lab'
+  | 'escenarios'
+  | 'hud_ui'
+  | 'adaptacion_estilo'
+  | 'biblioteca_ia'
+  | 'configuracion_ia';
+
+export type AiCharacterTaskMode =
+  | 'create'
+  | 'variation'
+  | 'recolor'
+  | 'outfit'
+  | 'anatomy'
+  | 'reference_adapt';
+
+export interface AiCharacterPreserveFlags {
+  silhouette: boolean;
+  proportions: boolean;
+  posture: boolean;
+  design: boolean;
+  hair: boolean;
+  outfit: boolean;
+  accessories: boolean;
+}
+
+export type AiAnimationTaskMode =
+  | 'generate'
+  | 'fix'
+  | 'cycle'
+  | 'transition';
+
+export type AiStageCategory =
+  | 'fondos'
+  | 'escenarios'
+  | 'decoracion'
+  | 'parallax'
+  | 'tiles'
+  | 'mundo';
+
+export type AiHudCategory =
+  | 'barras_vida'
+  | 'retratos'
+  | 'interfaces'
+  | 'menus'
+  | 'marcadores';
+
+export interface AiCustomStyleConfig {
+  name: string;
+  description: string;
+  outlinePx: number;
+  shading: 'flat' | 'cel' | 'gradient_dither';
+  palette: string[];
+}
+
+export interface AiQualityControlConfig {
+  frameCount: number;
+  detailLevel: 'low' | 'medium' | 'high' | 'ultra';
+  smoothness: number; // 0..100
+}
+
 export type AiExternalProfileId =
   | 'nes'
   | 'gameboy'
@@ -953,15 +1018,18 @@ export type AiExternalProfileId =
   | 'cps2'
   | 'snk_neogeo'
   | 'kof'
+  | 'garou'
   | 'sf_alpha'
   | 'darkstalkers'
   | 'metal_slug'
   | 'guilty_gear'
   | 'blazblue'
+  | 'skullgirls'
   | 'pixel_fantasy'
   | 'pixel_scifi'
   | 'pixel_cyberpunk'
-  | 'pixel_rpg';
+  | 'pixel_rpg'
+  | 'custom';
 
 export interface ProjectContextAnalysis {
   visualStyle: string;
@@ -1013,6 +1081,7 @@ export interface AiPixelValidationStats {
 export interface AiExplanationReport {
   detectedStyle: string;
   targetStyleLabel: string;
+  resolution: string;
   paletteCount: number;
   detectedPalette: string[];
   outlineThickness: number;

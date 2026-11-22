@@ -133,6 +133,19 @@ export const AI_EXTERNAL_PROFILES: AiExternalStyleProfile[] = [
     vfxMotif: 'Aggressive blazing gold-to-crimson flame slashes and crescent sparks',
   },
   {
+    id: 'garou',
+    name: 'Garou: Mark of the Wolves',
+    era: 'SNK Neo Geo Obra Maestra (1999)',
+    outlinePx: 1,
+    shading: 'cel',
+    description: 'Sombreado cinematográfico tardío de Neo Geo, pliegues fluidos, luces cálidas suaves y contraste dramático.',
+    palette: ['#100b14', '#31233e', '#7c2d12', '#ea580c', '#fbbf24', '#38bdf8', '#cbd5e1', '#fffbeb'],
+    promptDirective: 'Garou: Mark of the Wolves (1999 SNK) master pixel art style: fluid anatomical motion creases, warm directional sunlight vs cool twilight shadows, crisp 1px variable-dark ink outlines.',
+    stageMotif: 'Atmospheric dusk dockyards, lantern reflections, train yards and warm moody arcade skies',
+    hudMotif: 'Sleek metallic Garou gauges with cyan T.O.P. zone highlight and beveled crimson life bar',
+    vfxMotif: 'Fluid warm gold and cobalt-blue Buster/Break wave trails with fine sparks',
+  },
+  {
     id: 'sf_alpha',
     name: 'Street Fighter Alpha',
     era: 'Capcom CPS-2 Anime',
@@ -198,6 +211,19 @@ export const AI_EXTERNAL_PROFILES: AiExternalStyleProfile[] = [
     vfxMotif: 'Crystalline blue/violet Distortion Drive glyphs, ice/azure shards and astral flares',
   },
   {
+    id: 'skullgirls',
+    name: 'Skullgirls',
+    era: 'Art Deco Dark-Comic 2D',
+    outlinePx: 2,
+    shading: 'cel',
+    description: 'Contornos negros expresivos, siluetas Art Deco elásticas, sombras profundas y contraste vibrante.',
+    palette: ['#0b0710', '#2b133d', '#be123c', '#f43f5e', '#f59e0b', '#fde047', '#0ea5e9', '#fff1f2'],
+    promptDirective: 'Skullgirls dark Art Deco fighting game aesthetic in crisp pixel art: thick dynamic ink outlines, dramatic silhouette readability, elastic limb smears and punchy crimson/gold/plum cel contrast.',
+    stageMotif: 'Ornate Art Deco grand theater arches, moody jazz alleyways and checkered ballroom floor',
+    hudMotif: 'Stylish Art Deco crimson & ivory beveled life bars with ornate portrait medallions',
+    vfxMotif: 'Bold ink-outlined crimson/amber impact smears, star flashes and comic speed streaks',
+  },
+  {
     id: 'pixel_fantasy',
     name: 'Pixel Fantasy',
     era: 'RPG / Arena Medieval',
@@ -236,6 +262,19 @@ export const AI_EXTERNAL_PROFILES: AiExternalStyleProfile[] = [
     hudMotif: 'Ornate blue/gold JRPG window-framed status bars with crisp pixel border',
     vfxMotif: 'Bright RPG spell rings, healing sparkles and clean elemental slash trails',
   },
+  {
+    id: 'custom',
+    name: 'Personalizado',
+    era: 'Definido por el Artista',
+    outlinePx: 1,
+    shading: 'cel',
+    description: 'Define tu propia dirección artística, grosor de contorno, tipo de sombreado y paleta maestra.',
+    palette: ['#0f172a', '#334155', '#f59e0b', '#ef4444', '#38bdf8', '#22c55e', '#f8fafc', '#1e1b4b'],
+    promptDirective: 'Follow the artist custom style definition, outline width, shading type, and exact custom palette ramps strictly.',
+    stageMotif: 'Custom fighting arena composition matching the user-defined style & lighting palette',
+    hudMotif: 'Custom stylized fighting HUD bars harmonized with the user-defined palette',
+    vfxMotif: 'Custom stylized fighting VFX bursts aligned to the user-defined outline and palette',
+  },
 ];
 
 export function normalizeProfileId(id?: string): AiExternalProfileId {
@@ -247,7 +286,7 @@ export function normalizeProfileId(id?: string): AiExternalProfileId {
 
 export function getAiStyleProfile(id?: string): AiExternalStyleProfile {
   const norm = normalizeProfileId(id);
-  return AI_EXTERNAL_PROFILES.find((p) => p.id === norm) || AI_EXTERNAL_PROFILES[7]; // kof default
+  return AI_EXTERNAL_PROFILES.find((p) => p.id === norm) || AI_EXTERNAL_PROFILES.find((p) => p.id === 'kof')!;
 }
 
 export function hexToRgb(hex: string): [number, number, number] {
@@ -783,11 +822,16 @@ export function applyContextualStyleToGrid(
   blendRatio: number = 0.5,
   projectPalette: string[] = [],
   coherenceLevel: AiCoherenceLevel = 'high',
-  detectedProfileId?: AiExternalProfileId
+  detectedProfileId?: AiExternalProfileId,
+  customPalette?: string[]
 ): (string | null)[][] {
   const effectiveProfileId =
     styleMode === 'auto_detect' && detectedProfileId ? detectedProfileId : profileId;
   const profile = getAiStyleProfile(effectiveProfileId);
+  const effectiveProfilePalette =
+    effectiveProfileId === 'custom' && customPalette && customPalette.length >= 2
+      ? customPalette
+      : profile.palette;
 
   if (styleMode === 'keep') {
     if (projectPalette.length < 2 || coherenceLevel === 'low') {
@@ -811,20 +855,20 @@ export function applyContextualStyleToGrid(
     return grid.map((row) =>
       row.map((raw) => {
         const c = normalizeHexColor(raw);
-        return c ? findNearestColor(c, profile.palette) : null;
+        return c ? findNearestColor(c, effectiveProfilePalette) : null;
       })
     );
   }
 
   // blend mode: mix original/project palette with external profile palette
   const ratio = Math.max(0, Math.min(1, blendRatio));
-  const combinedPalette = projectPalette.length > 0 ? projectPalette : profile.palette;
+  const combinedPalette = projectPalette.length > 0 ? projectPalette : effectiveProfilePalette;
   return grid.map((row) =>
     row.map((raw) => {
       const c = normalizeHexColor(raw);
       if (!c) return null;
       const a = findNearestColor(c, combinedPalette);
-      const b = findNearestColor(c, profile.palette);
+      const b = findNearestColor(c, effectiveProfilePalette);
       const [ra, ga, ba] = hexToRgb(a);
       const [rb, gb, bb] = hexToRgb(b);
       return rgbToHex(
@@ -1075,27 +1119,37 @@ export function buildExplainableAiReport(params: {
   referenceUsed: string;
   validationStats?: AiPixelValidationStats;
   overrideDetectedStyle?: string;
+  customStyleName?: string;
+  customPalette?: string[];
 }): AiExplanationReport {
-  const activeProfile = getAiStyleProfile(
+  const resolvedProfileId =
     params.styleMode === 'keep' || params.styleMode === 'auto_detect'
       ? params.contextAnalysis.detectedProfileId
-      : params.profileId
-  );
+      : params.profileId;
+  const activeProfile = getAiStyleProfile(resolvedProfileId);
+  const customLabel =
+    resolvedProfileId === 'custom' && params.customStyleName?.trim()
+      ? params.customStyleName.trim()
+      : activeProfile.name;
+
   const targetStyleLabel =
     params.styleMode === 'keep'
       ? `Mantener actual (${params.contextAnalysis.visualStyle})`
       : params.styleMode === 'auto_detect'
       ? `Autodetectado (${activeProfile.name})`
-      : `${activeProfile.name}`;
+      : customLabel;
 
   const palette =
     params.styleMode === 'keep'
       ? params.contextAnalysis.activePalette
+      : resolvedProfileId === 'custom' && params.customPalette && params.customPalette.length > 0
+      ? params.customPalette
       : activeProfile.palette;
 
   return {
     detectedStyle: params.overrideDetectedStyle || `${params.contextAnalysis.visualStyle} · ${params.contextAnalysis.era}`,
     targetStyleLabel,
+    resolution: params.contextAnalysis.resolution,
     paletteCount: palette.length,
     detectedPalette: palette.slice(0, 12),
     outlineThickness: params.contextAnalysis.lineThickness,
@@ -1108,3 +1162,371 @@ export function buildExplainableAiReport(params: {
     generatedAt: Date.now(),
   };
 }
+
+/**
+ * Generates local adaptive character variation / recolor / synthesis grid when server key is absent
+ * while preserving intact silhouettes and zero floating fragments.
+ */
+export function generateFallbackCharacterGrid(
+  sourceGrid: (string | null)[][],
+  width: number,
+  height: number,
+  mode: 'create' | 'variation' | 'recolor' | 'outfit' | 'anatomy' | 'reference_adapt',
+  targetPalette: string[]
+): (string | null)[][] {
+  const palette = targetPalette.length >= 3 ? targetPalette : ['#18121e', '#ef4444', '#fbbf24', '#38bdf8', '#f8fafc'];
+  let nonEmpty = 0;
+  for (let y = 0; y < sourceGrid.length; y++) {
+    for (let x = 0; x < (sourceGrid[y]?.length || 0); x++) {
+      if (sourceGrid[y][x]) nonEmpty++;
+    }
+  }
+
+  // If canvas is empty or mode is 'create', synthesize a crisp fighting stance silhouette
+  if (nonEmpty < 12 || mode === 'create') {
+    const out: (string | null)[][] = Array.from({ length: height }, () => new Array(width).fill(null));
+    const cx = Math.floor(width / 2);
+    const cy = Math.floor(height * 0.52);
+    const dark = palette[0];
+    const main = palette[Math.min(1, palette.length - 1)];
+    const accent = palette[Math.min(2, palette.length - 1)];
+    const skin = '#f2c9a0';
+    const hi = palette[palette.length - 1];
+
+    const put = (x: number, y: number, c: string) => {
+      const ix = Math.round(x);
+      const iy = Math.round(y);
+      if (ix >= 0 && ix < width && iy >= 0 && iy < height) out[iy][ix] = c;
+    };
+    const fillRect = (x0: number, y0: number, w0: number, h0: number, c: string) => {
+      for (let py = y0; py < y0 + h0; py++) {
+        for (let px = x0; px < x0 + w0; px++) put(px, py, c);
+      }
+    };
+
+    const s = Math.max(0.75, Math.min(2.2, Math.min(width, height) / 48));
+    // Head
+    fillRect(cx - Math.round(3 * s), cy - Math.round(14 * s), Math.round(6 * s), Math.round(6 * s), skin);
+    fillRect(cx - Math.round(3 * s), cy - Math.round(15 * s), Math.round(6 * s), Math.round(2 * s), dark);
+    // Headband / hair crest
+    fillRect(cx - Math.round(4 * s), cy - Math.round(13 * s), Math.round(8 * s), Math.round(1.5 * s), accent);
+    // Torso
+    fillRect(cx - Math.round(5 * s), cy - Math.round(8 * s), Math.round(10 * s), Math.round(10 * s), main);
+    fillRect(cx - Math.round(2 * s), cy - Math.round(7 * s), Math.round(4 * s), Math.round(7 * s), hi);
+    // Arms (combat guard)
+    fillRect(cx - Math.round(8 * s), cy - Math.round(6 * s), Math.round(3 * s), Math.round(6 * s), skin);
+    fillRect(cx + Math.round(5 * s), cy - Math.round(8 * s), Math.round(4 * s), Math.round(5 * s), skin);
+    // Belt + Legs
+    fillRect(cx - Math.round(5 * s), cy + Math.round(2 * s), Math.round(10 * s), Math.round(2 * s), accent);
+    fillRect(cx - Math.round(5 * s), cy + Math.round(4 * s), Math.round(4 * s), Math.round(11 * s), dark);
+    fillRect(cx + Math.round(1 * s), cy + Math.round(4 * s), Math.round(4 * s), Math.round(11 * s), dark);
+
+    // 1px clean outline around silhouette
+    const snap = out.map((r) => [...r]);
+    for (let y = 1; y < height - 1; y++) {
+      for (let x = 1; x < width - 1; x++) {
+        if (snap[y][x]) continue;
+        if (snap[y - 1][x] || snap[y + 1][x] || snap[y][x - 1] || snap[y][x + 1]) {
+          out[y][x] = dark;
+        }
+      }
+    }
+    return out;
+  }
+
+  // Otherwise remap luminance cleanly to target palette while optionally adding crisp rim highlight
+  const sortedPalette = [...palette].sort((a, b) => getLuminance(a) - getLuminance(b));
+  const uniq = new Set<string>();
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const c = normalizeHexColor(sourceGrid[y]?.[x]);
+      if (c) uniq.add(c);
+    }
+  }
+  const colorOrder = [...uniq].sort((a, b) => getLuminance(a) - getLuminance(b));
+  const lut = new Map<string, string>();
+  colorOrder.forEach((srcCol, i) => {
+    const ratio = colorOrder.length <= 1 ? 0.5 : i / (colorOrder.length - 1);
+    const pIdx = Math.min(sortedPalette.length - 1, Math.round(ratio * (sortedPalette.length - 1)));
+    lut.set(srcCol, sortedPalette[pIdx]);
+  });
+
+  return Array.from({ length: height }, (_, y) =>
+    Array.from({ length: width }, (__, x) => {
+      const c = normalizeHexColor(sourceGrid[y]?.[x]);
+      if (!c) return null;
+      return mode === 'recolor' || mode === 'outfit' ? lut.get(c) || c : findNearestColor(c, sortedPalette);
+    })
+  );
+}
+
+/**
+ * Generates multi-frame intermediate pixel grids cleanly between Frame A and Frame B
+ * honoring silhouette mass interpolation, smoothness, and palette lock.
+ */
+export function generateMultiFrameInBetweensLocal(
+  gridA: (string | null)[][],
+  gridB: (string | null)[][],
+  width: number,
+  height: number,
+  count: number,
+  targetPalette: string[],
+  coherenceLevel: AiCoherenceLevel = 'high'
+): (string | null)[][][] {
+  const safeCount = Math.max(1, Math.min(8, Math.round(count)));
+  const getCentroid = (g: (string | null)[][]) => {
+    let sx = 0, sy = 0, n = 0;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        if (g[y]?.[x]) {
+          sx += x;
+          sy += y;
+          n++;
+        }
+      }
+    }
+    return n > 0 ? { x: sx / n, y: sy / n } : { x: width / 2, y: height / 2 };
+  };
+
+  const cA = getCentroid(gridA);
+  const cB = getCentroid(gridB);
+  const framesOut: (string | null)[][][] = [];
+
+  for (let i = 1; i <= safeCount; i++) {
+    const t = i / (safeCount + 1);
+    const shiftFromAx = Math.round((cB.x - cA.x) * t);
+    const shiftFromAy = Math.round((cB.y - cA.y) * t);
+    const shiftFromBx = Math.round((cA.x - cB.x) * (1 - t));
+    const shiftFromBy = Math.round((cA.y - cB.y) * (1 - t));
+
+    const out: (string | null)[][] = Array.from({ length: height }, () => new Array(width).fill(null));
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const ax = x - shiftFromAx;
+        const ay = y - shiftFromAy;
+        const bx = x - shiftFromBx;
+        const by = y - shiftFromBy;
+        const pA = ax >= 0 && ax < width && ay >= 0 && ay < height ? normalizeHexColor(gridA[ay]?.[ax]) : null;
+        const pB = bx >= 0 && bx < width && by >= 0 && by < height ? normalizeHexColor(gridB[by]?.[bx]) : null;
+        if (pA && pB) {
+          out[y][x] = t < 0.5 ? pA : pB;
+        } else if (pA && t <= 0.65) {
+          out[y][x] = pA;
+        } else if (pB && t >= 0.35) {
+          out[y][x] = pB;
+        }
+      }
+    }
+    const cleaned = validateAndCleanAiPixelGrid(out, 'sprite', {
+      targetPalette,
+      coherenceLevel,
+      repairOutlines: true,
+    });
+    framesOut.push(cleaned.grid);
+  }
+  return framesOut;
+}
+
+/**
+ * Synthesizes clean multi-frame local fallback animation sequence (idle breathe, walk, attack, transition).
+ */
+export function generateFallbackAnimationFrames(
+  baseGrid: (string | null)[][],
+  width: number,
+  height: number,
+  frameCount: number,
+  mode: 'generate' | 'fix' | 'cycle' | 'transition',
+  targetPalette: string[],
+  coherenceLevel: AiCoherenceLevel = 'high'
+): (string | null)[][][] {
+  const safeCount = Math.max(2, Math.min(12, Math.round(frameCount)));
+  const workingBase = generateFallbackCharacterGrid(baseGrid, width, height, 'variation', targetPalette);
+  const outFrames: (string | null)[][][] = [];
+
+  for (let i = 0; i < safeCount; i++) {
+    const phase = (i / safeCount) * Math.PI * 2;
+    const dx =
+      mode === 'generate'
+        ? Math.round(Math.sin(i / Math.max(1, safeCount - 1) * Math.PI) * 3)
+        : mode === 'transition'
+        ? Math.round((i / Math.max(1, safeCount - 1)) * 2 - 1)
+        : 0;
+    const dy =
+      mode === 'cycle'
+        ? Math.round(Math.sin(phase) * 1.2)
+        : mode === 'generate'
+        ? Math.round(-Math.abs(Math.sin(phase * 0.5)) * 1.5)
+        : 0;
+
+    const shifted: (string | null)[][] = Array.from({ length: height }, () => new Array(width).fill(null));
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const sx = x - dx;
+        const sy = y - dy;
+        if (sx >= 0 && sx < width && sy >= 0 && sy < height) {
+          shifted[y][x] = workingBase[sy]?.[sx] || null;
+        }
+      }
+    }
+    const cleaned = validateAndCleanAiPixelGrid(shifted, 'sprite', {
+      targetPalette,
+      coherenceLevel,
+      repairOutlines: true,
+    });
+    outFrames.push(cleaned.grid);
+  }
+
+  return outFrames;
+}
+
+export function generateFallbackStageGrid(
+  w: number,
+  h: number,
+  mood: string,
+  style: string,
+  paletteOverride?: string[]
+): (string | null)[][] {
+  const g: (string | null)[][] = Array.from({ length: h }, () => new Array(w).fill(null));
+  const profile = getAiStyleProfile(
+    style === 'cyberpunk' ? 'pixel_scifi' : style === 'dojo' ? 'kof' : style === '8bit' ? 'nes' : style
+  );
+  const pal = paletteOverride && paletteOverride.length >= 4 ? paletteOverride : profile.palette;
+
+  const isCyber = profile.id === 'pixel_scifi' || style === 'cyberpunk';
+  const isRetro8 = profile.id === 'nes' || profile.id === 'gameboy';
+  const skyTop = mood === 'night' ? (pal[0] || '#0b1026') : mood === 'day' ? '#1d4ed8' : mood === 'storm' ? '#1e293b' : '#431407';
+  const skyMid = isRetro8
+    ? (pal[1] || '#306230')
+    : mood === 'night'
+    ? (pal[1] || '#1e1b4b')
+    : mood === 'day'
+    ? '#38bdf8'
+    : mood === 'storm'
+    ? '#334155'
+    : (pal[2] || '#ea580c');
+  const sunCol = isRetro8
+    ? (pal[pal.length - 1] || '#9bbc0f')
+    : mood === 'night'
+    ? '#e2e8f0'
+    : mood === 'storm'
+    ? '#94a3b8'
+    : (pal[4] || '#fde047');
+  const floorTop = isCyber ? '#0f172a' : (pal[1] || '#78350f');
+  const floorBot = pal[0] || '#451a03';
+  const lineCol = isCyber ? (pal[3] || '#22d3ee') : (pal[2] || '#b45309');
+
+  const horizon = Math.floor(h * 0.65);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (y < horizon) {
+        g[y][x] = y < Math.floor(horizon * 0.5) ? skyTop : skyMid;
+      } else {
+        const isDither = profile.shading === 'gradient_dither' && (x + y) % 2 === 0;
+        g[y][x] =
+          y % 3 === 0 ? lineCol : y < Math.floor((h + horizon) / 2) ? (isDither ? floorBot : floorTop) : floorBot;
+      }
+    }
+  }
+  const sx = Math.floor(w * 0.5);
+  const sy = Math.floor(horizon * 0.45);
+  for (let dy = -3; dy <= 3; dy++) {
+    for (let dx = -3; dx <= 3; dx++) {
+      if (dx * dx + dy * dy <= 10 && sx + dx >= 0 && sx + dx < w && sy + dy >= 0 && sy + dy < horizon) {
+        g[sy + dy][sx + dx] = sunCol;
+      }
+    }
+  }
+  const pLeft = Math.max(2, Math.floor(w * 0.12));
+  const pRight = Math.min(w - 3, Math.floor(w * 0.85));
+  const pillarCol = isCyber ? '#a855f7' : (pal[2] || '#7f1d1d');
+  const trimCol = isCyber ? '#22d3ee' : (pal[4] || '#f59e0b');
+  for (let y = Math.floor(h * 0.12); y < horizon; y++) {
+    g[y][pLeft] = pillarCol;
+    g[y][pLeft + 1] = pillarCol;
+    g[y][pRight] = pillarCol;
+    g[y][pRight + 1] = pillarCol;
+  }
+  for (let x = 0; x < w; x++) {
+    g[Math.floor(h * 0.12)][x] = trimCol;
+  }
+  return g;
+}
+
+export function generateFallbackHudGrid(
+  w: number,
+  h: number,
+  theme: string,
+  includeBars: boolean,
+  includeTimer: boolean,
+  includeSuper: boolean,
+  paletteOverride?: string[]
+): (string | null)[][] {
+  const g: (string | null)[][] = Array.from({ length: h }, () => new Array(w).fill(null));
+  const profile = getAiStyleProfile(theme === 'cyber' ? 'pixel_scifi' : theme === 'minimal' ? 'blazblue' : theme);
+  const pal = paletteOverride && paletteOverride.length >= 4 ? paletteOverride : profile.palette;
+  const frameCol =
+    profile.id === 'gameboy'
+      ? (pal[3] || '#9bbc0f')
+      : theme === 'cyber'
+      ? '#22d3ee'
+      : theme === 'minimal'
+      ? '#e2e8f0'
+      : (pal[4] || '#f59e0b');
+  const p1Col =
+    profile.id === 'gameboy' ? (pal[2] || '#8bac0f') : theme === 'cyber' ? '#38bdf8' : (pal[5] || '#22c55e');
+  const p2Col = profile.id === 'gameboy' ? (pal[1] || '#306230') : (pal[3] || '#ef4444');
+  const barBg = pal[0] || '#0f172a';
+  const mid = Math.floor(w / 2);
+
+  if (includeBars) {
+    const barEnd = Math.max(6, mid - 5);
+    const p2Start = Math.min(w - 6, mid + 5);
+    for (let y = 2; y <= 6; y++) {
+      for (let x = 2; x <= barEnd; x++) {
+        g[y][x] =
+          y === 2 || y === 6 || x === 2 || x === barEnd
+            ? frameCol
+            : y === 3
+            ? (pal[pal.length - 1] || '#fef08a')
+            : p1Col;
+      }
+      for (let x = p2Start; x <= w - 3; x++) {
+        g[y][x] =
+          y === 2 || y === 6 || x === p2Start || x === w - 3 ? frameCol : x > p2Start + 2 ? p2Col : barBg;
+      }
+    }
+  }
+
+  if (includeTimer) {
+    for (let y = 1; y <= 7; y++) {
+      for (let x = mid - 3; x <= mid + 3; x++) {
+        if (x >= 0 && x < w) {
+          g[y][x] = y === 1 || y === 7 || x === mid - 3 || x === mid + 3 ? frameCol : barBg;
+        }
+      }
+    }
+    if (mid - 1 >= 0 && mid + 1 < w) {
+      g[3][mid - 1] = '#ffffff';
+      g[4][mid - 1] = '#ffffff';
+      g[5][mid - 1] = '#ffffff';
+      g[3][mid + 1] = '#ffffff';
+      g[4][mid + 1] = '#ffffff';
+      g[5][mid + 1] = '#ffffff';
+    }
+  }
+
+  if (includeSuper) {
+    const sy = Math.max(10, h - 5);
+    for (let y = sy; y <= sy + 2 && y < h; y++) {
+      for (let x = 3; x < Math.min(w - 3, mid - 4); x++) {
+        g[y][x] = y === sy || y === sy + 2 ? '#e2e8f0' : (pal[6] || '#38bdf8');
+      }
+      for (let x = Math.max(3, mid + 4); x < w - 3; x++) {
+        g[y][x] = y === sy || y === sy + 2 ? '#e2e8f0' : (pal[3] || '#a855f7');
+      }
+    }
+  }
+  return g;
+}
+
+

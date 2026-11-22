@@ -1608,7 +1608,15 @@ export function computeDummieVolumes25D(
     });
   };
 
-  addLimbCylinder('chest', 'neck', 0.028, 'rgba(56, 189, 248, 0.20)');
+  addLimbCylinder('pelvis', 'abdomen', 0.042, 'rgba(14, 165, 233, 0.16)');
+  addLimbCylinder('abdomen', 'chest', 0.048, 'rgba(56, 189, 248, 0.18)');
+  addLimbCylinder('chest', 'neck', 0.029, 'rgba(56, 189, 248, 0.22)');
+  addLimbCylinder('neck', 'head', 0.025, 'rgba(56, 189, 248, 0.20)');
+  addLimbCylinder('chest', 'shoulder_l', 0.030, 'rgba(56, 189, 248, 0.18)');
+  addLimbCylinder('chest', 'shoulder_r', 0.030, 'rgba(56, 189, 248, 0.20)');
+  addLimbCylinder('pelvis', 'hip_l', 0.034, 'rgba(244, 63, 94, 0.16)');
+  addLimbCylinder('pelvis', 'hip_r', 0.034, 'rgba(244, 63, 94, 0.18)');
+
   addLimbCylinder('shoulder_l', 'elbow_l', 0.029, 'rgba(56, 189, 248, 0.18)');
   addLimbCylinder('elbow_l', 'wrist_l', 0.023, 'rgba(56, 189, 248, 0.22)');
   addLimbCylinder('shoulder_r', 'elbow_r', 0.029, 'rgba(56, 189, 248, 0.22)');
@@ -1618,6 +1626,35 @@ export function computeDummieVolumes25D(
   addLimbCylinder('knee_l', 'ankle_l', 0.028, 'rgba(56, 189, 248, 0.22)');
   addLimbCylinder('hip_r', 'knee_r', 0.038, 'rgba(56, 189, 248, 0.22)');
   addLimbCylinder('knee_r', 'ankle_r', 0.028, 'rgba(56, 189, 248, 0.26)');
+
+  // Articulated joint ball sockets (renders smoothly as polygonal capsules in SVG & Canvas)
+  const addJointSocket = (jointId: string, radiusNorm: number, fillCol: string) => {
+    const p = pt(jointId);
+    if (!p) return;
+    const rPx = Math.max(2.5, viewW * radiusNorm * scaleMod);
+    const polyPoints = Array.from({ length: 10 }, (_, idx) => {
+      const a = (idx / 10) * Math.PI * 2;
+      return { x: p.x + Math.cos(a) * rPx, y: p.y + Math.sin(a) * rPx };
+    });
+    shapes.push({
+      id: `socket-${jointId}`,
+      jointId,
+      kind: 'cylinder',
+      zOrder: p.z + 0.5,
+      polyPoints,
+      fill: fillCol,
+      stroke: baseCol,
+    });
+  };
+  addJointSocket('neck', 0.024, 'rgba(56, 189, 248, 0.24)');
+  addJointSocket('shoulder_l', 0.028, 'rgba(56, 189, 248, 0.24)');
+  addJointSocket('shoulder_r', 0.028, 'rgba(56, 189, 248, 0.26)');
+  addJointSocket('elbow_l', 0.022, 'rgba(56, 189, 248, 0.24)');
+  addJointSocket('elbow_r', 0.022, 'rgba(56, 189, 248, 0.26)');
+  addJointSocket('hip_l', 0.031, 'rgba(244, 63, 94, 0.20)');
+  addJointSocket('hip_r', 0.031, 'rgba(244, 63, 94, 0.22)');
+  addJointSocket('knee_l', 0.026, 'rgba(56, 189, 248, 0.24)');
+  addJointSocket('knee_r', 0.026, 'rgba(56, 189, 248, 0.26)');
 
   // Hands (small blocks) & Feet (wedges)
   for (const wristId of ['wrist_l', 'wrist_r']) {
@@ -2346,8 +2383,78 @@ function collectAffectedJointsByScope(
 }
 
 /**
- * Moves a Dummie joint respecting Anchor state, Partial Link flags, Chain Move Scope,
- * Symmetry, and Alt-key temporary unlinking (without modifying saved anchor config!).
+ * Solves 2-bone analytical planar IK preserving exact segment lengths (L1, L2)
+ * while maintaining the natural bend orientation of elbows/knees.
+ */
+function solveTwoBoneIK2D(
+  root: { x: number; y: number },
+  midPrev: { x: number; y: number },
+  endPrev: { x: number; y: number },
+  target: { x: number; y: number },
+  preferBendSign?: number
+): {
+  mid: { x: number; y: number };
+  end: { x: number; y: number };
+  rootPull: { dx: number; dy: number };
+} {
+  const l1 = Math.max(0.035, Math.hypot(midPrev.x - root.x, midPrev.y - root.y));
+  const l2 = Math.max(0.035, Math.hypot(endPrev.x - midPrev.x, endPrev.y - midPrev.y));
+
+  // Preserve current bend chirality (cross product sign)
+  const crossPrev =
+    (midPrev.x - root.x) * (endPrev.y - root.y) - (midPrev.y - root.y) * (endPrev.x - root.x);
+  const bendSign = crossPrev !== 0 ? Math.sign(crossPrev) : preferBendSign ?? 1;
+
+  const dx = target.x - root.x;
+  const dy = target.y - root.y;
+  const distRaw = Math.hypot(dx, dy) || 0.0001;
+  const maxReach = (l1 + l2) * 0.995;
+  const minReach = Math.max(0.02, Math.abs(l1 - l2) * 1.04);
+
+  // Pull root slightly only if user pulls wrist/ankle past maximum bone reach
+  let rootPull = { dx: 0, dy: 0 };
+  let effectiveRoot = { ...root };
+  if (distRaw > maxReach) {
+    const excess = distRaw - maxReach;
+    rootPull = {
+      dx: (dx / distRaw) * excess,
+      dy: (dy / distRaw) * excess,
+    };
+    effectiveRoot = {
+      x: root.x + rootPull.dx,
+      y: root.y + rootPull.dy,
+    };
+  }
+
+  const rdx = target.x - effectiveRoot.x;
+  const rdy = target.y - effectiveRoot.y;
+  const clampedDist = Math.max(minReach, Math.min(maxReach, Math.hypot(rdx, rdy) || minReach));
+  const ux = rdx / (Math.hypot(rdx, rdy) || 1);
+  const uy = rdy / (Math.hypot(rdx, rdy) || 1);
+
+  const cosAngle = Math.max(
+    -1,
+    Math.min(1, (l1 * l1 + clampedDist * clampedDist - l2 * l2) / (2 * l1 * clampedDist))
+  );
+  const sinAngle = Math.sqrt(Math.max(0, 1 - cosAngle * cosAngle));
+  // Perpendicular vector using bendSign
+  const px = -uy * bendSign;
+  const py = ux * bendSign;
+
+  const mid = {
+    x: effectiveRoot.x + (ux * cosAngle + px * sinAngle) * l1,
+    y: effectiveRoot.y + (uy * cosAngle + py * sinAngle) * l1,
+  };
+  const end = {
+    x: effectiveRoot.x + ux * clampedDist,
+    y: effectiveRoot.y + uy * clampedDist,
+  };
+  return { mid, end, rootPull };
+}
+
+/**
+ * Moves a Dummie joint respecting Anchor state, Partial Link flags, 2-Bone IK limbs,
+ * Spine/Torso bone-length coupling, Chain Move Scope, Symmetry, and Alt-key unlinking.
  */
 export function moveDummieJointWithAnchors(
   pose: DummiePose,
@@ -2359,25 +2466,192 @@ export function moveDummieJointWithAnchors(
   const target = pose.joints.find((j) => j.id === jointId);
   if (!target || target.locked) return pose;
 
-  const clampedX = Math.max(0.03, Math.min(0.97, nextX));
-  const clampedY = Math.max(0.03, Math.min(0.97, nextY));
+  const clampPos = (v: number) => Math.max(0.03, Math.min(0.97, v));
+  const clampedX = clampPos(nextX);
+  const clampedY = clampPos(nextY);
   const dx = clampedX - target.x;
   const dy = clampedY - target.y;
 
+  const targetAnchor = getJointAnchor(target);
   const effectiveScope: DummieChainMoveScope = options.altBypass
     ? 'piece'
     : options.scope || pose.chainMoveScope || 'branch';
 
+  const byId = new Map(pose.joints.map((j) => [j.id, { ...j }]));
+  const useArticulatedIK =
+    !options.altBypass &&
+    targetAnchor.anchored &&
+    targetAnchor.linkPosition &&
+    (effectiveScope === 'branch' || effectiveScope === 'upper_body' || effectiveScope === 'lower_body');
+
+  // Helper to apply coupled symmetric movement if autoSymmetry is enabled
+  const mirrorJointIds = (updatedIds: string[], prevMap: Map<string, DummieJoint>) => {
+    if (!pose.modifiers.autoSymmetry) return;
+    const pelvis = byId.get('pelvis');
+    const centerX = pelvis ? pelvis.x : 0.5;
+    for (const id of updatedIds) {
+      const moved = byId.get(id);
+      if (!moved?.mirrorId || updatedIds.includes(moved.mirrorId)) continue;
+      const mir = byId.get(moved.mirrorId);
+      const orig = prevMap.get(id);
+      if (!mir || mir.locked || !orig) continue;
+      const mdx = moved.x - orig.x;
+      const mdy = moved.y - orig.y;
+      mir.x = clampPos(mir.x - mdx);
+      mir.y = clampPos(mir.y + mdy);
+      void centerX;
+    }
+  };
+
+  const origMap = new Map(pose.joints.map((j) => [j.id, j]));
+
+  // 1) Distal 2-Bone IK Limbs (Wrists & Ankles)
+  const limbChains: Record<string, { root: string; mid: string; end: string; bendSign: number }> = {
+    wrist_l: { root: 'shoulder_l', mid: 'elbow_l', end: 'wrist_l', bendSign: -1 },
+    wrist_r: { root: 'shoulder_r', mid: 'elbow_r', end: 'wrist_r', bendSign: 1 },
+    ankle_l: { root: 'hip_l', mid: 'knee_l', end: 'ankle_l', bendSign: 1 },
+    ankle_r: { root: 'hip_r', mid: 'knee_r', end: 'ankle_r', bendSign: -1 },
+  };
+
+  if (useArticulatedIK && limbChains[jointId]) {
+    const chain = limbChains[jointId];
+    const rootJ = byId.get(chain.root);
+    const midJ = byId.get(chain.mid);
+    const endJ = byId.get(chain.end);
+    if (
+      rootJ &&
+      midJ &&
+      endJ &&
+      !rootJ.locked &&
+      !midJ.locked &&
+      getJointAnchor(midJ).anchored &&
+      getJointAnchor(midJ).linkPosition
+    ) {
+      const solved = solveTwoBoneIK2D(
+        rootJ,
+        midJ,
+        endJ,
+        { x: clampedX, y: clampedY },
+        chain.bendSign
+      );
+      midJ.x = clampPos(solved.mid.x);
+      midJ.y = clampPos(solved.mid.y);
+      endJ.x = clampPos(solved.end.x);
+      endJ.y = clampPos(solved.end.y);
+
+      const touched = [midJ.id, endJ.id];
+      // Follow-through on shoulder/hip socket if over-extended
+      if (Math.hypot(solved.rootPull.dx, solved.rootPull.dy) > 0.001 && getJointAnchor(rootJ).anchored) {
+        rootJ.x = clampPos(rootJ.x + solved.rootPull.dx * 0.65);
+        rootJ.y = clampPos(rootJ.y + solved.rootPull.dy * 0.65);
+        touched.push(rootJ.id);
+      }
+
+      mirrorJointIds(touched, origMap);
+      return {
+        ...pose,
+        joints: pose.joints.map((j) => byId.get(j.id) || j),
+      };
+    }
+  }
+
+  // 2) Mid-Joints (Elbows & Knees): rotate around shoulder/hip at fixed length & carry distal wrist/ankle
+  const midJointParents: Record<string, { root: string; distal: string }> = {
+    elbow_l: { root: 'shoulder_l', distal: 'wrist_l' },
+    elbow_r: { root: 'shoulder_r', distal: 'wrist_r' },
+    knee_l: { root: 'hip_l', distal: 'ankle_l' },
+    knee_r: { root: 'hip_r', distal: 'ankle_r' },
+  };
+
+  if (useArticulatedIK && midJointParents[jointId]) {
+    const { root, distal } = midJointParents[jointId];
+    const rootJ = byId.get(root);
+    const midJ = byId.get(jointId);
+    const distalJ = byId.get(distal);
+    if (rootJ && midJ) {
+      const upperLen = Math.max(0.035, Math.hypot(midJ.x - rootJ.x, midJ.y - rootJ.y));
+      const ux = clampedX - rootJ.x;
+      const uy = clampedY - rootJ.y;
+      const uLen = Math.hypot(ux, uy) || 0.0001;
+      const newMidX = clampPos(rootJ.x + (ux / uLen) * upperLen);
+      const newMidY = clampPos(rootJ.y + (uy / uLen) * upperLen);
+      const deltaMidX = newMidX - midJ.x;
+      const deltaMidY = newMidY - midJ.y;
+      midJ.x = newMidX;
+      midJ.y = newMidY;
+
+      const touched = [midJ.id];
+      if (distalJ && !distalJ.locked && getJointAnchor(distalJ).anchored && getJointAnchor(distalJ).linkPosition) {
+        distalJ.x = clampPos(distalJ.x + deltaMidX);
+        distalJ.y = clampPos(distalJ.y + deltaMidY);
+        touched.push(distalJ.id);
+      }
+
+      mirrorJointIds(touched, origMap);
+      return {
+        ...pose,
+        joints: pose.joints.map((j) => byId.get(j.id) || j),
+      };
+    }
+  }
+
+  // 3) Head / Neck Pivoting on Fixed Neck/Head Spine Length (no detached floating head!)
+  if (useArticulatedIK && (jointId === 'head' || jointId === 'neck')) {
+    const chestJ = byId.get('chest');
+    const neckJ = byId.get('neck');
+    const headJ = byId.get('head');
+    if (chestJ && neckJ && headJ) {
+      if (jointId === 'head') {
+        const neckToHeadLen = Math.max(0.03, Math.hypot(headJ.x - neckJ.x, headJ.y - neckJ.y));
+        const chestToNeckLen = Math.max(0.03, Math.hypot(neckJ.x - chestJ.x, neckJ.y - chestJ.y));
+        const totalLen = chestToNeckLen + neckToHeadLen;
+        const vdx = clampedX - chestJ.x;
+        const vdy = clampedY - chestJ.y;
+        const dist = Math.hypot(vdx, vdy) || 0.0001;
+        const clampedDist = Math.min(totalLen * 1.05, Math.max(totalLen * 0.65, dist));
+        headJ.x = clampPos(chestJ.x + (vdx / dist) * clampedDist);
+        headJ.y = clampPos(chestJ.y + (vdy / dist) * clampedDist);
+        // Position neck cleanly along chest->head bone line at chestToNeckLen
+        const hx = headJ.x - chestJ.x;
+        const hy = headJ.y - chestJ.y;
+        const hLen = Math.hypot(hx, hy) || 0.0001;
+        neckJ.x = clampPos(chestJ.x + (hx / hLen) * chestToNeckLen);
+        neckJ.y = clampPos(chestJ.y + (hy / hLen) * chestToNeckLen);
+        return {
+          ...pose,
+          joints: pose.joints.map((j) => byId.get(j.id) || j),
+        };
+      } else {
+        // Dragging neck carries head with fixed head-neck vector and keeps neck near chest
+        const headOffset = { x: headJ.x - neckJ.x, y: headJ.y - neckJ.y };
+        const chestToNeckLen = Math.max(0.03, Math.hypot(neckJ.x - chestJ.x, neckJ.y - chestJ.y));
+        const vdx = clampedX - chestJ.x;
+        const vdy = clampedY - chestJ.y;
+        const dist = Math.hypot(vdx, vdy) || 0.0001;
+        neckJ.x = clampPos(chestJ.x + (vdx / dist) * chestToNeckLen);
+        neckJ.y = clampPos(chestJ.y + (vdy / dist) * chestToNeckLen);
+        if (!headJ.locked && getJointAnchor(headJ).anchored && getJointAnchor(headJ).linkPosition) {
+          headJ.x = clampPos(neckJ.x + headOffset.x);
+          headJ.y = clampPos(neckJ.y + headOffset.y);
+        }
+        return {
+          ...pose,
+          joints: pose.joints.map((j) => byId.get(j.id) || j),
+        };
+      }
+    }
+  }
+
+  // 4) Torso / Spine / Root Coupling (Chest, Abdomen, Pelvis, Shoulders, Hips, Scope moves)
   const affectedWeights = collectAffectedJointsByScope(pose, jointId, effectiveScope, 'position');
 
-  // Optional auto-symmetry for mirrored joints
+  // Keep abdomen smoothly bridged between pelvis & chest if dragging chest or abdomen
   const mirrorWeights = new Map<string, number>();
   if (pose.modifiers.autoSymmetry) {
-    const byId = new Map(pose.joints.map((j) => [j.id, j]));
     affectedWeights.forEach((w, id) => {
-      const src = byId.get(id);
+      const src = origMap.get(id);
       if (src?.mirrorId && !affectedWeights.has(src.mirrorId)) {
-        const mir = byId.get(src.mirrorId);
+        const mir = origMap.get(src.mirrorId);
         if (mir && !mir.locked) {
           mirrorWeights.set(mir.id, w);
         }
@@ -2385,30 +2659,43 @@ export function moveDummieJointWithAnchors(
     });
   }
 
+  const nextJoints = pose.joints.map((j) => {
+    if (j.id === jointId) {
+      return { ...j, x: clampedX, y: clampedY };
+    }
+    const w = affectedWeights.get(j.id);
+    if (w !== undefined) {
+      return {
+        ...j,
+        x: clampPos(j.x + dx * w),
+        y: clampPos(j.y + dy * w),
+      };
+    }
+    const mw = mirrorWeights.get(j.id);
+    if (mw !== undefined) {
+      return {
+        ...j,
+        x: clampPos(j.x - dx * mw),
+        y: clampPos(j.y + dy * mw),
+      };
+    }
+    return j;
+  });
+
+  // Maintain cohesive spine bridge when moving chest or pelvis in anchored modes
+  if (useArticulatedIK && (jointId === 'chest' || jointId === 'pelvis')) {
+    const chestN = nextJoints.find((j) => j.id === 'chest');
+    const pelvisN = nextJoints.find((j) => j.id === 'pelvis');
+    const abdomenN = nextJoints.find((j) => j.id === 'abdomen');
+    if (chestN && pelvisN && abdomenN && getJointAnchor(abdomenN).anchored && !abdomenN.locked) {
+      abdomenN.x = clampPos((chestN.x + pelvisN.x) * 0.5);
+      abdomenN.y = clampPos((chestN.y + pelvisN.y) * 0.5);
+    }
+  }
+
   return {
     ...pose,
-    joints: pose.joints.map((j) => {
-      if (j.id === jointId) {
-        return { ...j, x: clampedX, y: clampedY };
-      }
-      const w = affectedWeights.get(j.id);
-      if (w !== undefined) {
-        return {
-          ...j,
-          x: Math.max(0.03, Math.min(0.97, j.x + dx * w)),
-          y: Math.max(0.03, Math.min(0.97, j.y + dy * w)),
-        };
-      }
-      const mw = mirrorWeights.get(j.id);
-      if (mw !== undefined) {
-        return {
-          ...j,
-          x: Math.max(0.03, Math.min(0.97, j.x - dx * mw)),
-          y: Math.max(0.03, Math.min(0.97, j.y + dy * mw)),
-        };
-      }
-      return j;
-    }),
+    joints: nextJoints,
   };
 }
 
