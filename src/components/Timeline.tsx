@@ -61,6 +61,11 @@ import {
   ThumbnailBoundsMode,
 } from '../utils/pixelMath';
 import { scheduleIdleTask } from '../utils/renderCache';
+import {
+  buildProjectLayerTracks,
+  isTimelineMovementOnlyGroup,
+  layerHasVisibleContent,
+} from '../utils/layerTracks';
 import { StudioSlider } from './StudioSlider';
 import { STUDIO_Z } from './StudioTopLayer';
 
@@ -124,9 +129,13 @@ interface TimelineProps {
   // Optional layer track list
   layers?: Layer[];
   currentLayerIndex?: number;
+  activeTrackKey?: string | null;
   onSelectLayer?: (index: number) => void;
   onToggleLayerVisibility?: (index: number) => void;
   onToggleLayerLock?: (index: number) => void;
+  onSelectLayerTrack?: (trackKey: string, frameLayerIndex: number) => void;
+  onToggleTrackVisibility?: (trackKey: string, frameLayerIndex: number) => void;
+  onToggleTrackLock?: (trackKey: string, frameLayerIndex: number) => void;
   // Optional modular layout & linked frame movement
   sectionOrder?: TimelineSectionId[];
   timelinePosition?: 'bottom' | 'top';
@@ -221,9 +230,13 @@ export const Timeline: React.FC<TimelineProps> = ({
   onChangeFps,
   layers,
   currentLayerIndex = 0,
+  activeTrackKey = null,
   onSelectLayer,
   onToggleLayerVisibility,
   onToggleLayerLock,
+  onSelectLayerTrack,
+  onToggleTrackVisibility,
+  onToggleTrackLock,
   sectionOrder = ['tags', 'ruler', 'frames', 'transport'],
   timelinePosition = 'bottom',
   linkMoveAllFrames = false,
@@ -462,6 +475,21 @@ export const Timeline: React.FC<TimelineProps> = ({
     [layers, frames, currentFrameIndex]
   );
 
+  const projectTracks = useMemo(
+    () => buildProjectLayerTracks(frames, currentFrameIndex),
+    [frames, currentFrameIndex]
+  );
+
+  const visibleTrackFolders = useMemo(
+    () => layerGroups.filter((g) => !isTimelineMovementOnlyGroup(g, projectTracks)),
+    [layerGroups, projectTracks]
+  );
+
+  const movementGroups = useMemo(
+    () => layerGroups.filter((g) => (g.frameIndices?.length || 0) > 0),
+    [layerGroups]
+  );
+
   const currentFrame = frames[currentFrameIndex] || frames[0];
 
   // Frame drag-reorder
@@ -554,7 +582,7 @@ export const Timeline: React.FC<TimelineProps> = ({
               >
                 Todos ({frames.length})
               </button>
-              {layerGroups.map((g) => {
+              {movementGroups.map((g) => {
                 const isAct = activeGroupId === g.id;
                 return (
                   <button
@@ -1232,6 +1260,7 @@ export const Timeline: React.FC<TimelineProps> = ({
     }
 
     if (timelineViewMode === 'tracks') {
+      const validFolderIds = new Set(visibleTrackFolders.map((g) => g.id));
       return (
         <div
           key="sec-frames"
@@ -1248,14 +1277,14 @@ export const Timeline: React.FC<TimelineProps> = ({
             >
               <tr>
                 <th
-                  className="sticky left-0 z-30 w-44 px-2.5 py-1.5 text-left border-r font-bold"
+                  className="sticky left-0 z-30 w-48 px-2.5 py-1.5 text-left border-r font-bold"
                   style={{
                     backgroundColor: 'var(--studio-bg-elevated)',
                     borderColor: 'var(--studio-border)',
                     color: 'var(--studio-text-muted)',
                   }}
                 >
-                  Capas / Pistas ({activeLayers.length})
+                  Capas / Pistas ({projectTracks.length})
                 </th>
                 {frames.map((frame, fIdx) => {
                   const isCur = fIdx === currentFrameIndex;
@@ -1290,11 +1319,11 @@ export const Timeline: React.FC<TimelineProps> = ({
               </tr>
             </thead>
             <tbody>
-              {/* Grouped folders */}
-              {layerGroups.map((grp) => {
-                const members = activeLayers
-                  .map((l, idx) => ({ l, idx }))
-                  .filter(({ l }) => l.groupId === grp.id)
+              {/* Grouped folders (mirrored with Layers Panel) */}
+              {visibleTrackFolders.map((grp) => {
+                const members = projectTracks
+                  .filter((t) => t.layer.groupId === grp.id)
+                  .slice()
                   .reverse();
                 if (members.length === 0) return null;
                 const isCollapsed = Boolean(collapsedTrackFolders[grp.id]);
@@ -1334,187 +1363,281 @@ export const Timeline: React.FC<TimelineProps> = ({
                       </td>
                     </tr>
                     {!isCollapsed &&
-                      members.map(({ l, idx }) => (
-                        <tr
-                          key={`trk-gl-${l.id}-${idx}`}
-                          className="border-b"
-                          style={{
-                            borderColor: 'var(--studio-border)',
-                            backgroundColor:
-                              idx === currentLayerIndex
+                      members.map((track) => {
+                        const l = track.layer;
+                        const idx = track.currentFrameLayerIndex;
+                        const isActiveTrack = activeTrackKey
+                          ? track.trackKey === activeTrackKey
+                          : idx >= 0 && idx === currentLayerIndex;
+                        return (
+                          <tr
+                            key={`trk-gl-${track.trackKey}`}
+                            className="border-b"
+                            style={{
+                              borderColor: 'var(--studio-border)',
+                              backgroundColor: isActiveTrack
                                 ? 'color-mix(in srgb, var(--studio-accent) 10%, transparent)'
                                 : undefined,
-                          }}
-                        >
-                          <td
-                            onClick={() => onSelectLayer?.(idx)}
-                            className="sticky left-0 z-10 pl-5 pr-2 py-1 border-r cursor-pointer"
-                            style={{
-                              backgroundColor:
-                                idx === currentLayerIndex
-                                  ? 'color-mix(in srgb, var(--studio-accent) 16%, var(--studio-bg-panel))'
-                                  : 'var(--studio-bg-panel)',
-                              borderColor: 'var(--studio-border)',
                             }}
                           >
-                            <div className="flex items-center gap-1">
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  onToggleLayerVisibility?.(idx);
-                                }}
-                                className="opacity-75 hover:opacity-100"
-                              >
-                                {l.visible ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3 opacity-45" />}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  onToggleLayerLock?.(idx);
-                                }}
-                                className="opacity-65 hover:opacity-100"
-                              >
-                                {l.locked ? <Lock className="w-2.5 h-2.5" /> : <Unlock className="w-2.5 h-2.5 opacity-45" />}
-                              </button>
-                              <span className="truncate">{l.name}</span>
-                            </div>
-                          </td>
-                          {frames.map((frame, fIdx) => {
-                            const fLayer = frame.layers[idx];
-                            const hasPix = fLayer ? celHasPixels(fLayer) : false;
-                            const hasKf = Boolean(l.keyframes?.some((k) => k.frameIndex === fIdx));
-                            const isCurCell = fIdx === currentFrameIndex && idx === currentLayerIndex;
-                            return (
-                              <td
-                                key={`tc-${idx}-${frame.id}-${fIdx}`}
-                                onClick={(e) => {
-                                  onSelectLayer?.(idx);
-                                  handleFrameClick(fIdx, e);
-                                }}
-                                className="border-r text-center cursor-pointer py-1"
-                                style={{
-                                  borderColor: 'var(--studio-border)',
-                                  backgroundColor: isCurCell
-                                    ? 'color-mix(in srgb, var(--studio-accent) 22%, transparent)'
-                                    : fIdx === currentFrameIndex
-                                    ? 'color-mix(in srgb, var(--studio-accent) 8%, transparent)'
-                                    : undefined,
-                                }}
-                              >
-                                <div className="flex items-center justify-center gap-0.5">
-                                  {hasKf ? (
-                                    <Diamond className="w-3 h-3 text-amber-400 fill-amber-400" />
+                            <td
+                              onClick={() => {
+                                if (onSelectLayerTrack) onSelectLayerTrack(track.trackKey, idx);
+                                else if (idx >= 0) onSelectLayer?.(idx);
+                              }}
+                              className="sticky left-0 z-10 pl-5 pr-2 py-1 border-r cursor-pointer"
+                              style={{
+                                backgroundColor: isActiveTrack
+                                  ? 'color-mix(in srgb, var(--studio-accent) 16%, var(--studio-bg-panel))'
+                                  : 'var(--studio-bg-panel)',
+                                borderColor: 'var(--studio-border)',
+                              }}
+                            >
+                              <div className="flex items-center gap-1 min-w-0">
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (onToggleTrackVisibility) {
+                                      onToggleTrackVisibility(track.trackKey, idx);
+                                    } else if (idx >= 0) {
+                                      onToggleLayerVisibility?.(idx);
+                                    }
+                                  }}
+                                  className="opacity-75 hover:opacity-100 shrink-0"
+                                >
+                                  {l.visible ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3 opacity-45" />}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (onToggleTrackLock) {
+                                      onToggleTrackLock(track.trackKey, idx);
+                                    } else if (idx >= 0) {
+                                      onToggleLayerLock?.(idx);
+                                    }
+                                  }}
+                                  className="opacity-65 hover:opacity-100 shrink-0"
+                                >
+                                  {track.isLocked ? (
+                                    <Lock className="w-2.5 h-2.5 text-rose-400" />
                                   ) : (
-                                    <span
-                                      className={`w-2 h-2 rounded-full inline-block ${
-                                        hasPix ? 'bg-sky-400' : 'border border-slate-600/70'
-                                      }`}
-                                    />
+                                    <Unlock className="w-2.5 h-2.5 opacity-45" />
                                   )}
-                                </div>
-                              </td>
-                            );
-                          })}
-                          <td />
-                        </tr>
-                      ))}
+                                </button>
+                                <span
+                                  className={`truncate flex-1 ${
+                                    !track.existsInCurrentFrame ? 'italic opacity-75' : ''
+                                  }`}
+                                >
+                                  {l.name}
+                                </span>
+                                {track.isLocked && (
+                                  <span title="Capa bloqueada" className="text-[8px] text-rose-400 shrink-0">
+                                    ◼
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+                            {frames.map((frame, fIdx) => {
+                              const fLayerIdx = track.frameLayerIndices[fIdx] ?? -1;
+                              const fLayer = fLayerIdx >= 0 ? frame.layers[fLayerIdx] : undefined;
+                              const hasPix = fLayer ? layerHasVisibleContent(fLayer) : false;
+                              const hasKf = Boolean(fLayer?.keyframes?.some((k) => k.frameIndex === fIdx));
+                              const isCurCell = fIdx === currentFrameIndex && isActiveTrack;
+                              return (
+                                <td
+                                  key={`tc-${track.trackKey}-${frame.id}-${fIdx}`}
+                                  onClick={(e) => {
+                                    if (onSelectLayerTrack) {
+                                      onSelectLayerTrack(track.trackKey, fLayerIdx);
+                                    } else if (fLayerIdx >= 0) {
+                                      onSelectLayer?.(fLayerIdx);
+                                    }
+                                    handleFrameClick(fIdx, e);
+                                  }}
+                                  title={
+                                    hasKf
+                                      ? '◆ Keyframe'
+                                      : hasPix
+                                      ? '● Contenido presente'
+                                      : '○ Sin contenido en este frame'
+                                  }
+                                  className="border-r text-center cursor-pointer py-1"
+                                  style={{
+                                    borderColor: 'var(--studio-border)',
+                                    backgroundColor: isCurCell
+                                      ? 'color-mix(in srgb, var(--studio-accent) 22%, transparent)'
+                                      : fIdx === currentFrameIndex
+                                      ? 'color-mix(in srgb, var(--studio-accent) 8%, transparent)'
+                                      : undefined,
+                                  }}
+                                >
+                                  <div className="flex items-center justify-center gap-0.5 leading-none">
+                                    {hasKf ? (
+                                      <span className="text-[10px] text-amber-400">◆</span>
+                                    ) : hasPix ? (
+                                      <span className="text-[10px] text-sky-400">●</span>
+                                    ) : (
+                                      <span
+                                        className={`text-[10px] ${
+                                          fLayerIdx < 0 ? 'text-slate-500/50' : 'text-slate-400/80'
+                                        }`}
+                                      >
+                                        ○
+                                      </span>
+                                    )}
+                                  </div>
+                                </td>
+                              );
+                            })}
+                            <td />
+                          </tr>
+                        );
+                      })}
                   </React.Fragment>
                 );
               })}
 
-              {/* Ungrouped layers (top-to-bottom) */}
-              {activeLayers
-                .map((l, idx) => ({ l, idx }))
-                .filter(({ l }) => !l.groupId || !layerGroups.some((g) => g.id === l.groupId))
+              {/* Ungrouped project tracks (top-to-bottom) */}
+              {projectTracks
+                .filter((t) => !t.layer.groupId || !validFolderIds.has(t.layer.groupId))
+                .slice()
                 .reverse()
-                .map(({ l, idx }) => (
-                  <tr
-                    key={`trk-ul-${l.id}-${idx}`}
-                    className="border-b"
-                    style={{
-                      borderColor: 'var(--studio-border)',
-                      backgroundColor:
-                        idx === currentLayerIndex
+                .map((track) => {
+                  const l = track.layer;
+                  const idx = track.currentFrameLayerIndex;
+                  const isActiveTrack = activeTrackKey
+                    ? track.trackKey === activeTrackKey
+                    : idx >= 0 && idx === currentLayerIndex;
+                  return (
+                    <tr
+                      key={`trk-ul-${track.trackKey}`}
+                      className="border-b"
+                      style={{
+                        borderColor: 'var(--studio-border)',
+                        backgroundColor: isActiveTrack
                           ? 'color-mix(in srgb, var(--studio-accent) 10%, transparent)'
                           : undefined,
-                    }}
-                  >
-                    <td
-                      onClick={() => onSelectLayer?.(idx)}
-                      className="sticky left-0 z-10 px-2 py-1 border-r cursor-pointer"
-                      style={{
-                        backgroundColor:
-                          idx === currentLayerIndex
-                            ? 'color-mix(in srgb, var(--studio-accent) 16%, var(--studio-bg-panel))'
-                            : 'var(--studio-bg-panel)',
-                        borderColor: 'var(--studio-border)',
                       }}
                     >
-                      <div className="flex items-center gap-1">
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onToggleLayerVisibility?.(idx);
-                          }}
-                          className="opacity-75 hover:opacity-100"
-                        >
-                          {l.visible ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3 opacity-45" />}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onToggleLayerLock?.(idx);
-                          }}
-                          className="opacity-65 hover:opacity-100"
-                        >
-                          {l.locked ? <Lock className="w-2.5 h-2.5" /> : <Unlock className="w-2.5 h-2.5 opacity-45" />}
-                        </button>
-                        <span className="truncate font-semibold">{l.name}</span>
-                      </div>
-                    </td>
-                    {frames.map((frame, fIdx) => {
-                      const fLayer = frame.layers[idx];
-                      const hasPix = fLayer ? celHasPixels(fLayer) : false;
-                      const hasKf = Boolean(l.keyframes?.some((k) => k.frameIndex === fIdx));
-                      const isCurCell = fIdx === currentFrameIndex && idx === currentLayerIndex;
-                      return (
-                        <td
-                          key={`tcu-${idx}-${frame.id}-${fIdx}`}
-                          onClick={(e) => {
-                            onSelectLayer?.(idx);
-                            handleFrameClick(fIdx, e);
-                          }}
-                          className="border-r text-center cursor-pointer py-1"
-                          style={{
-                            borderColor: 'var(--studio-border)',
-                            backgroundColor: isCurCell
-                              ? 'color-mix(in srgb, var(--studio-accent) 22%, transparent)'
-                              : fIdx === currentFrameIndex
-                              ? 'color-mix(in srgb, var(--studio-accent) 8%, transparent)'
-                              : undefined,
-                          }}
-                        >
-                          <div className="flex items-center justify-center gap-0.5">
-                            {hasKf ? (
-                              <Diamond className="w-3 h-3 text-amber-400 fill-amber-400" />
+                      <td
+                        onClick={() => {
+                          if (onSelectLayerTrack) onSelectLayerTrack(track.trackKey, idx);
+                          else if (idx >= 0) onSelectLayer?.(idx);
+                        }}
+                        className="sticky left-0 z-10 px-2 py-1 border-r cursor-pointer"
+                        style={{
+                          backgroundColor: isActiveTrack
+                            ? 'color-mix(in srgb, var(--studio-accent) 16%, var(--studio-bg-panel))'
+                            : 'var(--studio-bg-panel)',
+                          borderColor: 'var(--studio-border)',
+                        }}
+                      >
+                        <div className="flex items-center gap-1 min-w-0">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (onToggleTrackVisibility) {
+                                onToggleTrackVisibility(track.trackKey, idx);
+                              } else if (idx >= 0) {
+                                onToggleLayerVisibility?.(idx);
+                              }
+                            }}
+                            className="opacity-75 hover:opacity-100 shrink-0"
+                          >
+                            {l.visible ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3 opacity-45" />}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (onToggleTrackLock) {
+                                onToggleTrackLock(track.trackKey, idx);
+                              } else if (idx >= 0) {
+                                onToggleLayerLock?.(idx);
+                              }
+                            }}
+                            className="opacity-65 hover:opacity-100 shrink-0"
+                          >
+                            {track.isLocked ? (
+                              <Lock className="w-2.5 h-2.5 text-rose-400" />
                             ) : (
-                              <span
-                                className={`w-2 h-2 rounded-full inline-block ${
-                                  hasPix ? 'bg-sky-400' : 'border border-slate-600/70'
-                                }`}
-                              />
+                              <Unlock className="w-2.5 h-2.5 opacity-45" />
                             )}
-                          </div>
-                        </td>
-                      );
-                    })}
-                    <td />
-                  </tr>
-                ))}
+                          </button>
+                          <span
+                            className={`truncate font-semibold flex-1 ${
+                              !track.existsInCurrentFrame ? 'italic opacity-75' : ''
+                            }`}
+                          >
+                            {l.name}
+                          </span>
+                          {track.isLocked && (
+                            <span title="Capa bloqueada" className="text-[8px] text-rose-400 shrink-0">
+                              ◼
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                      {frames.map((frame, fIdx) => {
+                        const fLayerIdx = track.frameLayerIndices[fIdx] ?? -1;
+                        const fLayer = fLayerIdx >= 0 ? frame.layers[fLayerIdx] : undefined;
+                        const hasPix = fLayer ? layerHasVisibleContent(fLayer) : false;
+                        const hasKf = Boolean(fLayer?.keyframes?.some((k) => k.frameIndex === fIdx));
+                        const isCurCell = fIdx === currentFrameIndex && isActiveTrack;
+                        return (
+                          <td
+                            key={`tcu-${track.trackKey}-${frame.id}-${fIdx}`}
+                            onClick={(e) => {
+                              if (onSelectLayerTrack) {
+                                onSelectLayerTrack(track.trackKey, fLayerIdx);
+                              } else if (fLayerIdx >= 0) {
+                                onSelectLayer?.(fLayerIdx);
+                              }
+                              handleFrameClick(fIdx, e);
+                            }}
+                            title={
+                              hasKf
+                                ? '◆ Keyframe'
+                                : hasPix
+                                ? '● Contenido presente'
+                                : '○ Sin contenido en este frame'
+                            }
+                            className="border-r text-center cursor-pointer py-1"
+                            style={{
+                              borderColor: 'var(--studio-border)',
+                              backgroundColor: isCurCell
+                                ? 'color-mix(in srgb, var(--studio-accent) 22%, transparent)'
+                                : fIdx === currentFrameIndex
+                                ? 'color-mix(in srgb, var(--studio-accent) 8%, transparent)'
+                                : undefined,
+                            }}
+                          >
+                            <div className="flex items-center justify-center gap-0.5 leading-none">
+                              {hasKf ? (
+                                <span className="text-[10px] text-amber-400">◆</span>
+                              ) : hasPix ? (
+                                <span className="text-[10px] text-sky-400">●</span>
+                              ) : (
+                                <span
+                                  className={`text-[10px] ${
+                                    fLayerIdx < 0 ? 'text-slate-500/50' : 'text-slate-400/80'
+                                  }`}
+                                >
+                                  ○
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                        );
+                      })}
+                      <td />
+                    </tr>
+                  );
+                })}
             </tbody>
           </table>
         </div>

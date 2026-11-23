@@ -17,6 +17,9 @@ import {
   LayoutGrid,
   LayoutPanelTop,
   List,
+  Maximize2,
+  Minimize2,
+  Minus,
   Monitor,
   Pin,
   PinOff,
@@ -53,6 +56,7 @@ import {
 import { MascotPreviewCanvas } from './SplashLoadingScreen';
 import { NewProjectTemplateCategory } from './NewProjectModal';
 import { PixelClashLogoIcon } from './PixelClashLogoIcon';
+import { getDesktopBridge } from '../utils/desktopBridge';
 
 export type HomeScreenSection = 'inicio' | 'recientes' | 'configuracion' | 'ayuda' | 'novedades';
 type RecentSortKey = 'recientes' | 'nombre' | 'tamano' | 'tipo';
@@ -81,6 +85,10 @@ interface HomeScreenProps {
   onOpenToolsGuide?: () => void;
   onOpenShortcutsModal?: () => void;
   onOpenInstallerGuide?: () => void;
+  isWindowMaximized?: boolean;
+  onMinimizeWindow?: () => void;
+  onToggleMaximizeWindow?: () => void;
+  onCloseApplicationWindow?: () => void;
 }
 
 // Indicative format accent colors per user specification:
@@ -167,6 +175,10 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   onOpenToolsGuide,
   onOpenShortcutsModal,
   onOpenInstallerGuide,
+  isWindowMaximized = false,
+  onMinimizeWindow,
+  onToggleMaximizeWindow,
+  onCloseApplicationWindow,
 }) => {
   const [section, setSection] = useState<HomeScreenSection>(initialSection);
   const [searchQuery, setSearchQuery] = useState('');
@@ -578,8 +590,23 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
       {/* Left Studio Sidebar */}
       <aside className="w-64 shrink-0 border-r border-[#1e2538] bg-[#0e121d] flex flex-col justify-between">
         <div className="p-5 space-y-6">
-          {/* Brand Header with Official PixelClash Studio Icon */}
-          <div className="flex items-center gap-3">
+          {/* Brand Header with Official PixelClash Studio Icon (draggable in frameless desktop) */}
+          <div
+            data-tauri-drag-region="true"
+            onMouseDown={(e) => {
+              if (e.button !== 0 || e.detail >= 2) return;
+              const target = e.target as HTMLElement;
+              if (target.closest('button, input, select, textarea, a, [role="button"]')) return;
+              void getDesktopBridge()?.startWindowDragging?.();
+            }}
+            onDoubleClick={(e) => {
+              if (!onToggleMaximizeWindow) return;
+              const target = e.target as HTMLElement;
+              if (target.closest('button, input, select, textarea, a, [role="button"]')) return;
+              onToggleMaximizeWindow();
+            }}
+            className="flex items-center gap-3 studio-window-drag"
+          >
             <PixelClashLogoIcon size={38} className="shadow-md" />
             <div className="min-w-0">
               <div className="text-sm font-extrabold tracking-tight text-slate-100 truncate">
@@ -678,8 +705,27 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
 
       {/* Main Content Area */}
       <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
-        {/* Top Utility Header */}
-        <header className="h-14 shrink-0 px-6 border-b border-[#1e2538] bg-[#0e121d]/80 flex items-center justify-between gap-4">
+        {/* Top Utility Header (draggable + double-click to maximize, accessible without any canvas open) */}
+        <header
+          data-tauri-drag-region="true"
+          onMouseDown={(e) => {
+            if (e.button !== 0 || e.detail >= 2) return;
+            const target = e.target as HTMLElement;
+            if (target.closest('button, input, select, textarea, a, [role="button"], .studio-window-no-drag')) {
+              return;
+            }
+            void getDesktopBridge()?.startWindowDragging?.();
+          }}
+          onDoubleClick={(e) => {
+            if (!onToggleMaximizeWindow) return;
+            const target = e.target as HTMLElement;
+            if (target.closest('button, input, select, textarea, a, [role="button"], .studio-window-no-drag')) {
+              return;
+            }
+            onToggleMaximizeWindow();
+          }}
+          className="h-14 shrink-0 px-5 border-b border-[#1e2538] bg-[#0e121d]/80 flex items-center justify-between gap-3 studio-window-drag"
+        >
           <div className="min-w-0 flex items-center gap-3">
             <h2 className="text-sm font-bold tracking-tight text-slate-100 truncate">
               {section === 'inicio' && 'Inicio · Espacio de Trabajo'}
@@ -690,83 +736,138 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
             </h2>
           </div>
 
-          {/* Search, Sort & View Mode Controls for Inicio / Recientes */}
-          {(section === 'inicio' || section === 'recientes') && (
-            <div className="flex items-center gap-2 shrink-0">
-              <div className="relative">
-                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Buscar proyecto..."
-                  className="w-48 sm:w-60 pl-8 pr-7 py-1.5 rounded-lg bg-[#141929] border border-[#26304b] text-xs text-slate-100 placeholder:text-slate-500 focus:border-amber-400 focus:outline-none"
-                />
-                {searchQuery && (
+          <div className="flex items-center gap-2 shrink-0 studio-window-no-drag">
+            {/* Search, Sort & View Mode Controls for Inicio / Recientes */}
+            {(section === 'inicio' || section === 'recientes') && (
+              <div className="flex items-center gap-2 shrink-0">
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Buscar proyecto..."
+                    className="w-36 md:w-44 xl:w-56 pl-8 pr-7 py-1.5 rounded-lg bg-[#141929] border border-[#26304b] text-xs text-slate-100 placeholder:text-slate-500 focus:border-amber-400 focus:outline-none"
+                  />
+                  {searchQuery && (
+                    <button
+                      type="button"
+                      onClick={() => setSearchQuery('')}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white cursor-pointer"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#141929] border border-[#26304b] text-xs">
+                  <ArrowUpDown className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                  <select
+                    value={sortBy}
+                    onChange={(e) => setSortBy(e.target.value as RecentSortKey)}
+                    className="bg-transparent text-xs text-slate-200 focus:outline-none cursor-pointer"
+                  >
+                    <option value="recientes" className="bg-[#121624]">Recientes</option>
+                    <option value="nombre" className="bg-[#121624]">Nombre</option>
+                    <option value="tamano" className="bg-[#121624]">Tamaño</option>
+                    <option value="tipo" className="bg-[#121624]">Tipo</option>
+                  </select>
+                </div>
+
+                <div className="flex items-center rounded-lg border border-[#26304b] bg-[#141929] p-0.5">
                   <button
                     type="button"
-                    onClick={() => setSearchQuery('')}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white cursor-pointer"
+                    onClick={() => setViewMode('grid')}
+                    title="Vista en cuadrícula"
+                    className={`p-1.5 rounded-md transition-colors cursor-pointer ${
+                      viewMode === 'grid'
+                        ? 'bg-amber-400 text-slate-950'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
                   >
-                    <X className="w-3 h-3" />
+                    <LayoutGrid className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setViewMode('list')}
+                    title="Vista en lista"
+                    className={`p-1.5 rounded-md transition-colors cursor-pointer ${
+                      viewMode === 'list'
+                        ? 'bg-amber-400 text-slate-950'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    <List className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {hasActiveDocument && (
+              <button
+                type="button"
+                onClick={onReturnToCanvas}
+                title={`Conserva tus paneles, zoom, herramientas y selección (${openDocumentsCount} abierto${openDocumentsCount === 1 ? '' : 's'})`}
+                className="px-3 py-1.5 rounded-lg border border-emerald-500/45 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-100 text-xs font-semibold flex items-center gap-1.5 cursor-pointer shrink-0 whitespace-nowrap"
+              >
+                <ArrowRight className="w-3.5 h-3.5 text-emerald-300 shrink-0" />
+                <span>Volver al Lienzo</span>
+              </button>
+            )}
+
+            {/* Window Maximize / Fullscreen & Native Frame Controls */}
+            {(onToggleMaximizeWindow || onMinimizeWindow || onCloseApplicationWindow) && (
+              <div className="flex items-center gap-1 pl-2 ml-0.5 border-l border-[#1e2538] shrink-0">
+                {onMinimizeWindow && (
+                  <button
+                    type="button"
+                    onClick={onMinimizeWindow}
+                    title="Minimizar ventana"
+                    aria-label="Minimizar ventana"
+                    className="w-8 h-7 rounded-md flex items-center justify-center text-slate-400 hover:text-slate-100 hover:bg-white/10 transition-colors cursor-pointer"
+                  >
+                    <Minus className="w-3.5 h-3.5" />
+                  </button>
+                )}
+                {onToggleMaximizeWindow && (
+                  <button
+                    type="button"
+                    onClick={onToggleMaximizeWindow}
+                    title={
+                      isWindowMaximized
+                        ? 'Restaurar tamaño de pantalla (F11 / Esc)'
+                        : 'Maximizar pantalla completa (F11)'
+                    }
+                    aria-label={isWindowMaximized ? 'Restaurar pantalla' : 'Maximizar pantalla'}
+                    aria-pressed={isWindowMaximized}
+                    className={`h-7 px-2.5 rounded-md border text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                      isWindowMaximized
+                        ? 'border-amber-400/60 bg-amber-400/15 text-amber-300 hover:bg-amber-400/25'
+                        : 'border-[#2a3450] bg-[#141929] text-slate-200 hover:border-slate-500 hover:bg-[#1a2238]'
+                    }`}
+                  >
+                    {isWindowMaximized ? (
+                      <Minimize2 className="w-3.5 h-3.5 shrink-0" />
+                    ) : (
+                      <Maximize2 className="w-3.5 h-3.5 shrink-0" />
+                    )}
+                    <span>{isWindowMaximized ? 'Restaurar' : 'Maximizar'}</span>
+                  </button>
+                )}
+                {onCloseApplicationWindow && (
+                  <button
+                    type="button"
+                    onClick={onCloseApplicationWindow}
+                    title="Cerrar aplicación"
+                    aria-label="Cerrar aplicación"
+                    className="w-8 h-7 rounded-md flex items-center justify-center text-slate-400 hover:bg-rose-600 hover:text-white transition-colors cursor-pointer"
+                  >
+                    <X className="w-3.5 h-3.5" />
                   </button>
                 )}
               </div>
-
-              <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#141929] border border-[#26304b] text-xs">
-                <ArrowUpDown className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                <select
-                  value={sortBy}
-                  onChange={(e) => setSortBy(e.target.value as RecentSortKey)}
-                  className="bg-transparent text-xs text-slate-200 focus:outline-none cursor-pointer"
-                >
-                  <option value="recientes" className="bg-[#121624]">Recientes</option>
-                  <option value="nombre" className="bg-[#121624]">Nombre</option>
-                  <option value="tamano" className="bg-[#121624]">Tamaño</option>
-                  <option value="tipo" className="bg-[#121624]">Tipo</option>
-                </select>
-              </div>
-
-              <div className="flex items-center rounded-lg border border-[#26304b] bg-[#141929] p-0.5">
-                <button
-                  type="button"
-                  onClick={() => setViewMode('grid')}
-                  title="Vista en cuadrícula"
-                  className={`p-1.5 rounded-md transition-colors cursor-pointer ${
-                    viewMode === 'grid'
-                      ? 'bg-amber-400 text-slate-950'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <LayoutGrid className="w-3.5 h-3.5" />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setViewMode('list')}
-                  title="Vista en lista"
-                  className={`p-1.5 rounded-md transition-colors cursor-pointer ${
-                    viewMode === 'list'
-                      ? 'bg-amber-400 text-slate-950'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <List className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            </div>
-          )}
-
-          {hasActiveDocument && (
-            <button
-              type="button"
-              onClick={onReturnToCanvas}
-              title={`Conserva tus paneles, zoom, herramientas y selección (${openDocumentsCount} abierto${openDocumentsCount === 1 ? '' : 's'})`}
-              className="px-3 py-1.5 rounded-lg border border-emerald-500/45 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-100 text-xs font-semibold flex items-center gap-1.5 cursor-pointer shrink-0 whitespace-nowrap"
-            >
-              <ArrowRight className="w-3.5 h-3.5 text-emerald-300 shrink-0" />
-              <span>Volver al Área de Trabajo</span>
-            </button>
-          )}
+            )}
+          </div>
         </header>
 
         {/* Scrollable Content Body */}
@@ -1073,6 +1174,26 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                         onUpdateStartupPreferences({
                           ...startupPreferences,
                           showSplashTips: e.target.checked,
+                        })
+                      }
+                      className="w-4 h-4 accent-amber-400 cursor-pointer"
+                    />
+                  </label>
+
+                  <label className="flex items-center justify-between p-3 rounded-lg border border-[#1f263a] bg-[#0e121e] cursor-pointer">
+                    <div>
+                      <div className="font-semibold text-slate-100">Iniciar ventana maximizada (escritorio)</div>
+                      <div className="text-[11px] text-slate-400">
+                        Abre PixelClash Studio maximizado al arrancar en escritorio. También puedes pulsar F11 o usar el botón Maximizar en cualquier momento.
+                      </div>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={Boolean(startupPreferences.startMaximized)}
+                      onChange={(e) =>
+                        onUpdateStartupPreferences({
+                          ...startupPreferences,
+                          startMaximized: e.target.checked,
                         })
                       }
                       className="w-4 h-4 accent-amber-400 cursor-pointer"

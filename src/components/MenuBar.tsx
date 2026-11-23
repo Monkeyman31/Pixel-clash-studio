@@ -229,6 +229,8 @@ interface MenuBarProps {
   onOpenFxStudio?: (tab?: 'generator' | 'lab' | 'library') => void;
   onCreateSuggestedModeLayers?: (mode: ProjectWorkMode) => void;
   onApplyModeGuides?: (mode: ProjectWorkMode) => void;
+  dummyEnabled?: boolean;
+  onToggleDummy?: () => void;
   // Performance Mode, Save As / Close Documents & Global Clipboard
   performanceMode?: PerformanceMode;
   onChangePerformanceMode?: (mode: PerformanceMode) => void;
@@ -244,6 +246,7 @@ interface MenuBarProps {
   onTestSplashAnimation?: () => void;
   onActivateCanvasEditTool?: () => void;
   dragEmptySpace?: boolean;
+  isWindowMaximized?: boolean;
   onToggleMaximizeWindow?: () => void;
 }
 
@@ -389,6 +392,8 @@ export const MenuBar: React.FC<MenuBarProps> = ({
   onOpenFxStudio,
   onCreateSuggestedModeLayers,
   onApplyModeGuides,
+  dummyEnabled = false,
+  onToggleDummy,
   performanceMode = 'balanced',
   onChangePerformanceMode,
   onOpenSaveAsModal,
@@ -402,6 +407,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
   onTestSplashAnimation,
   onActivateCanvasEditTool,
   dragEmptySpace = false,
+  isWindowMaximized = false,
   onToggleMaximizeWindow,
 }) => {
   const activeWorkModeDef = WORK_MODES_REGISTRY[workMode] || WORK_MODES_REGISTRY.fighter;
@@ -1245,6 +1251,44 @@ export const MenuBar: React.FC<MenuBarProps> = ({
               </span>
               <span className="text-[10px] font-mono text-amber-400">{activeWorkModeDef.shortLabel}</span>
             </button>
+
+            {onToggleDummy && (
+              <>
+                <div className="h-[1px] bg-[#22283a] my-1" />
+                <SubMenu
+                  label="Fighter Mode · Herramientas"
+                  icon={<ShieldAlert className="w-3.5 h-3.5 text-rose-400" />}
+                  widthClass="w-64"
+                >
+                  <button
+                    type="button"
+                    onClick={() => handleItemClick(onToggleDummy)}
+                    className="px-3 py-1.5 flex items-center justify-between hover:bg-[#20273a] transition-colors text-left"
+                  >
+                    <span className="flex items-center gap-2">
+                      <Target className="w-3.5 h-3.5 text-rose-400" />
+                      <span>Dummy de Práctica (Sparring)</span>
+                    </span>
+                    <span className="text-[10px] text-amber-400 font-mono">
+                      {dummyEnabled ? '✓ Activo' : 'Oculto'}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleItemClick(onToggleHitboxes)}
+                    className="px-3 py-1.5 flex items-center justify-between hover:bg-[#20273a] transition-colors text-left"
+                  >
+                    <span className="flex items-center gap-2">
+                      <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Cajas Hitbox / Hurtbox</span>
+                    </span>
+                    <span className="text-[10px] text-amber-400 font-mono">
+                      {showHitboxes ? '✓' : ''}
+                    </span>
+                  </button>
+                </SubMenu>
+              </>
+            )}
       </TopMenuGroup>
 
       {/* ========================================================= */}
@@ -2607,9 +2651,28 @@ export const MenuBar: React.FC<MenuBarProps> = ({
               </>
             )}
 
-            {(onOpenHomeScreen || onTestSplashAnimation) && (
+            {(onOpenHomeScreen || onTestSplashAnimation || onToggleMaximizeWindow) && (
               <>
                 <div className="h-[1px] bg-[#22283a] my-1" />
+                {onToggleMaximizeWindow && (
+                  <button
+                    type="button"
+                    onClick={() => handleItemClick(onToggleMaximizeWindow)}
+                    className="px-3 py-1.5 flex items-center justify-between hover:bg-[#20273a] transition-colors text-left text-slate-200"
+                  >
+                    <span className="flex items-center gap-2">
+                      <Maximize2 className="w-3.5 h-3.5 text-amber-400" />
+                      <span>
+                        {isWindowMaximized
+                          ? '✓ Restaurar Pantalla / Ventana'
+                          : 'Maximizar / Pantalla Completa'}
+                      </span>
+                    </span>
+                    <span className="text-[10px] text-slate-400 font-mono">
+                      {shortcutLabels['view.toggle_fullscreen'] || 'F11'}
+                    </span>
+                  </button>
+                )}
                 {onOpenHomeScreen && (
                   <button
                     type="button"

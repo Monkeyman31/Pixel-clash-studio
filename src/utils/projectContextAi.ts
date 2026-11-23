@@ -1,10 +1,21 @@
 import {
+  AiCharacterTaskMode,
   AiCoherenceLevel,
   AiContextualMode,
+  AiDiagnosticAlert,
   AiExplanationReport,
   AiExternalProfileId,
+  AiGenerationStatsSnapshot,
+  AiPhaseOneAnalysis,
   AiPixelValidationStats,
   AiPoseFidelityLevel,
+  AiPreserveConstraints,
+  AiRecommendationsReport,
+  AiReferenceMode,
+  AiReferenceProjectId,
+  AiReferenceProjectProfile,
+  AiSelfEvaluationAxis,
+  AiSelfEvaluationReport,
   Frame,
   LayerGroup,
   ProjectAiTrainingProfile,
@@ -649,6 +660,29 @@ export function analyzeProjectContext(
     ? 'Recuperación (Recovery)'
     : 'Guardia / Idle';
 
+  // Heuristic pose & perspective detection from bounds, hitbox placement & horizontal symmetry
+  let perspective: ProjectContextAnalysis['perspective'] = 'Lateral 2D';
+  let detectedPose = 'Guardia Neutral';
+  if (characterBounds) {
+    const aspect = characterBounds.w / Math.max(1, characterBounds.h);
+    if (aspect > 0.72 && aspect < 1.15 && !hasHitbox) {
+      perspective = '3/4';
+    } else if (aspect >= 1.4) {
+      perspective = 'Lateral 2D';
+    }
+    if (hasHitbox || phase === 'active') {
+      detectedPose = aspect > 0.95 ? 'Patada / Golpe Extendido' : 'Ataque Frontal';
+    } else if (phase === 'startup') {
+      detectedPose = 'Anticipación / Carga';
+    } else if (phase === 'recovery') {
+      detectedPose = 'Recuperación de Guardia';
+    } else if (characterBounds.h < height * 0.48) {
+      detectedPose = 'Agachado / Salto Compacto';
+    }
+  } else {
+    detectedPose = 'Lienzo Base (Sin Silueta)';
+  }
+
   return {
     visualStyle: inferred.visualStyle,
     detectedProfileId: inferred.profileId,
@@ -664,6 +698,67 @@ export function analyzeProjectContext(
     lightDirection,
     detailLevel,
     characterBounds,
+    detectedPose,
+    perspective,
+  };
+}
+
+export function buildPhaseOneAnalysis(params: {
+  projectAnalysis: ProjectContextAnalysis;
+  refAnalysis?: ProjectContextAnalysis | null;
+  styleMode: AiContextualMode;
+  targetProfileId: AiExternalProfileId;
+  customStyleName?: string;
+  customOutlinePx?: number;
+  customPalette?: string[];
+  sourceLabel?: string;
+  aiOverride?: Partial<AiPhaseOneAnalysis> | null;
+}): AiPhaseOneAnalysis {
+  const { projectAnalysis, refAnalysis, styleMode, targetProfileId, customStyleName, customOutlinePx, customPalette, sourceLabel, aiOverride } = params;
+  const activeAnalysis = refAnalysis || projectAnalysis;
+  const resolvedProfileId =
+    styleMode === 'keep'
+      ? projectAnalysis.detectedProfileId
+      : styleMode === 'auto_detect'
+      ? activeAnalysis.detectedProfileId
+      : targetProfileId;
+  const profile = getAiStyleProfile(resolvedProfileId);
+  const palette =
+    styleMode === 'keep'
+      ? projectAnalysis.activePalette
+      : resolvedProfileId === 'custom' && customPalette && customPalette.length >= 2
+      ? customPalette
+      : profile.palette;
+
+  const detectedStyle =
+    aiOverride?.detectedStyle ||
+    (resolvedProfileId === 'custom' && customStyleName
+      ? customStyleName
+      : styleMode === 'keep'
+      ? projectAnalysis.visualStyle
+      : profile.name);
+
+  return {
+    detectedStyle,
+    profileId: resolvedProfileId,
+    era: aiOverride?.era || (styleMode === 'keep' ? projectAnalysis.era : profile.era),
+    paletteCount: aiOverride?.paletteCount ?? Math.max(palette.length, activeAnalysis.uniqueColors || palette.length),
+    palette: aiOverride?.palette && aiOverride.palette.length > 0 ? aiOverride.palette : palette,
+    detectedPose: aiOverride?.detectedPose || activeAnalysis.detectedPose || projectAnalysis.animationType,
+    perspective: aiOverride?.perspective || activeAnalysis.perspective || 'Lateral 2D',
+    outlinePx: aiOverride?.outlinePx ?? (resolvedProfileId === 'custom' && customOutlinePx ? customOutlinePx : activeAnalysis.lineThickness || profile.outlinePx),
+    shadingType: aiOverride?.shadingType || activeAnalysis.shadingType || profile.shading,
+    lightDirection: aiOverride?.lightDirection || activeAnalysis.lightDirection,
+    resolution: projectAnalysis.resolution,
+    projectType: projectAnalysis.gameGenre,
+    anatomyNotes:
+      aiOverride?.anatomyNotes ||
+      (activeAnalysis.characterBounds
+        ? `Silueta ${activeAnalysis.characterBounds.w}×${activeAnalysis.characterBounds.h}px continua, sombreado ${activeAnalysis.shadingType}.`
+        : 'Sin silueta previa en lienzo; generar estructura anatómica completa y cohesionada.'),
+    sourceLabel: sourceLabel || (refAnalysis ? 'Proyecto + Referencia Visual' : 'Contexto de Proyecto'),
+    analyzedByAi: Boolean(aiOverride),
+    analyzedAt: Date.now(),
   };
 }
 
@@ -912,6 +1007,7 @@ export function validateAndCleanAiPixelGrid(
   let prunedFragments = 0;
   let repairedEdges = 0;
   let quantizedColors = 0;
+  let anatomicalFixes = 0;
 
   // Step 1: Normalize hex colors & strip low-alpha anti-alias smudge
   const work: (string | null)[][] = Array.from({ length: height }, (_, y) =>
@@ -945,7 +1041,6 @@ export function validateAndCleanAiPixelGrid(
       ].filter(Boolean) as string[];
 
       if (neighbors.length >= 3) {
-        // Pick majority/closest neighbor color
         const counts = new Map<string, number>();
         for (const n of neighbors) counts.set(n, (counts.get(n) || 0) + 1);
         const bestColor = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
@@ -961,7 +1056,6 @@ export function validateAndCleanAiPixelGrid(
     for (let y = 1; y < height - 1; y++) {
       for (let x = 1; x < width - 1; x++) {
         if (edgeSnap[y][x]) continue;
-        // Detect pinch corners where diagonal pixels are solid and opposite diagonals are solid-ish silhouette edge
         const tl = edgeSnap[y - 1][x - 1];
         const tr = edgeSnap[y - 1][x + 1];
         const bl = edgeSnap[y + 1][x - 1];
@@ -982,7 +1076,6 @@ export function validateAndCleanAiPixelGrid(
   }
 
   // Step 4: Remove isolated 1px orphan noise dots
-  // (For VFX, preserve intentional sparse trailing sparks unless strict 'max' coherence)
   const removeSingletons = mode !== 'vfx' || coherence === 'max';
   if (removeSingletons) {
     const orphanSnap = work.map((r) => [...r]);
@@ -1010,8 +1103,7 @@ export function validateAndCleanAiPixelGrid(
     }
   }
 
-  // Step 5: Connected-component fragment pruning for character sprites & poses
-  // Guarantees a pose/sprite edit does NOT leave tiny detached chopped fragments floating away!
+  // Step 5: Connected-component fragment & anatomical disconnect detection/repair for sprites & poses
   if (mode === 'pose' || mode === 'sprite') {
     const visited = new Uint8Array(width * height);
     const components: { pts: number[] }[] = [];
@@ -1047,16 +1139,56 @@ export function validateAndCleanAiPixelGrid(
 
     if (components.length > 1) {
       components.sort((a, b) => b.pts.length - a.pts.length);
+      const mainSet = new Set(components[0].pts);
       const mainSize = components[0].pts.length;
-      const minThreshold = options.minFragmentSize ?? Math.max(3, Math.min(8, Math.round(mainSize * 0.04)));
+      const minThreshold = options.minFragmentSize ?? Math.max(4, Math.min(10, Math.round(mainSize * 0.045)));
       for (let i = 1; i < components.length; i++) {
-        if (components[i].pts.length < minThreshold) {
-          for (const pIdx of components[i].pts) {
+        const comp = components[i];
+        // Check if this medium-size component (likely limb/hand/head) has a 2px gap to main torso -> bridge it!
+        let minDistSq = Infinity;
+        let bridgeMid: { x: number; y: number; color: string } | null = null;
+        if (comp.pts.length >= minThreshold) {
+          for (const pIdx of comp.pts) {
+            const py = Math.floor(pIdx / width);
+            const px = pIdx % width;
+            for (let dy = -2; dy <= 2; dy++) {
+              for (let dx = -2; dx <= 2; dx++) {
+                const ny = py + dy;
+                const nx = px + dx;
+                if (ny < 0 || ny >= height || nx < 0 || nx >= width) continue;
+                const nIdx = ny * width + nx;
+                if (mainSet.has(nIdx)) {
+                  const d2 = dx * dx + dy * dy;
+                  if (d2 < minDistSq) {
+                    minDistSq = d2;
+                    bridgeMid = {
+                      x: Math.round((px + nx) / 2),
+                      y: Math.round((py + ny) / 2),
+                      color: work[py][px] || work[ny][nx] || '#111111',
+                    };
+                  }
+                }
+              }
+            }
+          }
+          if (bridgeMid && minDistSq <= 8 && !work[bridgeMid.y][bridgeMid.x]) {
+            work[bridgeMid.y][bridgeMid.x] = bridgeMid.color;
+            for (const pIdx of comp.pts) mainSet.add(pIdx);
+            anatomicalFixes++;
+            continue;
+          }
+        }
+        if (comp.pts.length < minThreshold || minDistSq > 16) {
+          for (const pIdx of comp.pts) {
             const py = Math.floor(pIdx / width);
             const px = pIdx % width;
             work[py][px] = null;
           }
-          prunedFragments += components[i].pts.length;
+          if (comp.pts.length >= minThreshold) {
+            anatomicalFixes++;
+          } else {
+            prunedFragments += comp.pts.length;
+          }
         }
       }
     }
@@ -1077,6 +1209,7 @@ export function validateAndCleanAiPixelGrid(
       prunedFragments,
       repairedEdges,
       quantizedColors,
+      anatomicalFixes,
       totalPixelsAfter,
     },
   };
@@ -1116,11 +1249,15 @@ export function buildExplainableAiReport(params: {
   profileId: AiExternalProfileId;
   coherenceLevel: AiCoherenceLevel;
   poseFidelity?: AiPoseFidelityLevel;
+  referenceMode?: AiReferenceMode;
   referenceUsed: string;
   validationStats?: AiPixelValidationStats;
   overrideDetectedStyle?: string;
   customStyleName?: string;
   customPalette?: string[];
+  preserveConstraints?: AiPreserveConstraints;
+  phase1Analysis?: AiPhaseOneAnalysis | null;
+  decisionsTaken?: string[];
 }): AiExplanationReport {
   const resolvedProfileId =
     params.styleMode === 'keep' || params.styleMode === 'auto_detect'
@@ -1146,32 +1283,72 @@ export function buildExplainableAiReport(params: {
       ? params.customPalette
       : activeProfile.palette;
 
+  const appliedRestrictions: string[] = [];
+  if (params.preserveConstraints) {
+    if (params.preserveConstraints.pose) appliedRestrictions.push('Conservar Pose');
+    if (params.preserveConstraints.colors) appliedRestrictions.push('Conservar Colores / Paleta');
+    if (params.preserveConstraints.silhouette) appliedRestrictions.push('Conservar Silueta');
+    if (params.preserveConstraints.style) appliedRestrictions.push('Conservar Estilo');
+    if (params.preserveConstraints.proportions) appliedRestrictions.push('Conservar Proporciones');
+    if (params.preserveConstraints.animation) appliedRestrictions.push('Conservar Animación');
+  }
+  if (params.referenceMode === 'strict') {
+    const fid =
+      params.poseFidelity === 'exact'
+        ? 'Exacta'
+        : params.poseFidelity === 'high'
+        ? 'Alta'
+        : params.poseFidelity === 'medium'
+        ? 'Media'
+        : 'Baja';
+    appliedRestrictions.push(`Referencia Estricta (${fid})`);
+  } else if (params.referenceMode === 'free') {
+    appliedRestrictions.push('Referencia Libre (Inspiración)');
+  }
+
+  const stats = params.validationStats;
+  const defaultDecisions = [
+    `Fase 1 analizó estilo "${params.phase1Analysis?.detectedStyle || params.contextAnalysis.visualStyle}" con contorno ${params.phase1Analysis?.outlinePx ?? params.contextAnalysis.lineThickness}px y perspectiva ${params.phase1Analysis?.perspective || params.contextAnalysis.perspective || 'Lateral 2D'}.`,
+    `Paleta cuantizada y bloqueada a ${palette.length} colores coherentes (${targetStyleLabel}).`,
+    stats
+      ? `Validación post-generación: ${stats.filledHoles} huecos rellenados, ${stats.removedOrphans + stats.prunedFragments} píxeles aislados eliminados, ${stats.anatomicalFixes} ajustes anatómicos y ${stats.quantizedColors} colores normalizados.`
+      : 'Validación post-generación aplicada sobre silueta y bordes.',
+  ];
+
   return {
-    detectedStyle: params.overrideDetectedStyle || `${params.contextAnalysis.visualStyle} · ${params.contextAnalysis.era}`,
+    detectedStyle:
+      params.overrideDetectedStyle ||
+      params.phase1Analysis?.detectedStyle ||
+      `${params.contextAnalysis.visualStyle} · ${params.contextAnalysis.era}`,
     targetStyleLabel,
     resolution: params.contextAnalysis.resolution,
     paletteCount: palette.length,
     detectedPalette: palette.slice(0, 12),
-    outlineThickness: params.contextAnalysis.lineThickness,
-    shadingType: params.contextAnalysis.shadingType,
-    lightDirection: params.contextAnalysis.lightDirection,
+    outlineThickness: params.phase1Analysis?.outlinePx ?? params.contextAnalysis.lineThickness,
+    shadingType: params.phase1Analysis?.shadingType || params.contextAnalysis.shadingType,
+    lightDirection: params.phase1Analysis?.lightDirection || params.contextAnalysis.lightDirection,
     referenceUsed: params.referenceUsed,
+    referenceMode: params.referenceMode,
     coherenceLevel: params.coherenceLevel,
     poseFidelity: params.poseFidelity,
+    detectedPose: params.phase1Analysis?.detectedPose || params.contextAnalysis.detectedPose,
+    perspective: params.phase1Analysis?.perspective || params.contextAnalysis.perspective,
+    appliedRestrictions,
+    decisionsTaken: params.decisionsTaken && params.decisionsTaken.length > 0 ? params.decisionsTaken : defaultDecisions,
     validationStats: params.validationStats,
     generatedAt: Date.now(),
   };
 }
 
 /**
- * Generates local adaptive character variation / recolor / synthesis grid when server key is absent
+ * Generates local adaptive character variation / recolor / clean / synthesis grid when server key is absent
  * while preserving intact silhouettes and zero floating fragments.
  */
 export function generateFallbackCharacterGrid(
   sourceGrid: (string | null)[][],
   width: number,
   height: number,
-  mode: 'create' | 'variation' | 'recolor' | 'outfit' | 'anatomy' | 'reference_adapt',
+  mode: AiCharacterTaskMode,
   targetPalette: string[]
 ): (string | null)[][] {
   const palette = targetPalette.length >= 3 ? targetPalette : ['#18121e', '#ef4444', '#fbbf24', '#38bdf8', '#f8fafc'];
@@ -1180,6 +1357,14 @@ export function generateFallbackCharacterGrid(
     for (let x = 0; x < (sourceGrid[y]?.length || 0); x++) {
       if (sourceGrid[y][x]) nonEmpty++;
     }
+  }
+
+  if (mode === 'clean_sprite' && nonEmpty > 0) {
+    return validateAndCleanAiPixelGrid(sourceGrid, 'sprite', {
+      targetPalette: palette,
+      coherenceLevel: 'max',
+      repairOutlines: true,
+    }).grid;
   }
 
   // If canvas is empty or mode is 'create', synthesize a crisp fighting stance silhouette
@@ -1528,5 +1713,461 @@ export function generateFallbackHudGrid(
   }
   return g;
 }
+
+// ============================================================================
+// PROYECTO DE REFERENCIA GLOBAL (KOF / SF ALPHA / GUILTY GEAR / PROPIO)
+// ============================================================================
+
+export const AI_REFERENCE_PROJECTS: Record<Exclude<AiReferenceProjectId, 'custom_project'>, AiReferenceProjectProfile> = {
+  kof: {
+    id: 'kof',
+    name: 'King of Fighters',
+    era: 'SNK Neo Geo Arcade / KOF',
+    styleProfileId: 'kof',
+    outlinePx: 1,
+    shadingType: 'cel',
+    palette: ['#0d0914', '#2e1f3d', '#f59e0b', '#ef4444', '#fde047', '#f8fafc', '#38bdf8', '#991b1b'],
+    spriteTraits: 'Proporciones atléticas estilizadas arcade, contorno oscuro firme 1px, pliegues marcados y contraste direccional cálido.',
+    fxTraits: 'Llamaradas doradas/carmesí agresivas, destellos radiales Neo Geo y chispas de núcleo blanco.',
+    hudTraits: 'Barras inclinadas en oro cepillado y carmesí con medidor MAX brillante y temporizador arcade centrado.',
+    stageTraits: 'Focos de torneo, suelo de perspectiva profunda y arquitecturas detalladas con horizonte dramático.',
+    promptDirective:
+      'GLOBAL REFERENCE PROJECT: The King of Fighters (SNK Arcade). Unify sprites (1px tinted outline, crisp directional shading), FX (blazing gold/crimson arcs), HUD (brushed gold/crimson gauges), and stages (dramatic Neo Geo perspective arenas).',
+  },
+  sf_alpha: {
+    id: 'sf_alpha',
+    name: 'Street Fighter Alpha',
+    era: 'Capcom CPS-2 Anime Arcade',
+    styleProfileId: 'sf_alpha',
+    outlinePx: 1,
+    shadingType: 'cel',
+    palette: ['#090d16', '#1e3a8a', '#3b82f6', '#22d3ee', '#fbbf24', '#ef4444', '#ffffff', '#f97316'],
+    spriteTraits: 'Anatomía robusta expresiva estilo anime CPS-2, sombreado cel en dos tonos limpios y alta legibilidad en torneo.',
+    fxTraits: 'Ondas de plasma cian/blanco tipo Hadoken y destellos cómic de impacto con halo limpio.',
+    hudTraits: 'Barras inclinadas azul cobalto/oro con retratos enmarcados y medidor Super segmentado.',
+    stageTraits: 'Dojos y hangares de siluetas limpias, nubes diagonales dramáticas y suelos de tatami o losa nítidos.',
+    promptDirective:
+      'GLOBAL REFERENCE PROJECT: Street Fighter Alpha (Capcom CPS-2). Unify sprites (athletic anime proportions, clean two-tone cel shading), FX (azure/white plasma waves), HUD (cobalt/gold tournament gauges), and stages (clean anime arena silhouettes).',
+  },
+  guilty_gear: {
+    id: 'guilty_gear',
+    name: 'Guilty Gear',
+    era: 'Arc System Works Heavy-Metal Anime',
+    styleProfileId: 'guilty_gear',
+    outlinePx: 2,
+    shadingType: 'cel',
+    palette: ['#080a10', '#1e1b4b', '#db2777', '#a855f7', '#06b6d4', '#facc15', '#ffffff', '#dc2626'],
+    spriteTraits: 'Contornos afilados de 1-2px tipo tinta anime, sombras negras heavy-metal profundas y cortes de luz angulares.',
+    fxTraits: 'Cortes de tensión neón magenta/cian, fracturas eléctricas y anillos de impacto Roman Cancel.',
+    hudTraits: 'Indicadores metálicos angulares plata/carmesí con tipografía rock y barra de Tensión neón.',
+    stageTraits: 'Catedrales industriales, engranajes gigantes y haces de luz dramáticos sobre suelo metálico.',
+    promptDirective:
+      'GLOBAL REFERENCE PROJECT: Guilty Gear (Arc System Works). Unify sprites (sharp 1-2px ink outlines, deep black shadows, angular cel highlights), FX (neon magenta/cyan slashes), HUD (angular heavy-metal tension gauges), and stages (industrial spotlights).',
+  },
+};
+
+export function buildReferenceProjectProfile(
+  id: AiReferenceProjectId,
+  projectAnalysis: ProjectContextAnalysis,
+  trainedProfile?: ProjectAiTrainingProfile | null,
+  projectName: string = 'Proyecto propio'
+): AiReferenceProjectProfile {
+  if (id !== 'custom_project') {
+    return AI_REFERENCE_PROJECTS[id];
+  }
+  const palette =
+    trainedProfile?.masterPalette && trainedProfile.masterPalette.length >= 2
+      ? trainedProfile.masterPalette
+      : projectAnalysis.activePalette;
+  const outlinePx = trainedProfile?.lineThickness ?? projectAnalysis.lineThickness ?? 1;
+  const shading = trainedProfile?.shadingType ?? projectAnalysis.shadingType ?? 'cel';
+  const styleName = trainedProfile?.visualStyle || projectAnalysis.visualStyle || 'Estilo Propio';
+
+  return {
+    id: 'custom_project',
+    name: `Proyecto propio (${projectName})`,
+    era: trainedProfile?.era || projectAnalysis.era || 'Proyecto Actual',
+    styleProfileId: trainedProfile?.detectedProfileId || projectAnalysis.detectedProfileId,
+    outlinePx,
+    shadingType: shading,
+    palette: palette.slice(0, 12),
+    spriteTraits: `Resolución ${projectAnalysis.resolution}, contorno ${outlinePx}px, sombreado ${shading} y luz ${projectAnalysis.lightDirection}.`,
+    fxTraits: `Chispas y ondas adaptadas a la paleta maestra de ${palette.length} colores (${styleName}).`,
+    hudTraits: `Marcos de interfaz alineados a ${styleName} y densidad de detalle ${projectAnalysis.detailLevel}.`,
+    stageTraits: `Escenarios y fondos coherentes con dirección de luz ${projectAnalysis.lightDirection} y trazo ${outlinePx}px.`,
+    promptDirective: `GLOBAL REFERENCE PROJECT: User Own Project "${projectName}" (${styleName}). Enforce outline ${outlinePx}px, shading ${shading}, light ${projectAnalysis.lightDirection}, and active palette [${palette.slice(0, 10).join(', ')}] consistently across sprites, FX, HUD, and stages.`,
+  };
+}
+
+// ============================================================================
+// TELEMETRÍA, DIAGNÓSTICO IA, RECOMENDACIONES Y AUTOEVALUACIÓN IA
+// ============================================================================
+
+const AI_TELEMETRY_STORAGE_KEY = 'pixelclash_ai_telemetry_v1';
+
+export function createDefaultAiGenerationStats(): AiGenerationStatsSnapshot {
+  return {
+    totalGenerations: 0,
+    apiGenerations: 0,
+    localFallbacks: 0,
+    bySection: {
+      personajes: 0,
+      poses: 0,
+      animaciones: 0,
+      inbetweens: 0,
+      fx: 0,
+      escenarios: 0,
+      hud: 0,
+    },
+    totalOrphansRemoved: 0,
+    totalHolesFilled: 0,
+    totalAnatomicalFixes: 0,
+    totalQuantizedColors: 0,
+    poseLowFidelityCount: 0,
+    fxNoiseAlerts: 0,
+    styleChangesCount: 0,
+    lastUpdatedAt: Date.now(),
+  };
+}
+
+export function loadAiGenerationStats(): AiGenerationStatsSnapshot {
+  try {
+    const raw = localStorage.getItem(AI_TELEMETRY_STORAGE_KEY);
+    if (!raw) return createDefaultAiGenerationStats();
+    const parsed = JSON.parse(raw);
+    const base = createDefaultAiGenerationStats();
+    return {
+      ...base,
+      ...parsed,
+      bySection: {
+        ...base.bySection,
+        ...(parsed?.bySection || {}),
+      },
+    };
+  } catch {
+    return createDefaultAiGenerationStats();
+  }
+}
+
+export function saveAiGenerationStats(stats: AiGenerationStatsSnapshot): void {
+  try {
+    localStorage.setItem(AI_TELEMETRY_STORAGE_KEY, JSON.stringify(stats));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function recordAiGenerationEvent(
+  prev: AiGenerationStatsSnapshot,
+  event: {
+    section: keyof AiGenerationStatsSnapshot['bySection'];
+    usedApi: boolean;
+    stats?: AiPixelValidationStats;
+    lowPoseFidelity?: boolean;
+    styleChanged?: boolean;
+  }
+): AiGenerationStatsSnapshot {
+  const orphans = event.stats?.removedOrphans ?? 0;
+  const holes = event.stats?.filledHoles ?? 0;
+  const anatomy = event.stats?.anatomicalFixes ?? 0;
+  const quant = event.stats?.quantizedColors ?? 0;
+  const next: AiGenerationStatsSnapshot = {
+    totalGenerations: prev.totalGenerations + 1,
+    apiGenerations: prev.apiGenerations + (event.usedApi ? 1 : 0),
+    localFallbacks: prev.localFallbacks + (event.usedApi ? 0 : 1),
+    bySection: {
+      ...prev.bySection,
+      [event.section]: (prev.bySection[event.section] || 0) + 1,
+    },
+    totalOrphansRemoved: prev.totalOrphansRemoved + orphans,
+    totalHolesFilled: prev.totalHolesFilled + holes,
+    totalAnatomicalFixes: prev.totalAnatomicalFixes + anatomy,
+    totalQuantizedColors: prev.totalQuantizedColors + quant,
+    poseLowFidelityCount: prev.poseLowFidelityCount + (event.lowPoseFidelity ? 1 : 0),
+    fxNoiseAlerts: prev.fxNoiseAlerts + (event.section === 'fx' && orphans >= 4 ? 1 : 0),
+    styleChangesCount: prev.styleChangesCount + (event.styleChanged ? 1 : 0),
+    lastUpdatedAt: Date.now(),
+  };
+  saveAiGenerationStats(next);
+  return next;
+}
+
+export function generateAiDiagnosticsAndRecommendations(params: {
+  stats: AiGenerationStatsSnapshot;
+  projectAnalysis: ProjectContextAnalysis;
+  trainedProfile: ProjectAiTrainingProfile | null;
+  referenceProject: AiReferenceProjectProfile | null;
+  framesCount: number;
+  hasGuideReferences: boolean;
+  poseFidelity: AiPoseFidelityLevel;
+  referenceMode: AiReferenceMode;
+  coherenceLevel: AiCoherenceLevel;
+}): AiRecommendationsReport {
+  const {
+    stats,
+    projectAnalysis,
+    trainedProfile,
+    referenceProject,
+    framesCount,
+    hasGuideReferences,
+    poseFidelity,
+    referenceMode,
+    coherenceLevel,
+  } = params;
+
+  const problemsDetected: AiDiagnosticAlert[] = [];
+
+  // 1) Coherencia pose / referencia
+  if (stats.poseLowFidelityCount > 0 || (hasGuideReferences && (referenceMode === 'free' || poseFidelity === 'low'))) {
+    problemsDetected.push({
+      id: 'diag-pose-ref',
+      severity: 'warning',
+      area: 'poses',
+      title: 'Se detectó baja coherencia entre pose y referencia',
+      detail:
+        stats.poseLowFidelityCount > 0
+          ? `Se registraron ${stats.poseLowFidelityCount} generaciones de pose con baja fidelidad o modo libre respecto a la silueta guía.`
+          : 'Tienes referencias guía activas, pero la fidelidad actual está en modo relajado (Baja / Libre).',
+      actionLabel: 'Ajustar a Referencia Estricta',
+      actionSection: 'poses_dummie',
+    });
+  }
+
+  // 2) FX píxeles aislados
+  if (stats.fxNoiseAlerts > 0 || stats.totalOrphansRemoved >= 8) {
+    problemsDetected.push({
+      id: 'diag-fx-orphans',
+      severity: 'warning',
+      area: 'fx',
+      title: 'Los FX o sprites generados tienden a producir píxeles aislados',
+      detail: `El validador limpió ${stats.totalOrphansRemoved} píxeles huérfanos y ${stats.totalHolesFilled} huecos acumulados. Se recomienda Coherencia Alta o Máxima.`,
+      actionLabel: 'Revisar FX Lab',
+      actionSection: 'fx_lab',
+    });
+  }
+
+  // 3) Estilo seleccionado requiere entrenamiento / adaptación
+  if (!trainedProfile || (referenceProject && referenceProject.styleProfileId !== projectAnalysis.detectedProfileId)) {
+    problemsDetected.push({
+      id: 'diag-style-training',
+      severity: !trainedProfile ? 'warning' : 'info',
+      area: 'estilo',
+      title: 'El estilo seleccionado requiere mayor entrenamiento',
+      detail: !trainedProfile
+        ? `Aún no se ha entrenado la IA con las ${framesCount} animaciones y capas de este proyecto (${projectAnalysis.visualStyle}).`
+        : `El Proyecto de Referencia activo (${referenceProject?.name}) difiere del estilo detectado en el lienzo (${projectAnalysis.visualStyle}).`,
+      actionLabel: 'Entrenar IA / Adaptar Estilo',
+      actionSection: 'configuracion_ia',
+    });
+  }
+
+  // 4) Animaciones / fluidez
+  if (framesCount < 4) {
+    problemsDetected.push({
+      id: 'diag-anim-short',
+      severity: 'info',
+      area: 'animaciones',
+      title: 'Secuencia corta para interpolación e Inbetweens',
+      detail: `El proyecto actual tiene ${framesCount} fotograma(s); con 4 o más frames la IA extrae mejores arcos de movimiento.`,
+      actionLabel: 'Generar Animación',
+      actionSection: 'animaciones',
+    });
+  }
+
+  if (problemsDetected.length === 0) {
+    problemsDetected.push({
+      id: 'diag-healthy',
+      severity: 'ok',
+      area: 'sprites',
+      title: 'Pipeline IA en estado óptimo y coherente',
+      detail: `Estilo (${projectAnalysis.visualStyle}), paleta (${projectAnalysis.uniqueColors} colores) y coherencia (${coherenceLevel}) alineados sin anomalías activas.`,
+    });
+  }
+
+  const improvableAreas: string[] = [];
+  if (stats.totalAnatomicalFixes > 0) {
+    improvableAreas.push(
+      `Integridad anatómica en poses (${stats.totalAnatomicalFixes} extremidades/fragmentos reconectados automáticamente).`
+    );
+  }
+  if (!referenceProject) {
+    improvableAreas.push(
+      'Proyecto de Referencia global sin fijar: activar KOF, Street Fighter Alpha, Guilty Gear o Proyecto propio unificará Sprites, FX, HUD y Escenarios.'
+    );
+  }
+  if (coherenceLevel !== 'max' && stats.totalOrphansRemoved > 0) {
+    improvableAreas.push(
+      'Subir la post-limpieza a "Máxima (Estricta)" eliminará residuos de 1px y bloqueará todos los tonos a la paleta maestra.'
+    );
+  }
+  if (stats.bySection.hud === 0 && stats.totalGenerations >= 2) {
+    improvableAreas.push(
+      'Cohesión HUD/Escenario: genera una barra de vida o fondo usando el mismo perfil para validar contraste del personaje.'
+    );
+  }
+  if (improvableAreas.length === 0) {
+    improvableAreas.push('Mantén el entrenamiento actualizado cuando añadas nuevas capas de efectos o vestuario.');
+  }
+
+  const futureFeatures: string[] = [
+    'Auto-ajuste de Hitboxes/Hurtboxes sincronizado tras cada pose generada por IA.',
+    'Pasada automática de Rim-Light direccional para separar el luchador del fondo del escenario.',
+    'Exportación en lote de variantes 2P/EX remapeadas con paleta cuantizada por rol.',
+  ];
+  if (stats.bySection.inbetweens > 0 || framesCount >= 8) {
+    futureFeatures.unshift('Suavizado inteligente de curvas de arco entre keyframes en ciclos Walk/Run/Attack.');
+  }
+
+  return {
+    generatedAt: Date.now(),
+    problemsDetected,
+    improvableAreas,
+    futureFeatures: futureFeatures.slice(0, 4),
+    stats,
+  };
+}
+
+export function runLocalAiSelfEvaluation(params: {
+  projectAnalysis: ProjectContextAnalysis;
+  stats: AiGenerationStatsSnapshot;
+  trainedProfile: ProjectAiTrainingProfile | null;
+  referenceProject: AiReferenceProjectProfile | null;
+  frames: Frame[];
+  coherenceLevel: AiCoherenceLevel;
+}): AiSelfEvaluationReport {
+  const { projectAnalysis, stats, trainedProfile, referenceProject, frames, coherenceLevel } = params;
+
+  const hasHudLayer = frames.some((f) =>
+    f.layers.some((l) => {
+      const n = l.name.toLowerCase();
+      return n.includes('hud') || n.includes('barra') || n.includes('ui');
+    })
+  );
+  const hasFxLayer = frames.some((f) =>
+    f.layers.some((l) => {
+      const n = l.name.toLowerCase();
+      return (n.includes('fx') || n.includes('vfx') || Boolean(l.fxRecipe)) && l.pixels.some((r) => r.some(Boolean));
+    })
+  );
+
+  const spriteScore = Math.max(
+    55,
+    Math.min(
+      96,
+      74 +
+        (projectAnalysis.lineThickness >= 1 ? 8 : 0) +
+        (projectAnalysis.uniqueColors >= 10 ? 7 : 2) -
+        Math.min(14, stats.totalAnatomicalFixes * 3)
+    )
+  );
+  const hudScore = Math.max(
+    52,
+    Math.min(94, 62 + (stats.bySection.hud > 0 ? 18 : 0) + (hasHudLayer ? 10 : 0) + (referenceProject ? 4 : 0))
+  );
+  const fxScore = Math.max(
+    54,
+    Math.min(95, 68 + (hasFxLayer ? 12 : 0) + (stats.bySection.fx > 0 ? 10 : 0) - Math.min(16, stats.fxNoiseAlerts * 6))
+  );
+  const animScore = Math.max(
+    55,
+    Math.min(96, 60 + Math.min(24, frames.length * 2) + (stats.bySection.animaciones + stats.bySection.inbetweens > 0 ? 10 : 0))
+  );
+  const coherenceScore = Math.max(
+    55,
+    Math.min(
+      97,
+      64 +
+        (trainedProfile ? 12 : 0) +
+        (referenceProject ? 10 : 0) +
+        (coherenceLevel === 'max' ? 8 : coherenceLevel === 'high' ? 5 : 0) -
+        Math.min(12, stats.poseLowFidelityCount * 4)
+    )
+  );
+
+  const statusFor = (s: number): AiSelfEvaluationAxis['status'] =>
+    s >= 82 ? 'Optimo' : s >= 68 ? 'Mejorable' : 'Requiere atencion';
+
+  const axes: AiSelfEvaluationAxis[] = [
+    {
+      key: 'sprites',
+      label: 'Sprites',
+      score: spriteScore,
+      status: statusFor(spriteScore),
+      observation:
+        stats.totalAnatomicalFixes > 0
+          ? `Buena base visual (${projectAnalysis.visualStyle}), aunque se corrigieron ${stats.totalAnatomicalFixes} discontinuidades de silueta. Usa Referencia Estricta Alta/Exacta.`
+          : `Silueta sólida (${projectAnalysis.characterBounds ? `${projectAnalysis.characterBounds.w}×${projectAnalysis.characterBounds.h}px` : projectAnalysis.resolution}) con contorno de ${projectAnalysis.lineThickness}px y sombreado ${projectAnalysis.shadingType}.`,
+    },
+    {
+      key: 'hud',
+      label: 'HUD',
+      score: hudScore,
+      status: statusFor(hudScore),
+      observation:
+        stats.bySection.hud > 0 || hasHudLayer
+          ? `Elementos HUD detectados y alineados al perfil ${referenceProject?.name || projectAnalysis.visualStyle}. Mejorable añadiendo contraste en retrato y barra Super.`
+          : 'Aún no hay barras de vida o retratos integrados; generar HUD con Proyecto de Referencia mejorará el encuadre.',
+    },
+    {
+      key: 'fx',
+      label: 'FX',
+      score: fxScore,
+      status: statusFor(fxScore),
+      observation:
+        stats.fxNoiseAlerts > 0
+          ? `Se detectaron ráfagas con píxeles aislados (${stats.totalOrphansRemoved} limpiados). Activa remapeo a paleta activa y mayor densidad central.`
+          : hasFxLayer
+          ? 'Capas Ki/FX activas y limpias con buena legibilidad cromática frente al personaje base.'
+          : 'El personaje base admite más capas de impacto o energía Ki para destacar en frames activos.',
+    },
+    {
+      key: 'animaciones',
+      label: 'Animaciones',
+      score: animScore,
+      status: statusFor(animScore),
+      observation:
+        frames.length >= 8
+          ? `Línea de tiempo rica (${frames.length} fotogramas). Los arcos de anticipación e impacto pueden pulirse con Inbetweens x2.`
+          : `Solo ${frames.length} fotogramas activos; añadir fases de startup y recovery elevará la fluidez de combate.`,
+    },
+    {
+      key: 'coherencia',
+      label: 'Coherencia visual',
+      score: coherenceScore,
+      status: statusFor(coherenceScore),
+      observation: trainedProfile
+        ? `IA entrenada (${trainedProfile.visualStyle}) + ${referenceProject ? `Ref. global ${referenceProject.name}` : 'sin ref. global fija'}.`
+        : 'Entrenar la IA con el proyecto actual y fijar un Proyecto de Referencia evitará saltos de paleta entre sprites, FX y escenarios.',
+    },
+  ];
+
+  const overallScore = Math.round(axes.reduce((acc, a) => acc + a.score, 0) / axes.length);
+  const improvements: string[] = [];
+  if (!trainedProfile) {
+    improvements.push('Ejecutar "Entrenar IA con el proyecto actual" para capturar la paleta maestra y grosor de contorno real.');
+  }
+  if (!referenceProject) {
+    improvements.push('Seleccionar un Proyecto de Referencia (KOF, Street Fighter Alpha, Guilty Gear o Proyecto propio) para unificar sprites, FX, HUD y escenarios.');
+  }
+  if (stats.fxNoiseAlerts > 0 || stats.totalOrphansRemoved >= 4) {
+    improvements.push('Mantener coherencia post-limpieza en Alta o Máxima para suprimir píxeles sueltos de 1px en FX y poses.');
+  }
+  if (stats.poseLowFidelityCount > 0) {
+    improvements.push('Usar modo Referencia Estricta en Alta o Exacta con los locks de Silueta y Proporciones activos al adaptar poses.');
+  }
+  if (improvements.length === 0) {
+    improvements.push('Generar un escenario y HUD bajo el mismo Proyecto de Referencia para validar el contraste completo de pantalla.');
+  }
+
+  return {
+    evaluatedAt: Date.now(),
+    evaluatedByAi: false,
+    overallScore,
+    axes,
+    summary: `Puntuación global ${overallScore}/100 en estilo ${projectAnalysis.visualStyle} (${projectAnalysis.resolution}, ${frames.length} frames).`,
+    improvements,
+  };
+}
+
 
 

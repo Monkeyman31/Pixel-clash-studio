@@ -170,6 +170,22 @@ interface RightSidebarProps {
   onSelectLayer: (index: number) => void;
   onToggleLayerVisibility: (index: number) => void;
   onToggleLayerLock: (index: number) => void;
+  activeTrackKey?: string | null;
+  onSelectLayerTrack?: (trackKey: string, frameLayerIndex: number) => void;
+  onToggleTrackVisibility?: (trackKey: string, frameLayerIndex: number) => void;
+  onToggleTrackLock?: (trackKey: string, frameLayerIndex: number) => void;
+  onUpdateTrackMeta?: (
+    trackKey: string,
+    frameLayerIndex: number,
+    patch: Partial<Layer>
+  ) => void;
+  onDeleteTrack?: (trackKey: string, frameLayerIndex: number) => void;
+  onAssignTrackToGroup?: (
+    trackKey: string,
+    frameLayerIndex: number,
+    groupId: string | null
+  ) => void;
+  onClearTrackInCurrentFrame?: (trackKey: string) => void;
   onAddLayer: (layerType?: LayerType) => void;
   onDeleteLayer: (index: number) => void;
   onChangeLayerOpacity: (index: number, opacity: number) => void;
@@ -602,6 +618,14 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
   onSelectLayer,
   onToggleLayerVisibility,
   onToggleLayerLock,
+  activeTrackKey = null,
+  onSelectLayerTrack,
+  onToggleTrackVisibility,
+  onToggleTrackLock,
+  onUpdateTrackMeta,
+  onDeleteTrack,
+  onAssignTrackToGroup,
+  onClearTrackInCurrentFrame,
   onAddLayer,
   onDeleteLayer,
   onChangeLayerOpacity,
@@ -1771,6 +1795,8 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                     <div onMouseDownCapture={() => onUiContextFocus?.('layers')}>
                     <PhotoshopLayersPanel
                       layers={layers}
+                      allFrames={frames}
+                      currentFrameIndex={currentFrameIndex}
                       layerGroups={layerGroups}
                       currentLayerIndex={currentLayerIndex}
                       selectedLayerIndices={selectedLayers}
@@ -1781,6 +1807,14 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                       onSetEditingMask={onSetEditingMask}
                       onSelectLayer={onSelectLayer}
                       onSelectLayerIndices={(next) => onSelectLayerIndices?.(next)}
+                      activeTrackKey={activeTrackKey}
+                      onSelectLayerTrack={onSelectLayerTrack}
+                      onToggleTrackVisibility={onToggleTrackVisibility}
+                      onToggleTrackLock={onToggleTrackLock}
+                      onUpdateTrackMeta={onUpdateTrackMeta}
+                      onDeleteTrack={onDeleteTrack}
+                      onAssignTrackToGroup={onAssignTrackToGroup}
+                      onClearTrackInCurrentFrame={onClearTrackInCurrentFrame}
                       onAddLayer={(lt) => onAddLayer(lt)}
                       onCreateAdjustmentLayer={(cfg, name) => onCreateAdjustmentLayer?.(cfg, name)}
                       onDeleteLayer={onDeleteLayer}
@@ -2038,6 +2072,8 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                       onAddStageRoleLayer={onAddStageRoleLayer}
                       onSelectTool={onSelectTool}
                       onFocusTilesetsPanel={onFocusTilesetsPanel}
+                      dummyOpponent={dummyOpponent}
+                      onChangeDummyOpponent={onChangeDummyOpponent}
                     />
                   )}
 

@@ -1121,6 +1121,7 @@ export function retargetSpriteGridToPoseDetailed(
         prunedFragments: 0,
         repairedEdges: 0,
         quantizedColors: 0,
+        anatomicalFixes: 0,
         totalPixelsAfter: 0,
       },
     };

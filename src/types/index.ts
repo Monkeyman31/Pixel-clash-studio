@@ -642,6 +642,7 @@ export interface VectorToolConfig {
 
 export interface Layer {
   id: string;
+  trackId?: string; // Stable project-wide layer track identifier across animation frames
   name: string;
   visible: boolean;
   locked: boolean;
@@ -944,6 +945,36 @@ export type AiCoherenceLevel = 'low' | 'medium' | 'high' | 'max';
 
 export type AiPoseFidelityLevel = 'low' | 'medium' | 'high' | 'exact';
 
+export type AiReferenceMode = 'strict' | 'free';
+
+export interface AiPreserveConstraints {
+  pose: boolean;
+  colors: boolean;
+  silhouette: boolean;
+  style: boolean;
+  proportions: boolean;
+  animation: boolean;
+}
+
+export interface AiPhaseOneAnalysis {
+  detectedStyle: string;
+  profileId: AiExternalProfileId;
+  era: string;
+  paletteCount: number;
+  palette: string[];
+  detectedPose: string;
+  perspective: 'Lateral 2D' | '3/4' | 'Frontal' | 'Cenital / Mixta';
+  outlinePx: number;
+  shadingType: 'flat' | 'cel' | 'gradient_dither';
+  lightDirection: 'top-left' | 'top-right' | 'top' | 'front' | 'rim';
+  resolution: string;
+  projectType: string;
+  anatomyNotes: string;
+  sourceLabel: string;
+  analyzedByAi: boolean;
+  analyzedAt: number;
+}
+
 export type AiWorkspaceSection =
   | 'personajes'
   | 'poses_dummie'
@@ -953,8 +984,85 @@ export type AiWorkspaceSection =
   | 'escenarios'
   | 'hud_ui'
   | 'adaptacion_estilo'
+  | 'proyecto_referencia'
+  | 'diagnostico_ia'
   | 'biblioteca_ia'
   | 'configuracion_ia';
+
+export type AiReferenceProjectId = 'kof' | 'sf_alpha' | 'guilty_gear' | 'custom_project';
+
+export interface AiReferenceProjectProfile {
+  id: AiReferenceProjectId;
+  name: string;
+  era: string;
+  styleProfileId: AiExternalProfileId;
+  outlinePx: number;
+  shadingType: 'flat' | 'cel' | 'gradient_dither';
+  palette: string[];
+  spriteTraits: string;
+  fxTraits: string;
+  hudTraits: string;
+  stageTraits: string;
+  promptDirective: string;
+}
+
+export interface AiGenerationStatsSnapshot {
+  totalGenerations: number;
+  apiGenerations: number;
+  localFallbacks: number;
+  bySection: {
+    personajes: number;
+    poses: number;
+    animaciones: number;
+    inbetweens: number;
+    fx: number;
+    escenarios: number;
+    hud: number;
+  };
+  totalOrphansRemoved: number;
+  totalHolesFilled: number;
+  totalAnatomicalFixes: number;
+  totalQuantizedColors: number;
+  poseLowFidelityCount: number;
+  fxNoiseAlerts: number;
+  styleChangesCount: number;
+  lastUpdatedAt: number;
+}
+
+export interface AiDiagnosticAlert {
+  id: string;
+  severity: 'warning' | 'info' | 'ok';
+  area: 'sprites' | 'poses' | 'fx' | 'hud' | 'estilo' | 'animaciones';
+  title: string;
+  detail: string;
+  actionLabel?: string;
+  actionSection?: AiWorkspaceSection;
+}
+
+export interface AiRecommendationsReport {
+  generatedAt: number;
+  problemsDetected: AiDiagnosticAlert[];
+  improvableAreas: string[];
+  futureFeatures: string[];
+  stats: AiGenerationStatsSnapshot;
+}
+
+export interface AiSelfEvaluationAxis {
+  key: 'sprites' | 'hud' | 'fx' | 'animaciones' | 'coherencia';
+  label: string;
+  score: number; // 0..100
+  status: 'Optimo' | 'Mejorable' | 'Requiere atencion';
+  observation: string;
+}
+
+export interface AiSelfEvaluationReport {
+  evaluatedAt: number;
+  evaluatedByAi: boolean;
+  overallScore: number;
+  axes: AiSelfEvaluationAxis[];
+  summary: string;
+  improvements: string[];
+}
 
 export type AiCharacterTaskMode =
   | 'create'
@@ -962,7 +1070,8 @@ export type AiCharacterTaskMode =
   | 'recolor'
   | 'outfit'
   | 'anatomy'
-  | 'reference_adapt';
+  | 'reference_adapt'
+  | 'clean_sprite';
 
 export interface AiCharacterPreserveFlags {
   silhouette: boolean;
@@ -986,11 +1095,13 @@ export type AiStageCategory =
   | 'decoracion'
   | 'parallax'
   | 'tiles'
+  | 'terreno'
   | 'mundo';
 
 export type AiHudCategory =
   | 'barras_vida'
   | 'retratos'
+  | 'temporizadores'
   | 'interfaces'
   | 'menus'
   | 'marcadores';
@@ -1046,6 +1157,8 @@ export interface ProjectContextAnalysis {
   lightDirection: 'top-left' | 'top-right' | 'top' | 'front' | 'rim';
   detailLevel: 'low' | 'medium' | 'high' | 'ultra';
   characterBounds?: { w: number; h: number } | null;
+  detectedPose?: string;
+  perspective?: 'Lateral 2D' | '3/4' | 'Frontal' | 'Cenital / Mixta';
 }
 
 export interface ProjectAiTrainingProfile {
@@ -1075,6 +1188,7 @@ export interface AiPixelValidationStats {
   prunedFragments: number;
   repairedEdges: number;
   quantizedColors: number;
+  anatomicalFixes: number;
   totalPixelsAfter: number;
 }
 
@@ -1088,8 +1202,13 @@ export interface AiExplanationReport {
   shadingType: string;
   lightDirection: string;
   referenceUsed: string;
+  referenceMode?: AiReferenceMode;
   coherenceLevel: AiCoherenceLevel;
   poseFidelity?: AiPoseFidelityLevel;
+  detectedPose?: string;
+  perspective?: string;
+  appliedRestrictions: string[];
+  decisionsTaken: string[];
   validationStats?: AiPixelValidationStats;
   generatedAt: number;
 }
@@ -2341,6 +2460,7 @@ export interface StartupPreferences {
   showSplashAnimation: boolean;
   showSplashTips: boolean;
   splashMinDurationMs: number;
+  startMaximized?: boolean;
   mascotMode: StartupMascotMode;
   mascotCustomName?: string;
   mascotSheetCols?: number;

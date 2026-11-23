@@ -1,10 +1,11 @@
-import React from 'react';
-import { CheckCircle2, Info } from 'lucide-react';
+import React, { useState } from 'react';
+import { CheckCircle2, HelpCircle, Info } from 'lucide-react';
 import { AiExplanationReport } from '../types';
 
 interface ExplainableAiCardProps {
   report: AiExplanationReport;
   compact?: boolean;
+  defaultOpenDetails?: boolean;
 }
 
 const COHERENCE_LABELS: Record<string, string> = {
@@ -29,10 +30,19 @@ const LIGHT_LABELS: Record<string, string> = {
   rim: 'Contraluz / Rim',
 };
 
-export const ExplainableAiCard: React.FC<ExplainableAiCardProps> = ({ report, compact = false }) => {
+export const ExplainableAiCard: React.FC<ExplainableAiCardProps> = ({
+  report,
+  compact = false,
+  defaultOpenDetails = false,
+}) => {
+  const [showWhy, setShowWhy] = useState<boolean>(defaultOpenDetails);
   const stats = report.validationStats;
   const totalFixes = stats
-    ? stats.filledHoles + stats.removedOrphans + stats.prunedFragments + stats.repairedEdges
+    ? stats.filledHoles +
+      stats.removedOrphans +
+      stats.prunedFragments +
+      stats.repairedEdges +
+      (stats.anatomicalFixes || 0)
     : 0;
 
   return (
@@ -43,46 +53,70 @@ export const ExplainableAiCard: React.FC<ExplainableAiCardProps> = ({ report, co
         borderColor: 'var(--studio-border-strong)',
       }}
     >
-      <div className="flex items-center justify-between gap-2 pb-1 border-b" style={{ borderColor: 'var(--studio-border)' }}>
-        <span className="font-bold flex items-center gap-1" style={{ color: 'var(--studio-accent)' }}>
+      <div
+        className="flex items-center justify-between gap-1.5 pb-1 border-b"
+        style={{ borderColor: 'var(--studio-border)' }}
+      >
+        <span className="font-bold flex items-center gap-1 min-w-0" style={{ color: 'var(--studio-accent)' }}>
           <Info className="w-3 h-3 shrink-0" />
-          <span>Diagnóstico IA</span>
+          <span className="truncate">Diagnóstico IA</span>
         </span>
-        <span className="font-mono text-[9px] text-emerald-400 flex items-center gap-1">
-          <CheckCircle2 className="w-2.5 h-2.5" />
-          <span>Coherencia {COHERENCE_LABELS[report.coherenceLevel] || report.coherenceLevel}</span>
-        </span>
+        <div className="flex items-center gap-1.5 shrink-0">
+          <span className="font-mono text-[9px] text-emerald-400 flex items-center gap-1 whitespace-nowrap">
+            <CheckCircle2 className="w-2.5 h-2.5 shrink-0" />
+            <span>{COHERENCE_LABELS[report.coherenceLevel] || report.coherenceLevel}</span>
+          </span>
+          <button
+            type="button"
+            onClick={() => setShowWhy((prev) => !prev)}
+            className="px-1.5 py-0.5 rounded border text-[9px] font-semibold flex items-center gap-1 whitespace-nowrap transition-colors"
+            style={{
+              backgroundColor: showWhy
+                ? 'color-mix(in srgb, var(--studio-accent) 18%, var(--studio-bg-card))'
+                : 'var(--studio-bg-card)',
+              borderColor: showWhy ? 'var(--studio-accent)' : 'var(--studio-border-strong)',
+              color: showWhy ? 'var(--studio-accent)' : 'var(--studio-text)',
+            }}
+          >
+            <HelpCircle className="w-2.5 h-2.5 shrink-0" />
+            <span>¿Por qué generó esto?</span>
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-2 gap-x-2 gap-y-1 font-mono" style={{ color: 'var(--studio-text-muted)' }}>
         <span className="truncate" title={report.detectedStyle}>
-          Estilo detectado: <b style={{ color: 'var(--studio-text)' }}>{report.detectedStyle}</b>
+          Estilo: <b style={{ color: 'var(--studio-text)' }}>{report.detectedStyle}</b>
         </span>
         <span className="truncate" title={report.targetStyleLabel}>
           Objetivo: <b style={{ color: 'var(--studio-accent)' }}>{report.targetStyleLabel}</b>
         </span>
         <span>
-          Paleta detectada: <b className="tabular-nums" style={{ color: 'var(--studio-text)' }}>{report.paletteCount} col.</b>
+          Paleta: <b className="tabular-nums" style={{ color: 'var(--studio-text)' }}>{report.paletteCount} col.</b>
         </span>
         <span>
           Resolución: <b className="tabular-nums" style={{ color: 'var(--studio-text)' }}>{report.resolution}</b>
         </span>
         <span className="col-span-2 truncate">
-          Trazo: <b style={{ color: 'var(--studio-text)' }}>{report.outlineThickness}px</b>
+          Contorno: <b style={{ color: 'var(--studio-text)' }}>{report.outlineThickness}px</b>
           {' · '}
           Sombreado: <b style={{ color: 'var(--studio-text)' }}>{report.shadingType}</b>
           {' · '}
           Luz: <b style={{ color: 'var(--studio-text)' }}>{LIGHT_LABELS[report.lightDirection] || report.lightDirection}</b>
         </span>
-        <span className="col-span-2 truncate" title={report.referenceUsed}>
-          Referencia utilizada: <b style={{ color: 'var(--studio-text)' }}>{report.referenceUsed}</b>
-        </span>
-        {report.poseFidelity && (
-          <span className="col-span-2">
-            Nivel de fidelidad aplicado:{' '}
-            <b style={{ color: 'var(--studio-accent)' }}>
-              {FIDELITY_LABELS[report.poseFidelity] || report.poseFidelity}
-            </b>
+        {(report.detectedPose || report.perspective) && (
+          <span className="col-span-2 truncate">
+            {report.detectedPose && (
+              <>
+                Pose: <b style={{ color: 'var(--studio-text)' }}>{report.detectedPose}</b>
+              </>
+            )}
+            {report.detectedPose && report.perspective && ' · '}
+            {report.perspective && (
+              <>
+                Perspectiva: <b style={{ color: 'var(--studio-text)' }}>{report.perspective}</b>
+              </>
+            )}
           </span>
         )}
       </div>
@@ -100,18 +134,70 @@ export const ExplainableAiCard: React.FC<ExplainableAiCardProps> = ({ report, co
         </div>
       )}
 
+      {showWhy && (
+        <div
+          className="pt-1.5 mt-0.5 border-t flex flex-col gap-1.5 text-[9.5px]"
+          style={{ borderColor: 'var(--studio-border)', color: 'var(--studio-text-muted)' }}
+        >
+          <div>
+            <span className="font-semibold" style={{ color: 'var(--studio-text)' }}>
+              Referencia utilizada:{' '}
+            </span>
+            <span>{report.referenceUsed}</span>
+            {report.referenceMode && (
+              <span style={{ color: 'var(--studio-accent)' }}>
+                {' '}
+                · Modo {report.referenceMode === 'strict' ? 'Referencia Estricta' : 'Referencia Libre'}
+                {report.referenceMode === 'strict' && report.poseFidelity
+                  ? ` (${FIDELITY_LABELS[report.poseFidelity] || report.poseFidelity})`
+                  : ''}
+              </span>
+            )}
+          </div>
+
+          <div>
+            <span className="font-semibold" style={{ color: 'var(--studio-text)' }}>
+              Estilo detectado:{' '}
+            </span>
+            <span>{report.detectedStyle}</span>
+          </div>
+
+          {report.appliedRestrictions && report.appliedRestrictions.length > 0 && (
+            <div>
+              <span className="font-semibold" style={{ color: 'var(--studio-text)' }}>
+                Restricciones aplicadas:{' '}
+              </span>
+              <span className="font-mono">{report.appliedRestrictions.join(' · ')}</span>
+            </div>
+          )}
+
+          {report.decisionsTaken && report.decisionsTaken.length > 0 && (
+            <div className="flex flex-col gap-0.5">
+              <span className="font-semibold" style={{ color: 'var(--studio-text)' }}>
+                Decisiones tomadas:
+              </span>
+              {report.decisionsTaken.map((dec, idx) => (
+                <div key={idx} className="leading-snug pl-2 border-l" style={{ borderColor: 'var(--studio-border-strong)' }}>
+                  {dec}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {stats && (
         <div
           className="text-[9px] font-mono pt-1 border-t flex items-center justify-between gap-2"
           style={{ borderColor: 'var(--studio-border)', color: 'var(--studio-text-muted)' }}
         >
-          <span>
-            Limpieza:{' '}
+          <span className="truncate">
+            Validación:{' '}
             {totalFixes === 0
-              ? 'Silueta íntegra (0 artefactos)'
-              : `${stats.filledHoles} huecos · ${stats.removedOrphans + stats.prunedFragments} sueltos · ${stats.repairedEdges} bordes`}
+              ? 'Silueta íntegra (0 errores)'
+              : `${stats.filledHoles} huecos · ${stats.removedOrphans + stats.prunedFragments} aislados · ${stats.quantizedColors} paleta · ${stats.anatomicalFixes || 0} anat.`}
           </span>
-          <span className="tabular-nums">{stats.totalPixelsAfter} px</span>
+          <span className="tabular-nums shrink-0">{stats.totalPixelsAfter} px</span>
         </div>
       )}
     </div>

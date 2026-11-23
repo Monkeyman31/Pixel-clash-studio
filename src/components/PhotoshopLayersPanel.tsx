@@ -42,6 +42,7 @@ import {
   Maximize,
 } from 'lucide-react';
 import {
+  Frame,
   Layer,
   LayerAdjustmentConfig,
   LayerBlendMode,
@@ -51,11 +52,18 @@ import {
 } from '../types';
 import { DEFAULT_ADJUSTMENT_CONFIG } from '../utils/colorFilters';
 import { renderPixelGridToCanvas, ThumbnailBoundsMode } from '../utils/pixelMath';
+import {
+  buildProjectLayerTracks,
+  isTimelineMovementOnlyGroup,
+  ProjectLayerTrack,
+} from '../utils/layerTracks';
 import { StudioSlider } from './StudioSlider';
 import { STUDIO_Z } from './StudioTopLayer';
 
 export interface PhotoshopLayersPanelProps {
   layers: Layer[];
+  allFrames?: Frame[];
+  currentFrameIndex?: number;
   layerGroups: LayerGroup[];
   currentLayerIndex: number;
   selectedLayerIndices: number[];
@@ -66,6 +74,24 @@ export interface PhotoshopLayersPanelProps {
   onSetEditingMask?: (editing: boolean) => void;
   onSelectLayer: (index: number) => void;
   onSelectLayerIndices: (indices: number[]) => void;
+  showAllProjectLayers?: boolean;
+  onChangeShowAllProjectLayers?: (showAll: boolean) => void;
+  activeTrackKey?: string | null;
+  onSelectLayerTrack?: (trackKey: string, frameLayerIndex: number) => void;
+  onToggleTrackVisibility?: (trackKey: string, frameLayerIndex: number) => void;
+  onToggleTrackLock?: (trackKey: string, frameLayerIndex: number) => void;
+  onUpdateTrackMeta?: (
+    trackKey: string,
+    frameLayerIndex: number,
+    patch: Partial<Layer>
+  ) => void;
+  onDeleteTrack?: (trackKey: string, frameLayerIndex: number) => void;
+  onAssignTrackToGroup?: (
+    trackKey: string,
+    frameLayerIndex: number,
+    groupId: string | null
+  ) => void;
+  onClearTrackInCurrentFrame?: (trackKey: string) => void;
   onAddLayer: (layerType?: LayerType) => void;
   onCreateAdjustmentLayer: (config: LayerAdjustmentConfig, name: string) => void;
   onDeleteLayer: (index: number) => void;
@@ -434,17 +460,22 @@ const AsyncMaskThumbnail: React.FC<{
 // FLATTENED TREE ITEMS FOR VIRTUALIZED SCROLL
 // =====================================================================
 type FlatTreeRow =
-  | { kind: 'layer'; layer: Layer; idx: number; depth: number }
+  | { kind: 'layer'; track: ProjectLayerTrack; layer: Layer; idx: number; depth: number }
   | { kind: 'group'; group: LayerGroup; depth: number; childLayerCount: number };
 
 interface ContextMenuState {
+  trackKey: string;
   layerIdx: number;
   x: number;
   y: number;
 }
 
+const SHOW_ALL_PROJECT_LAYERS_STORAGE_KEY = 'pixelclash_layers_show_all_project_v1';
+
 export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
   layers,
+  allFrames,
+  currentFrameIndex = 0,
   layerGroups,
   currentLayerIndex,
   selectedLayerIndices,
@@ -455,6 +486,16 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
   onSetEditingMask,
   onSelectLayer,
   onSelectLayerIndices,
+  showAllProjectLayers: showAllProjectLayersProp,
+  onChangeShowAllProjectLayers,
+  activeTrackKey = null,
+  onSelectLayerTrack,
+  onToggleTrackVisibility,
+  onToggleTrackLock,
+  onUpdateTrackMeta,
+  onDeleteTrack,
+  onAssignTrackToGroup,
+  onClearTrackInCurrentFrame,
   onAddLayer,
   onCreateAdjustmentLayer,
   onDeleteLayer,
@@ -498,6 +539,30 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
   currentThumbPerfMode = performanceMode;
   const [searchQuery, setSearchQuery] = useState('');
   const [filterMode, setFilterMode] = useState<FilterMode>('all');
+  const [localShowAllProjectLayers, setLocalShowAllProjectLayers] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem(SHOW_ALL_PROJECT_LAYERS_STORAGE_KEY);
+      if (saved === '0') return false;
+    } catch {
+      // ignore storage errors
+    }
+    return true;
+  });
+  const showAllProjectLayers =
+    showAllProjectLayersProp !== undefined ? showAllProjectLayersProp : localShowAllProjectLayers;
+  const applyShowAllProjectLayers = useCallback(
+    (next: boolean) => {
+      setLocalShowAllProjectLayers(next);
+      try {
+        localStorage.setItem(SHOW_ALL_PROJECT_LAYERS_STORAGE_KEY, next ? '1' : '0');
+      } catch {
+        // ignore storage errors
+      }
+      onChangeShowAllProjectLayers?.(next);
+    },
+    [onChangeShowAllProjectLayers]
+  );
+
   const [thumbnailBoundsMode, setThumbnailBoundsMode] = useState<ThumbnailBoundsMode>(() => {
     try {
       const saved = localStorage.getItem('pixelclash_layers_thumb_bounds_v1');
@@ -522,13 +587,13 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
   const [showSpecialLayerMenu, setShowSpecialLayerMenu] = useState(false);
   const [showMaskCreateMenu, setShowMaskCreateMenu] = useState(false);
 
-  const [editingLayerIdx, setEditingLayerIdx] = useState<number | null>(null);
+  const [editingTrackKey, setEditingTrackKey] = useState<string | null>(null);
   const [editingLayerName, setEditingLayerName] = useState('');
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
   const [editingGroupName, setEditingGroupName] = useState('');
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
 
-  const [draggedLayerIdx, setDraggedLayerIdx] = useState<number | null>(null);
+  const [draggedTrack, setDraggedTrack] = useState<{ trackKey: string; idx: number } | null>(null);
   const [draggedGroupId, setDraggedGroupId] = useState<string | null>(null);
   const [dropHighlight, setDropHighlight] = useState<string | null>(null);
   const [isSliderInteracting, setIsSliderInteracting] = useState(false);
@@ -538,7 +603,7 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
   const [maskMenuPos, setMaskMenuPos] = useState<{ left: number; top: number }>({ left: 100, top: 200 });
   const [specialMenuPos, setSpecialMenuPos] = useState<{ left: number; top: number }>({ left: 100, top: 200 });
   const [colorPopoverTarget, setColorPopoverTarget] = useState<
-    | { kind: 'layer'; idx: number; x: number; y: number }
+    | { kind: 'layer'; trackKey: string; idx: number; x: number; y: number }
     | { kind: 'group'; id: string; x: number; y: number }
     | null
   >(null);
@@ -608,19 +673,65 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
     };
   }, [contextMenu, colorPopoverTarget, showSpecialLayerMenu, showMaskCreateMenu]);
 
-  // Clear selectedGroupId if the group was deleted
-  useEffect(() => {
-    if (selectedGroupId && !layerGroups.some((g) => g.id === selectedGroupId)) {
-      setSelectedGroupId(null);
-    }
-  }, [selectedGroupId, layerGroups]);
+  const effectiveFrames = useMemo<Frame[]>(() => {
+    if (allFrames && allFrames.length > 0) return allFrames;
+    return [
+      {
+        id: 'cur-frame-fallback',
+        name: 'Frame Actual',
+        phase: 'neutral',
+        durationTicks: 6,
+        hitboxes: [],
+        layers,
+      },
+    ];
+  }, [allFrames, layers]);
 
-  const selectedGroup = useMemo(
-    () => (selectedGroupId ? layerGroups.find((g) => g.id === selectedGroupId) || null : null),
-    [selectedGroupId, layerGroups]
+  const projectTracks = useMemo(
+    () => buildProjectLayerTracks(effectiveFrames, currentFrameIndex),
+    [effectiveFrames, currentFrameIndex]
   );
 
-  const activeLayer = layers[currentLayerIndex] || layers[0];
+  const visibleTracks = useMemo(
+    () => (showAllProjectLayers ? projectTracks : projectTracks.filter((t) => t.existsInCurrentFrame)),
+    [projectTracks, showAllProjectLayers]
+  );
+
+  const visibleLayerGroups = useMemo(
+    () => layerGroups.filter((g) => !isTimelineMovementOnlyGroup(g, projectTracks)),
+    [layerGroups, projectTracks]
+  );
+
+  // Clear selectedGroupId if the group was deleted
+  useEffect(() => {
+    if (selectedGroupId && !visibleLayerGroups.some((g) => g.id === selectedGroupId)) {
+      setSelectedGroupId(null);
+    }
+  }, [selectedGroupId, visibleLayerGroups]);
+
+  const selectedGroup = useMemo(
+    () => (selectedGroupId ? visibleLayerGroups.find((g) => g.id === selectedGroupId) || null : null),
+    [selectedGroupId, visibleLayerGroups]
+  );
+
+  const activeTrack = useMemo(() => {
+    if (activeTrackKey) {
+      const byKey = projectTracks.find((t) => t.trackKey === activeTrackKey);
+      if (byKey) return byKey;
+    }
+    return (
+      projectTracks.find((t) => t.currentFrameLayerIndex === currentLayerIndex) ||
+      projectTracks[0] ||
+      null
+    );
+  }, [activeTrackKey, projectTracks, currentLayerIndex]);
+
+  const activeLayer = activeTrack?.layer || layers[currentLayerIndex] || layers[0];
+  const resolvedActiveLayerIndex =
+    activeTrack && activeTrack.currentFrameLayerIndex >= 0
+      ? activeTrack.currentFrameLayerIndex
+      : currentLayerIndex;
+
   const selectedSet = useMemo(
     () => new Set(selectedLayerIndices.length > 0 ? selectedLayerIndices : [currentLayerIndex]),
     [selectedLayerIndices, currentLayerIndex]
@@ -633,6 +744,62 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
     : Math.round((activeLayer?.opacity ?? 1) * 100);
   const activeFillPct = Math.round((activeLayer?.fillOpacity ?? 1) * 100);
 
+  const updateTrackMetaSafe = useCallback(
+    (track: ProjectLayerTrack | null, patch: Partial<Layer>) => {
+      if (!track) return;
+      if (onUpdateTrackMeta) {
+        onUpdateTrackMeta(track.trackKey, track.currentFrameLayerIndex, patch);
+      } else if (track.currentFrameLayerIndex >= 0) {
+        onUpdateLayerMeta(track.currentFrameLayerIndex, patch);
+      }
+    },
+    [onUpdateTrackMeta, onUpdateLayerMeta]
+  );
+
+  const toggleTrackVisibilitySafe = useCallback(
+    (track: ProjectLayerTrack) => {
+      if (onToggleTrackVisibility) {
+        onToggleTrackVisibility(track.trackKey, track.currentFrameLayerIndex);
+      } else if (track.currentFrameLayerIndex >= 0) {
+        onToggleLayerVisibility(track.currentFrameLayerIndex);
+      }
+    },
+    [onToggleTrackVisibility, onToggleLayerVisibility]
+  );
+
+  const toggleTrackLockSafe = useCallback(
+    (track: ProjectLayerTrack) => {
+      if (onToggleTrackLock) {
+        onToggleTrackLock(track.trackKey, track.currentFrameLayerIndex);
+      } else if (track.currentFrameLayerIndex >= 0) {
+        onToggleLayerLock(track.currentFrameLayerIndex);
+      }
+    },
+    [onToggleTrackLock, onToggleLayerLock]
+  );
+
+  const assignTrackToGroupSafe = useCallback(
+    (trackKey: string, idx: number, groupId: string | null) => {
+      if (onAssignTrackToGroup) {
+        onAssignTrackToGroup(trackKey, idx, groupId);
+      } else if (idx >= 0) {
+        onAssignLayerToGroup(idx, groupId);
+      }
+    },
+    [onAssignTrackToGroup, onAssignLayerToGroup]
+  );
+
+  const deleteTrackSafe = useCallback(
+    (track: ProjectLayerTrack) => {
+      if (onDeleteTrack) {
+        onDeleteTrack(track.trackKey, track.currentFrameLayerIndex);
+      } else if (track.currentFrameLayerIndex >= 0) {
+        onDeleteLayer(track.currentFrameLayerIndex);
+      }
+    },
+    [onDeleteTrack, onDeleteLayer]
+  );
+
   const applyOpacityValue = useCallback(
     (pct: number) => {
       const clamped = Math.max(0, Math.min(100, Math.round(pct)));
@@ -641,41 +808,68 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
         onChangeGroupOpacity(selectedGroup.id, nextOp);
         return;
       }
-      if (onChangeLayerOpacity) onChangeLayerOpacity(currentLayerIndex, nextOp);
-      else onUpdateLayerMeta(currentLayerIndex, { opacity: nextOp });
+      if (activeTrack && onUpdateTrackMeta && activeTrack.currentFrameLayerIndex < 0) {
+        onUpdateTrackMeta(activeTrack.trackKey, -1, { opacity: nextOp });
+        return;
+      }
+      if (onChangeLayerOpacity) onChangeLayerOpacity(resolvedActiveLayerIndex, nextOp);
+      else onUpdateLayerMeta(resolvedActiveLayerIndex, { opacity: nextOp });
     },
-    [selectedGroup, onChangeGroupOpacity, currentLayerIndex, onChangeLayerOpacity, onUpdateLayerMeta]
+    [
+      selectedGroup,
+      onChangeGroupOpacity,
+      activeTrack,
+      onUpdateTrackMeta,
+      resolvedActiveLayerIndex,
+      onChangeLayerOpacity,
+      onUpdateLayerMeta,
+    ]
   );
 
   const applyFillValue = useCallback(
     (pct: number) => {
       const clamped = Math.max(0, Math.min(100, Math.round(pct)));
-      onUpdateLayerMeta(currentLayerIndex, { fillOpacity: clamped / 100 });
+      if (activeTrack) {
+        updateTrackMetaSafe(activeTrack, { fillOpacity: clamped / 100 });
+      } else {
+        onUpdateLayerMeta(resolvedActiveLayerIndex, { fillOpacity: clamped / 100 });
+      }
     },
-    [currentLayerIndex, onUpdateLayerMeta]
+    [activeTrack, updateTrackMetaSafe, resolvedActiveLayerIndex, onUpdateLayerMeta]
   );
 
   const handleLayerRowClick = useCallback(
-    (e: React.MouseEvent, idx: number, selectMask: boolean = false) => {
+    (e: React.MouseEvent, track: ProjectLayerTrack, selectMask: boolean = false) => {
       setSelectedGroupId(null);
+      const idx = track.currentFrameLayerIndex;
+      if (idx < 0) {
+        if (onSelectLayerTrack) {
+          onSelectLayerTrack(track.trackKey, -1);
+        }
+        onSetEditingMask?.(false);
+        return;
+      }
       if (e.shiftKey) {
         const min = Math.min(currentLayerIndex, idx);
         const max = Math.max(currentLayerIndex, idx);
         const range: number[] = [];
         for (let i = min; i <= max; i++) range.push(i);
         onSelectLayerIndices(range);
-        onSelectLayer(idx);
+        if (onSelectLayerTrack) onSelectLayerTrack(track.trackKey, idx);
+        else onSelectLayer(idx);
         onSetEditingMask?.(false);
       } else if (e.ctrlKey || e.metaKey) {
         const next = selectedSet.has(idx)
           ? selectedArray.filter((i) => i !== idx)
           : [...selectedArray, idx].sort((a, b) => a - b);
         onSelectLayerIndices(next.length > 0 ? next : [idx]);
-        onSelectLayer(idx);
+        if (onSelectLayerTrack) onSelectLayerTrack(track.trackKey, idx);
+        else onSelectLayer(idx);
         onSetEditingMask?.(false);
       } else {
         onSelectLayerIndices([idx]);
-        onSelectLayer(idx);
+        if (onSelectLayerTrack) onSelectLayerTrack(track.trackKey, idx);
+        else onSelectLayer(idx);
         onSetEditingMask?.(selectMask && Boolean(layers[idx]?.mask));
       }
     },
@@ -684,13 +878,14 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
       selectedSet,
       selectedArray,
       layers,
+      onSelectLayerTrack,
       onSelectLayerIndices,
       onSelectLayer,
       onSetEditingMask,
     ]
   );
 
-  // Build virtualized flattened tree (respecting search, filter toggles, and nested groups)
+  // Build virtualized flattened tree (respecting search, filter toggles, video-mode persistence, and nested groups)
   const flatRows: FlatTreeRow[] = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
     const isFiltering = query.length > 0 || filterMode !== 'all';
@@ -720,25 +915,27 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
       return true;
     };
 
-    // Map group children & layers in top-to-bottom stack order
-    const layersByGroup = new Map<string, { layer: Layer; idx: number }[]>();
-    const rootLayers: { layer: Layer; idx: number }[] = [];
-    const validGroupIds = new Set(layerGroups.map((g) => g.id));
+    // Map group children & tracks in top-to-bottom stack order
+    const layersByGroup = new Map<string, { track: ProjectLayerTrack; layer: Layer; idx: number }[]>();
+    const rootLayers: { track: ProjectLayerTrack; layer: Layer; idx: number }[] = [];
+    const validGroupIds = new Set(visibleLayerGroups.map((g) => g.id));
 
-    for (let idx = layers.length - 1; idx >= 0; idx--) {
-      const layer = layers[idx];
+    for (let tIdx = visibleTracks.length - 1; tIdx >= 0; tIdx--) {
+      const track = visibleTracks[tIdx];
+      const layer = track.layer;
+      const idx = track.currentFrameLayerIndex;
       if (layer.groupId && validGroupIds.has(layer.groupId)) {
         const list = layersByGroup.get(layer.groupId) || [];
-        list.push({ layer, idx });
+        list.push({ track, layer, idx });
         layersByGroup.set(layer.groupId, list);
       } else {
-        rootLayers.push({ layer, idx });
+        rootLayers.push({ track, layer, idx });
       }
     }
 
     const childGroupsMap = new Map<string, LayerGroup[]>();
     const rootGroups: LayerGroup[] = [];
-    for (const grp of layerGroups) {
+    for (const grp of visibleLayerGroups) {
       if (grp.parentGroupId && validGroupIds.has(grp.parentGroupId) && grp.parentGroupId !== grp.id) {
         const arr = childGroupsMap.get(grp.parentGroupId) || [];
         arr.push(grp);
@@ -771,9 +968,9 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
 
     const rows: FlatTreeRow[] = [];
 
-    for (const { layer, idx } of rootLayers) {
+    for (const { track, layer, idx } of rootLayers) {
       if (!isFiltering || matchesLayer(layer)) {
-        rows.push({ kind: 'layer', layer, idx, depth: 0 });
+        rows.push({ kind: 'layer', track, layer, idx, depth: 0 });
       }
     }
 
@@ -802,9 +999,9 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
 
       if (filterMode !== 'groups') {
         const members = layersByGroup.get(grp.id) || [];
-        for (const { layer, idx } of members) {
+        for (const { track, layer, idx } of members) {
           if (!isFiltering || matchesLayer(layer) || (query && grp.name.toLowerCase().includes(query))) {
-            rows.push({ kind: 'layer', layer, idx, depth: depth + 1 });
+            rows.push({ kind: 'layer', track, layer, idx, depth: depth + 1 });
           }
         }
       }
@@ -815,7 +1012,7 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
     }
 
     return rows;
-  }, [layers, layerGroups, searchQuery, filterMode]);
+  }, [visibleTracks, visibleLayerGroups, searchQuery, filterMode]);
 
   const totalHeight = flatRows.length * ROW_HEIGHT;
   const startIndex = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN_ROWS);
@@ -826,28 +1023,40 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
   const toggleActiveLockField = (field: 'locked' | 'lockTransparency' | 'lockPixels' | 'lockPosition') => {
     if (!activeLayer) return;
     if (field === 'locked') {
-      onToggleLayerLock(currentLayerIndex);
+      if (activeTrack) toggleTrackLockSafe(activeTrack);
+      else onToggleLayerLock(resolvedActiveLayerIndex);
       return;
     }
-    onUpdateLayerMeta(currentLayerIndex, { [field]: !activeLayer[field] });
+    updateTrackMetaSafe(activeTrack, { [field]: !activeLayer[field] });
   };
 
-  const openContextMenuAt = (e: React.MouseEvent, layerIdx: number) => {
+  const openContextMenuAt = (e: React.MouseEvent, track: ProjectLayerTrack) => {
     e.preventDefault();
     e.stopPropagation();
-    if (!selectedSet.has(layerIdx)) {
+    const layerIdx = track.currentFrameLayerIndex;
+    if (layerIdx >= 0 && !selectedSet.has(layerIdx)) {
       onSelectLayerIndices([layerIdx]);
-      onSelectLayer(layerIdx);
+      if (onSelectLayerTrack) onSelectLayerTrack(track.trackKey, layerIdx);
+      else onSelectLayer(layerIdx);
+    } else if (layerIdx < 0 && onSelectLayerTrack) {
+      onSelectLayerTrack(track.trackKey, -1);
     }
-    const menuW = 232;
-    const menuH = Math.min(440, window.innerHeight - 16);
+    const menuW = 236;
+    const menuH = Math.min(460, window.innerHeight - 16);
     const x = Math.max(8, Math.min(e.clientX, window.innerWidth - menuW - 8));
     const y = Math.max(8, Math.min(e.clientY, window.innerHeight - menuH - 8));
     setCtxSubmenu(null);
-    setContextMenu({ layerIdx, x, y });
+    setContextMenu({ trackKey: track.trackKey, layerIdx, x, y });
   };
 
-  const ctxLayer = contextMenu ? layers[contextMenu.layerIdx] : null;
+  const ctxTrack = contextMenu
+    ? projectTracks.find((t) => t.trackKey === contextMenu.trackKey) || null
+    : null;
+  const ctxLayer = ctxTrack
+    ? ctxTrack.layer
+    : contextMenu && contextMenu.layerIdx >= 0
+    ? layers[contextMenu.layerIdx]
+    : null;
 
   return (
     <div
@@ -869,7 +1078,7 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
           <select
             value={activeBlendMode}
             onChange={(e) =>
-              onUpdateLayerMeta(currentLayerIndex, {
+              updateTrackMetaSafe(activeTrack, {
                 blendMode: e.target.value as LayerBlendMode,
               })
             }
@@ -1011,7 +1220,7 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder={`Buscar en ${layers.length} capas...`}
+              placeholder={`Buscar en ${projectTracks.length} capas...`}
               className="w-full pl-6 pr-5 py-1 rounded border text-[10px] focus:outline-none"
               style={{
                 backgroundColor: 'var(--studio-bg-elevated)',
@@ -1097,6 +1306,49 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
           </button>
         </div>
 
+        {/* Row 4: Video-Style Project Layers Mode Selector */}
+        <div
+          className="flex flex-col gap-0.5 pt-1 border-t text-[10px]"
+          style={{ borderColor: 'var(--studio-border)' }}
+        >
+          <button
+            type="button"
+            onClick={() => applyShowAllProjectLayers(true)}
+            title="Mantener todas las capas del proyecto visibles en todos los frames (estilo vídeo)"
+            className="w-full flex items-center gap-1.5 px-1.5 py-[2px] rounded border text-left transition-colors"
+            style={{
+              backgroundColor: showAllProjectLayers
+                ? 'color-mix(in srgb, var(--studio-accent) 16%, var(--studio-bg-elevated))'
+                : 'transparent',
+              borderColor: showAllProjectLayers ? 'var(--studio-accent)' : 'transparent',
+              color: showAllProjectLayers ? 'var(--studio-text)' : 'var(--studio-text-muted)',
+            }}
+          >
+            <span className="font-mono text-[10.5px] shrink-0">
+              {showAllProjectLayers ? '☑' : '☐'}
+            </span>
+            <span className="whitespace-nowrap">Mostrar todas las capas del proyecto</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => applyShowAllProjectLayers(false)}
+            title="Mostrar únicamente las capas con celda creada en el frame actual"
+            className="w-full flex items-center gap-1.5 px-1.5 py-[2px] rounded border text-left transition-colors"
+            style={{
+              backgroundColor: !showAllProjectLayers
+                ? 'color-mix(in srgb, var(--studio-accent) 16%, var(--studio-bg-elevated))'
+                : 'transparent',
+              borderColor: !showAllProjectLayers ? 'var(--studio-accent)' : 'transparent',
+              color: !showAllProjectLayers ? 'var(--studio-text)' : 'var(--studio-text-muted)',
+            }}
+          >
+            <span className="font-mono text-[10.5px] shrink-0">
+              {!showAllProjectLayers ? '☑' : '☐'}
+            </span>
+            <span className="whitespace-nowrap">Mostrar solo capas del frame actual</span>
+          </button>
+        </div>
+
         {/* Active Editing Mask Indicator Banner (only shown when editing mask) */}
         {editingMask && activeLayer?.mask && (
           <div
@@ -1161,7 +1413,7 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
               className="w-6 h-6 rounded cursor-pointer border-0 bg-transparent"
             />
           </div>
-          {layerGroups.length > 0 && (
+          {visibleLayerGroups.length > 0 && (
             <select
               value={newFolderParentId}
               onChange={(e) => setNewFolderParentId(e.target.value)}
@@ -1173,7 +1425,7 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
               }}
             >
               <option value="">Carpeta en raíz (nivel superior)</option>
-              {layerGroups.map((g) => (
+              {visibleLayerGroups.map((g) => (
                 <option key={g.id} value={g.id}>
                   Dentro de: {g.name}
                 </option>
@@ -1227,9 +1479,9 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
         onDrop={(e) => {
           e.preventDefault();
           setDropHighlight(null);
-          if (draggedLayerIdx !== null) {
-            onAssignLayerToGroup(draggedLayerIdx, null);
-            setDraggedLayerIdx(null);
+          if (draggedTrack) {
+            assignTrackToGroupSafe(draggedTrack.trackKey, draggedTrack.idx, null);
+            setDraggedTrack(null);
           } else if (draggedGroupId) {
             onMoveLayerGroupParent(draggedGroupId, null);
             setDraggedGroupId(null);
@@ -1287,7 +1539,7 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
                       }
                       e.stopPropagation();
                       setDraggedGroupId(group.id);
-                      setDraggedLayerIdx(null);
+                      setDraggedTrack(null);
                     }}
                     onDragOver={(e) => {
                       e.preventDefault();
@@ -1301,9 +1553,9 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
                       e.preventDefault();
                       e.stopPropagation();
                       setDropHighlight(null);
-                      if (draggedLayerIdx !== null) {
-                        onAssignLayerToGroup(draggedLayerIdx, group.id);
-                        setDraggedLayerIdx(null);
+                      if (draggedTrack) {
+                        assignTrackToGroupSafe(draggedTrack.trackKey, draggedTrack.idx, group.id);
+                        setDraggedTrack(null);
                       } else if (draggedGroupId && draggedGroupId !== group.id) {
                         onMoveLayerGroupParent(draggedGroupId, group.id);
                         setDraggedGroupId(null);
@@ -1479,24 +1731,23 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
                 );
               }
 
-              // LAYER ROW
-              const { layer, idx, depth } = row;
-              const isActive = idx === currentLayerIndex;
-              const isMultiSelected = selectedSet.has(idx);
+              // LAYER ROW (Persistent Video-Style Track)
+              const { track, layer, idx, depth } = row;
+              const isActive = activeTrackKey
+                ? track.trackKey === activeTrackKey
+                : idx >= 0 && idx === currentLayerIndex;
+              const isMultiSelected = idx >= 0 && selectedSet.has(idx);
               const lType: LayerType = layer.layerType || 'raster';
               const typeInfo = LAYER_TYPE_INFO[lType] || LAYER_TYPE_INFO.raster;
               const TypeIconComp = typeInfo.Icon;
-              const isDragOver = dropHighlight === `layer-${idx}`;
-              const hasAnyLock =
-                layer.locked ||
-                layer.lockTransparency ||
-                layer.lockPixels ||
-                layer.lockPosition;
+              const isDragOver = dropHighlight === `track-${track.trackKey}`;
+              const hasAnyLock = track.isLocked;
+              const isAbsentInFrame = !track.existsInCurrentFrame;
 
               return (
                 <div
-                  key={layer.id}
-                  draggable={!isSliderInteracting && editingLayerIdx !== idx}
+                  key={`track-${track.trackKey}`}
+                  draggable={!isSliderInteracting && editingTrackKey !== track.trackKey}
                   onDragStart={(e) => {
                     if (
                       isSliderInteracting ||
@@ -1506,33 +1757,35 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
                       return;
                     }
                     e.stopPropagation();
-                    setDraggedLayerIdx(idx);
+                    setDraggedTrack({ trackKey: track.trackKey, idx });
                     setDraggedGroupId(null);
                     e.dataTransfer.effectAllowed = 'move';
                   }}
                   onDragOver={(e) => {
                     e.preventDefault();
                     e.stopPropagation();
-                    setDropHighlight(`layer-${idx}`);
+                    setDropHighlight(`track-${track.trackKey}`);
                   }}
                   onDragLeave={() => {
-                    if (dropHighlight === `layer-${idx}`) setDropHighlight(null);
+                    if (dropHighlight === `track-${track.trackKey}`) setDropHighlight(null);
                   }}
                   onDrop={(e) => {
                     e.preventDefault();
                     e.stopPropagation();
                     setDropHighlight(null);
-                    if (draggedLayerIdx !== null && draggedLayerIdx !== idx) {
-                      onReorderLayer(draggedLayerIdx, idx, layer.groupId ?? null);
+                    if (draggedTrack && draggedTrack.idx >= 0 && idx >= 0 && draggedTrack.idx !== idx) {
+                      onReorderLayer(draggedTrack.idx, idx, layer.groupId ?? null);
+                    } else if (draggedTrack && draggedTrack.trackKey !== track.trackKey) {
+                      assignTrackToGroupSafe(draggedTrack.trackKey, draggedTrack.idx, layer.groupId ?? null);
                     }
-                    setDraggedLayerIdx(null);
+                    setDraggedTrack(null);
                   }}
                   onDragEnd={() => {
-                    setDraggedLayerIdx(null);
+                    setDraggedTrack(null);
                     setDropHighlight(null);
                   }}
-                  onClick={(e) => handleLayerRowClick(e, idx, false)}
-                  onContextMenu={(e) => openContextMenuAt(e, idx)}
+                  onClick={(e) => handleLayerRowClick(e, track, false)}
+                  onContextMenu={(e) => openContextMenuAt(e, track)}
                   style={{
                     position: 'absolute',
                     top: `${topPx}px`,
@@ -1548,7 +1801,7 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
                       : 'var(--studio-bg-panel)',
                     borderBottom: '1px solid var(--studio-border)',
                     boxShadow: isDragOver ? 'inset 0 2px 0 #38bdf8' : undefined,
-                    opacity: layer.locked ? 0.62 : layer.visible ? 1 : 0.55,
+                    opacity: track.isLocked ? 0.68 : !layer.visible ? 0.5 : isAbsentInFrame ? 0.72 : 1,
                   }}
                   className="flex items-center gap-1.5 cursor-pointer hover:brightness-110 transition-colors"
                 >
@@ -1557,9 +1810,9 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
                     type="button"
                     onClick={(e) => {
                       e.stopPropagation();
-                      onToggleLayerVisibility(idx);
+                      toggleTrackVisibilitySafe(track);
                     }}
-                    title="Mostrar / Ocultar capa"
+                    title="Mostrar / Ocultar capa en toda la animación"
                     className="p-0.5 shrink-0"
                     style={{
                       color: layer.visible ? 'var(--studio-text)' : 'var(--studio-text-muted)',
@@ -1587,6 +1840,7 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
                       const rect = e.currentTarget.getBoundingClientRect();
                       setColorPopoverTarget({
                         kind: 'layer',
+                        trackKey: track.trackKey,
                         idx,
                         x: Math.min(rect.left, window.innerWidth - 200),
                         y: Math.min(rect.bottom + 4, window.innerHeight - 80),
@@ -1600,22 +1854,28 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
                     }}
                   />
 
-                  {/* Layer Thumbnail */}
-                  <AsyncLayerThumbnail
-                    layer={layer}
-                    canvasWidth={canvasWidth}
-                    canvasHeight={canvasHeight}
-                    boundsMode={thumbnailBoundsMode}
-                    isActive={isActive}
-                    isEditingMask={editingMask}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleLayerRowClick(e, idx, false);
-                    }}
-                  />
+                  {/* Layer Thumbnail (dim dashed frame indicator when absent in current frame) */}
+                  <div
+                    className={`relative shrink-0 rounded ${
+                      isAbsentInFrame ? 'opacity-55 border border-dashed border-slate-500/70' : ''
+                    }`}
+                  >
+                    <AsyncLayerThumbnail
+                      layer={layer}
+                      canvasWidth={canvasWidth}
+                      canvasHeight={canvasHeight}
+                      boundsMode={thumbnailBoundsMode}
+                      isActive={isActive}
+                      isEditingMask={editingMask}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleLayerRowClick(e, track, false);
+                      }}
+                    />
+                  </div>
 
                   {/* Optional Link Icon & Mask Thumbnail */}
-                  {layer.mask && (
+                  {layer.mask && idx >= 0 && (
                     <div className="flex items-center gap-0.5 shrink-0">
                       <button
                         type="button"
@@ -1644,19 +1904,19 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
                         isEditingMask={editingMask}
                         onClick={(e) => {
                           e.stopPropagation();
-                          handleLayerRowClick(e, idx, true);
+                          handleLayerRowClick(e, track, true);
                         }}
                       />
                     </div>
                   )}
 
-                  {/* Layer Type Icon + Editable Name */}
+                  {/* Layer Type Icon + Editable Name + Frame Content / Keyframe State Indicators */}
                   <div className="flex-1 min-w-0 flex flex-col justify-center">
                     <div className="flex items-center gap-1 min-w-0">
                       <span title={typeInfo.label} className="shrink-0">
                         <TypeIconComp className="w-3 h-3" style={{ color: typeInfo.color }} />
                       </span>
-                      {editingLayerIdx === idx ? (
+                      {editingTrackKey === track.trackKey ? (
                         <div
                           className="flex items-center gap-1 flex-1"
                           onClick={(e) => e.stopPropagation()}
@@ -1667,17 +1927,17 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
                             onChange={(e) => setEditingLayerName(e.target.value)}
                             onKeyDown={(e) => {
                               if (e.key === 'Enter' && editingLayerName.trim()) {
-                                onUpdateLayerMeta(idx, { name: editingLayerName.trim() });
-                                setEditingLayerIdx(null);
+                                updateTrackMetaSafe(track, { name: editingLayerName.trim() });
+                                setEditingTrackKey(null);
                               } else if (e.key === 'Escape') {
-                                setEditingLayerIdx(null);
+                                setEditingTrackKey(null);
                               }
                             }}
                             onBlur={() => {
                               if (editingLayerName.trim()) {
-                                onUpdateLayerMeta(idx, { name: editingLayerName.trim() });
+                                updateTrackMetaSafe(track, { name: editingLayerName.trim() });
                               }
-                              setEditingLayerIdx(null);
+                              setEditingTrackKey(null);
                             }}
                             className="w-full px-1 py-0.5 rounded border text-[11px]"
                             style={{
@@ -1691,9 +1951,9 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
                             type="button"
                             onClick={() => {
                               if (editingLayerName.trim()) {
-                                onUpdateLayerMeta(idx, { name: editingLayerName.trim() });
+                                updateTrackMetaSafe(track, { name: editingLayerName.trim() });
                               }
-                              setEditingLayerIdx(null);
+                              setEditingTrackKey(null);
                             }}
                             className="p-0.5 text-emerald-400"
                           >
@@ -1704,14 +1964,22 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
                         <span
                           onDoubleClick={(e) => {
                             e.stopPropagation();
-                            setEditingLayerIdx(idx);
+                            setEditingTrackKey(track.trackKey);
                             setEditingLayerName(layer.name);
                           }}
-                          className="text-[11px] font-medium truncate"
+                          className={`text-[11px] font-medium truncate ${
+                            isAbsentInFrame ? 'italic opacity-75' : ''
+                          }`}
                           style={{
                             color: isActive ? 'var(--studio-accent)' : 'var(--studio-text)',
                           }}
-                          title={`${layer.name}${layer.isGlobal ? ' (Capa Global compartida)' : ''} · Doble clic para renombrar · Clic derecho para opciones`}
+                          title={`${layer.name}${
+                            isAbsentInFrame
+                              ? ` · Sin contenido en este frame (presente en ${track.presentFrameCount} frames)`
+                              : track.hasContentInCurrentFrame
+                              ? ' · Contenido presente en este frame'
+                              : ' · Celda vacía en este frame'
+                          }${layer.isGlobal ? ' (Capa Global)' : ''} · Doble clic para renombrar`}
                         >
                           {layer.isGlobal && (
                             <Globe
@@ -1725,11 +1993,56 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
                     </div>
                   </div>
 
-                  {/* Independent Lock Indicators on Right */}
+                  {/* Frame State Symbols (● / ○ / ◆ / ◼) & Lock Controls on Right */}
                   <div
-                    className="flex items-center gap-0.5 shrink-0"
+                    className="flex items-center gap-1 shrink-0"
                     onClick={(e) => e.stopPropagation()}
                   >
+                    {track.hasKeyframeAtCurrentFrame ? (
+                      <span
+                        title="Keyframe en este frame"
+                        className="text-[10px] leading-none text-amber-400"
+                      >
+                        ◆
+                      </span>
+                    ) : track.totalKeyframesCount > 0 ? (
+                      <span
+                        title={`${track.totalKeyframesCount} keyframe(s) en la animación`}
+                        className="text-[10px] leading-none text-amber-400/55"
+                      >
+                        ◇
+                      </span>
+                    ) : null}
+
+                    {track.hasContentInCurrentFrame ? (
+                      <span
+                        title="Contenido presente en este frame"
+                        className="text-[10px] leading-none text-sky-400"
+                      >
+                        ●
+                      </span>
+                    ) : (
+                      <span
+                        title={
+                          track.existsInCurrentFrame
+                            ? 'Sin contenido en este frame'
+                            : `Sin contenido en este frame (presente en ${track.presentFrameCount} frame(s))`
+                        }
+                        className="text-[10px] leading-none text-slate-400/80"
+                      >
+                        ○
+                      </span>
+                    )}
+
+                    {track.isLocked && (
+                      <span
+                        title="Capa bloqueada"
+                        className="text-[9px] leading-none text-rose-400"
+                      >
+                        ◼
+                      </span>
+                    )}
+
                     {layer.lockTransparency && (
                       <span title="Transparencia bloqueada">
                         <Grid3X3 className="w-2.5 h-2.5 text-amber-400" />
@@ -1747,7 +2060,7 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
                     )}
                     <button
                       type="button"
-                      onClick={() => onToggleLayerLock(idx)}
+                      onClick={() => toggleTrackLockSafe(track)}
                       title={layer.locked ? 'Desbloquear capa' : 'Bloquear capa'}
                       className="p-0.5"
                       style={{
@@ -1782,12 +2095,15 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
           borderColor: 'var(--studio-border)',
         }}
       >
-        <div className="flex items-center gap-1 text-[10px] font-mono tabular-nums opacity-65">
+        <div className="flex items-center gap-1 text-[10px] font-mono tabular-nums opacity-65 whitespace-nowrap">
           <span>
             {selectedArray.length > 1
               ? `${selectedArray.length} sel.`
-              : `${currentLayerIndex + 1}/${layers.length}`}
+              : `${Math.max(1, visibleTracks.findIndex((t) => t.trackKey === activeTrack?.trackKey) + 1)}/${visibleTracks.length}`}
           </span>
+          {visibleTracks.length < projectTracks.length && (
+            <span className="opacity-70">({projectTracks.length} proy.)</span>
+          )}
         </div>
 
         <div className="flex items-center gap-0.5">
@@ -2039,10 +2355,16 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
           {/* 7. Eliminar capa */}
           <button
             type="button"
-            disabled={layers.length <= selectedArray.length}
+            disabled={
+              selectedArray.length > 1
+                ? layers.length <= selectedArray.length
+                : projectTracks.length <= 1
+            }
             onClick={() => {
               if (selectedArray.length > 1) {
                 onBatchDeleteLayers(selectedArray);
+              } else if (activeTrack && projectTracks.length > 1) {
+                deleteTrackSafe(activeTrack);
               } else if (layers.length > 1) {
                 onDeleteLayer(currentLayerIndex);
               }
@@ -2076,7 +2398,13 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
               <button
                 type="button"
                 onClick={() => {
-                  onUpdateLayerMeta(colorPopoverTarget.idx, { colorTag: undefined });
+                  const targetTrack = projectTracks.find(
+                    (t) => t.trackKey === colorPopoverTarget.trackKey
+                  );
+                  if (targetTrack) updateTrackMetaSafe(targetTrack, { colorTag: undefined });
+                  else if (colorPopoverTarget.idx >= 0) {
+                    onUpdateLayerMeta(colorPopoverTarget.idx, { colorTag: undefined });
+                  }
                   setColorPopoverTarget(null);
                 }}
                 title="Quitar color"
@@ -2092,7 +2420,13 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
                 type="button"
                 onClick={() => {
                   if (colorPopoverTarget.kind === 'layer') {
-                    onUpdateLayerMeta(colorPopoverTarget.idx, { colorTag: col });
+                    const targetTrack = projectTracks.find(
+                      (t) => t.trackKey === colorPopoverTarget.trackKey
+                    );
+                    if (targetTrack) updateTrackMetaSafe(targetTrack, { colorTag: col });
+                    else if (colorPopoverTarget.idx >= 0) {
+                      onUpdateLayerMeta(colorPopoverTarget.idx, { colorTag: col });
+                    }
                   } else {
                     onChangeGroupColor?.(colorPopoverTarget.id, col);
                   }
@@ -2106,12 +2440,19 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
               type="color"
               value={
                 colorPopoverTarget.kind === 'layer'
-                  ? layers[colorPopoverTarget.idx]?.colorTag || '#3b82f6'
-                  : layerGroups.find((g) => g.id === colorPopoverTarget.id)?.color || '#3b82f6'
+                  ? projectTracks.find((t) => t.trackKey === colorPopoverTarget.trackKey)?.layer
+                      .colorTag || '#3b82f6'
+                  : visibleLayerGroups.find((g) => g.id === colorPopoverTarget.id)?.color || '#3b82f6'
               }
               onChange={(e) => {
                 if (colorPopoverTarget.kind === 'layer') {
-                  onUpdateLayerMeta(colorPopoverTarget.idx, { colorTag: e.target.value });
+                  const targetTrack = projectTracks.find(
+                    (t) => t.trackKey === colorPopoverTarget.trackKey
+                  );
+                  if (targetTrack) updateTrackMetaSafe(targetTrack, { colorTag: e.target.value });
+                  else if (colorPopoverTarget.idx >= 0) {
+                    onUpdateLayerMeta(colorPopoverTarget.idx, { colorTag: e.target.value });
+                  }
                 } else {
                   onChangeGroupColor?.(colorPopoverTarget.id, e.target.value);
                 }
@@ -2143,11 +2484,12 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
           >
           <button
             type="button"
+            disabled={contextMenu.layerIdx < 0}
             onClick={() => {
               onMassDuplicateLayers(selectedArray.length > 1 ? selectedArray : [contextMenu.layerIdx]);
               setContextMenu(null);
             }}
-            className="w-full text-left px-3 py-1 hover:bg-white/10 flex items-center justify-between"
+            className="w-full text-left px-3 py-1 hover:bg-white/10 disabled:opacity-35 flex items-center justify-between"
           >
             <span className="flex items-center gap-2">
               <Copy className="w-3.5 h-3.5 opacity-70" />
@@ -2158,11 +2500,12 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
 
           <button
             type="button"
+            disabled={contextMenu.layerIdx < 0}
             onClick={() => {
               onConvertToSmartObject?.(contextMenu.layerIdx);
               setContextMenu(null);
             }}
-            className="w-full text-left px-3 py-1 hover:bg-white/10 flex items-center gap-2"
+            className="w-full text-left px-3 py-1 hover:bg-white/10 disabled:opacity-35 flex items-center gap-2"
           >
             <Sparkles className="w-3.5 h-3.5 text-amber-400" />
             <span>Convertir en objeto inteligente</span>
@@ -2170,6 +2513,7 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
 
           <button
             type="button"
+            disabled={contextMenu.layerIdx < 0}
             onClick={() => {
               onConvertLayersToGroup(
                 selectedArray.length > 1 ? selectedArray : [contextMenu.layerIdx],
@@ -2178,7 +2522,7 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
               );
               setContextMenu(null);
             }}
-            className="w-full text-left px-3 py-1 hover:bg-white/10 flex items-center gap-2"
+            className="w-full text-left px-3 py-1 hover:bg-white/10 disabled:opacity-35 flex items-center gap-2"
           >
             <FolderPlus className="w-3.5 h-3.5 text-sky-400" />
             <span>Crear grupo</span>
@@ -2208,19 +2552,19 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
                 <button
                   type="button"
                   onClick={() => {
-                    onAssignLayerToGroup(contextMenu.layerIdx, null);
+                    assignTrackToGroupSafe(contextMenu.trackKey, contextMenu.layerIdx, null);
                     setContextMenu(null);
                   }}
                   className="w-full text-left px-2.5 py-1 text-[10px] hover:bg-white/10"
                 >
                   Raíz (Sin grupo)
                 </button>
-                {layerGroups.map((g) => (
+                {visibleLayerGroups.map((g) => (
                   <button
                     key={g.id}
                     type="button"
                     onClick={() => {
-                      onAssignLayerToGroup(contextMenu.layerIdx, g.id);
+                      assignTrackToGroupSafe(contextMenu.trackKey, contextMenu.layerIdx, g.id);
                       setContextMenu(null);
                     }}
                     className="w-full text-left px-2.5 py-1 text-[10px] hover:bg-white/10 flex items-center gap-1.5"
@@ -2238,7 +2582,11 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
           <button
             type="button"
             onClick={() => {
-              onUpdateLayerMeta(contextMenu.layerIdx, { isGlobal: !ctxLayer.isGlobal });
+              if (ctxTrack) {
+                updateTrackMetaSafe(ctxTrack, { isGlobal: !ctxLayer.isGlobal });
+              } else if (contextMenu.layerIdx >= 0) {
+                onUpdateLayerMeta(contextMenu.layerIdx, { isGlobal: !ctxLayer.isGlobal });
+              }
               setContextMenu(null);
             }}
             className="w-full text-left px-3 py-1 hover:bg-white/10 flex items-center gap-2"
@@ -2250,11 +2598,12 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
           {onDuplicateLayerToNextFrame && (
             <button
               type="button"
+              disabled={contextMenu.layerIdx < 0}
               onClick={() => {
                 onDuplicateLayerToNextFrame(contextMenu.layerIdx);
                 setContextMenu(null);
               }}
-              className="w-full text-left px-3 py-1 hover:bg-white/10 flex items-center gap-2"
+              className="w-full text-left px-3 py-1 hover:bg-white/10 disabled:opacity-35 flex items-center gap-2"
             >
               <Copy className="w-3.5 h-3.5 text-emerald-400" />
               <span>Duplicar capa al siguiente frame</span>
@@ -2264,11 +2613,12 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
           {onDuplicateLayerToSelectedFrames && (
             <button
               type="button"
+              disabled={contextMenu.layerIdx < 0}
               onClick={() => {
                 onDuplicateLayerToSelectedFrames(contextMenu.layerIdx);
                 setContextMenu(null);
               }}
-              className="w-full text-left px-3 py-1 hover:bg-white/10 flex items-center gap-2"
+              className="w-full text-left px-3 py-1 hover:bg-white/10 disabled:opacity-35 flex items-center gap-2"
             >
               <Copy className="w-3.5 h-3.5 text-sky-400" />
               <span>Duplicar capa a varios frames</span>
@@ -2278,11 +2628,12 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
           {onDuplicateLayerToAllFrames && (
             <button
               type="button"
+              disabled={contextMenu.layerIdx < 0}
               onClick={() => {
                 onDuplicateLayerToAllFrames(contextMenu.layerIdx);
                 setContextMenu(null);
               }}
-              className="w-full text-left px-3 py-1 hover:bg-white/10 flex items-center gap-2"
+              className="w-full text-left px-3 py-1 hover:bg-white/10 disabled:opacity-35 flex items-center gap-2"
             >
               <Copy className="w-3.5 h-3.5 text-amber-400" />
               <span>Duplicar capa a toda la animación</span>
@@ -2334,11 +2685,12 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
 
           <button
             type="button"
+            disabled={contextMenu.layerIdx < 0}
             onClick={() => {
               onRasterizeLayer?.(contextMenu.layerIdx);
               setContextMenu(null);
             }}
-            className="w-full text-left px-3 py-1 hover:bg-white/10 flex items-center gap-2"
+            className="w-full text-left px-3 py-1 hover:bg-white/10 disabled:opacity-35 flex items-center gap-2"
           >
             <SlidersHorizontal className="w-3.5 h-3.5 opacity-70" />
             <span>Rasterizar capa</span>
@@ -2350,8 +2702,9 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
           <div>
             <button
               type="button"
+              disabled={contextMenu.layerIdx < 0}
               onClick={() => setCtxSubmenu(ctxSubmenu === 'mask' ? null : 'mask')}
-              className="w-full text-left px-3 py-1 hover:bg-white/10 flex items-center justify-between"
+              className="w-full text-left px-3 py-1 hover:bg-white/10 disabled:opacity-35 flex items-center justify-between"
             >
               <span className="flex items-center gap-2">
                 <Contrast className="w-3.5 h-3.5 text-amber-400" />
@@ -2483,7 +2836,8 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
           <button
             type="button"
             onClick={() => {
-              onToggleLayerLock(contextMenu.layerIdx);
+              if (ctxTrack) toggleTrackLockSafe(ctxTrack);
+              else if (contextMenu.layerIdx >= 0) onToggleLayerLock(contextMenu.layerIdx);
               setContextMenu(null);
             }}
             className="w-full text-left px-3 py-1 hover:bg-white/10 flex items-center gap-2"
@@ -2495,7 +2849,8 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
           <button
             type="button"
             onClick={() => {
-              onToggleLayerVisibility(contextMenu.layerIdx);
+              if (ctxTrack) toggleTrackVisibilitySafe(ctxTrack);
+              else if (contextMenu.layerIdx >= 0) onToggleLayerVisibility(contextMenu.layerIdx);
               setContextMenu(null);
             }}
             className="w-full text-left px-3 py-1 hover:bg-white/10 flex items-center gap-2"
@@ -2511,7 +2866,7 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
           <button
             type="button"
             onClick={() => {
-              setEditingLayerIdx(contextMenu.layerIdx);
+              setEditingTrackKey(contextMenu.trackKey);
               setEditingLayerName(ctxLayer.name);
               setContextMenu(null);
             }}
@@ -2520,6 +2875,20 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
             <TypeIcon className="w-3.5 h-3.5 opacity-70" />
             <span>Renombrar</span>
           </button>
+
+          {onClearTrackInCurrentFrame && contextMenu.layerIdx >= 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                onClearTrackInCurrentFrame(contextMenu.trackKey);
+                setContextMenu(null);
+              }}
+              className="w-full text-left px-3 py-1 hover:bg-white/10 flex items-center gap-2"
+            >
+              <SquareDashed className="w-3.5 h-3.5 text-slate-400" />
+              <span>Vaciar en este frame</span>
+            </button>
+          )}
 
           <div>
             <button
@@ -2544,7 +2913,10 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
                 <button
                   type="button"
                   onClick={() => {
-                    onUpdateLayerMeta(contextMenu.layerIdx, { colorTag: undefined });
+                    if (ctxTrack) updateTrackMetaSafe(ctxTrack, { colorTag: undefined });
+                    else if (contextMenu.layerIdx >= 0) {
+                      onUpdateLayerMeta(contextMenu.layerIdx, { colorTag: undefined });
+                    }
                     setContextMenu(null);
                   }}
                   className="w-3.5 h-3.5 rounded-full border text-[8px] flex items-center justify-center"
@@ -2556,7 +2928,10 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
                     key={c}
                     type="button"
                     onClick={() => {
-                      onUpdateLayerMeta(contextMenu.layerIdx, { colorTag: c });
+                      if (ctxTrack) updateTrackMetaSafe(ctxTrack, { colorTag: c });
+                      else if (contextMenu.layerIdx >= 0) {
+                        onUpdateLayerMeta(contextMenu.layerIdx, { colorTag: c });
+                      }
                       setContextMenu(null);
                     }}
                     className="w-3.5 h-3.5 rounded-full"
@@ -2604,11 +2979,17 @@ export const PhotoshopLayersPanel: React.FC<PhotoshopLayersPanelProps> = ({
 
           <button
             type="button"
-            disabled={layers.length <= 1}
+            disabled={
+              selectedArray.length > 1
+                ? layers.length <= selectedArray.length
+                : projectTracks.length <= 1
+            }
             onClick={() => {
               if (selectedArray.length > 1 && layers.length > selectedArray.length) {
                 onBatchDeleteLayers(selectedArray);
-              } else if (layers.length > 1) {
+              } else if (ctxTrack && projectTracks.length > 1) {
+                deleteTrackSafe(ctxTrack);
+              } else if (layers.length > 1 && contextMenu.layerIdx >= 0) {
                 onDeleteLayer(contextMenu.layerIdx);
               }
               setContextMenu(null);

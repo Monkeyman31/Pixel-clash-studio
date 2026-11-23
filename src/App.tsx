@@ -54,6 +54,7 @@ import { HomeScreen, HomeScreenSection } from './components/HomeScreen';
 import { SplashLoadingScreen } from './components/SplashLoadingScreen';
 import { DEFAULT_BRUSH_SETTINGS } from './components/BrushSettingsPanel';
 import { createDefaultFighterFrames } from './constants/defaultFighter';
+import { computeFrameLayerTrackKeys } from './utils/layerTracks';
 import { FIGHTING_GAME_PALETTES } from './constants/palettes';
 import {
   DEFAULT_WORKSPACE_LAYOUT,
@@ -569,88 +570,165 @@ function getAcceptForImportMode(mode: ImportMenuMode | null): string {
 
 export default function App() {
   const [projectName, setProjectName] = useState<string>('K.O. Fighter');
-  // Canvas Dimensions
-  const [canvasWidth, setCanvasWidth] = useState<number>(48);
-  const [canvasHeight, setCanvasHeight] = useState<number>(48);
+  // Canvas Dimensions (64x64 high-detail Fighting Game Demo Character)
+  const [canvasWidth, setCanvasWidth] = useState<number>(64);
+  const [canvasHeight, setCanvasHeight] = useState<number>(64);
 
-  // Layer Groups for retro fighting animation organization
+  // Layer Folders + Retro Fighting Movement Groups (8 complete demo animations, 32 frames)
   const [layerGroups, setLayerGroups] = useState<LayerGroup[]>([
     {
-      id: 'group-char',
-      name: '[Idle] Fighter Base',
-      color: '#3b82f6',
-      category: 'Idle',
-      frameIndices: [0, 1],
-      collapsed: false,
-      visible: true,
-      locked: false,
-      playbackMode: 'pingpong',
-      fps: 12,
-    },
-    {
-      id: 'group-fx',
-      name: '[Attack] Hadoken & VFX',
+      id: 'folder-fx',
+      name: 'FX y Escena',
       color: '#a855f7',
-      category: 'Special',
-      frameIndices: [2, 3],
+      category: 'VFX',
+      frameIndices: [],
       collapsed: false,
       visible: true,
       locked: false,
       playbackMode: 'loop',
       fps: 12,
     },
+    {
+      id: 'folder-character',
+      name: 'Personaje · Kaito',
+      color: '#3b82f6',
+      category: 'Idle',
+      frameIndices: [],
+      collapsed: false,
+      visible: true,
+      locked: false,
+      playbackMode: 'loop',
+      fps: 12,
+    },
+    {
+      id: 'group-idle',
+      name: '[Idle] Guardia',
+      color: '#3b82f6',
+      category: 'Idle',
+      frameIndices: [0, 1, 2, 3],
+      collapsed: false,
+      visible: true,
+      locked: false,
+      playbackMode: 'pingpong',
+      fps: 10,
+    },
+    {
+      id: 'group-walk',
+      name: '[Walk] Caminata',
+      color: '#10b981',
+      category: 'Movement',
+      frameIndices: [4, 5, 6, 7, 8, 9],
+      collapsed: true,
+      visible: true,
+      locked: false,
+      playbackMode: 'loop',
+      fps: 12,
+    },
+    {
+      id: 'group-run',
+      name: '[Run] Carrera',
+      color: '#06b6d4',
+      category: 'Movement',
+      frameIndices: [10, 11, 12, 13],
+      collapsed: true,
+      visible: true,
+      locked: false,
+      playbackMode: 'loop',
+      fps: 14,
+    },
+    {
+      id: 'group-jump',
+      name: '[Jump] Salto',
+      color: '#8b5cf6',
+      category: 'Movement',
+      frameIndices: [14, 15, 16, 17],
+      collapsed: true,
+      visible: true,
+      locked: false,
+      playbackMode: 'once',
+      fps: 10,
+    },
+    {
+      id: 'group-crouch',
+      name: '[Agachado] Guardia Baja',
+      color: '#14b8a6',
+      category: 'Movement',
+      frameIndices: [18, 19, 20],
+      collapsed: true,
+      visible: true,
+      locked: false,
+      playbackMode: 'pingpong',
+      fps: 10,
+    },
+    {
+      id: 'group-light',
+      name: '[Ataque Ligero] Jab',
+      color: '#f59e0b',
+      category: 'Normal',
+      frameIndices: [21, 22, 23],
+      collapsed: true,
+      visible: true,
+      locked: false,
+      playbackMode: 'once',
+      fps: 14,
+    },
+    {
+      id: 'group-heavy',
+      name: '[Ataque Fuerte] Dragón',
+      color: '#f97316',
+      category: 'Normal',
+      frameIndices: [24, 25, 26, 27],
+      collapsed: true,
+      visible: true,
+      locked: false,
+      playbackMode: 'once',
+      fps: 12,
+    },
+    {
+      id: 'group-special',
+      name: '[Especial] Onda Ki',
+      color: '#a855f7',
+      category: 'Special',
+      frameIndices: [28, 29, 30, 31],
+      collapsed: true,
+      visible: true,
+      locked: false,
+      playbackMode: 'once',
+      fps: 12,
+    },
   ]);
 
   // Frames & Layers State
-  const [frames, setFrames] = useState<Frame[]>(() => {
-    const base = createDefaultFighterFrames(48, 48);
-    // Assign default groups to fighter layers and frames
-    return base.map((f, fIdx) => ({
-      ...f,
-      durationMs: Math.round(((f.durationTicks || 4) / 60) * 1000),
-      groupId: fIdx < 2 ? 'group-char' : 'group-fx',
-      layers: f.layers.map((l) => ({
-        ...l,
-        groupId: l.name.toLowerCase().includes('vfx') ? 'group-fx' : 'group-char',
-      })),
-    }));
-  });
+  const [frames, setFrames] = useState<Frame[]>(() => createDefaultFighterFrames(64, 64));
   const [currentFrameIndex, setCurrentFrameIndex] = useState<number>(0);
-  const [currentLayerIndex, setCurrentLayerIndex] = useState<number>(0);
+  const [currentLayerIndex, setCurrentLayerIndex] = useState<number>(2);
   const [selectedFrameIndices, setSelectedFrameIndices] = useState<number[]>([0]);
-  const [selectedLayerIndices, setSelectedLayerIndices] = useState<number[]>([0]);
+  const [selectedLayerIndices, setSelectedLayerIndices] = useState<number[]>([2]);
+  const [activeTrackKey, setActiveTrackKey] = useState<string | null>('trk:demo-body');
   const [editingMask, setEditingMask] = useState<boolean>(false);
 
   // Animation Clips & Action Tags
   const [clips, setClips] = useState<AnimationClip[]>([
     {
       id: 'clip-hadoken-combo',
-      name: 'Hadoken Combo Completo',
-      frameIndices: [0, 1, 2, 3],
+      name: 'Kaito Blaze · Demo Completo (8 Movimientos)',
+      frameIndices: Array.from({ length: 32 }, (_, i) => i),
       loop: true,
       fps: 12,
-      playbackMode: 'loop'
-    }
+      playbackMode: 'loop',
+    },
   ]);
   const [activeClipId, setActiveClipId] = useState<string>('clip-hadoken-combo');
 
   const [actionTags, setActionTags] = useState<ActionTag[]>([
-    {
-      id: 'tag-idle',
-      name: 'Idle (Guardia)',
-      color: '#3b82f6',
-      frameIndices: [0, 1],
-      playbackMode: 'pingpong',
-      category: 'Idle'
-    },
-    {
-      id: 'tag-strike',
-      name: 'Golpe Hadoken',
-      color: '#ef4444',
-      frameIndices: [2, 3],
-      playbackMode: 'loop',
-      category: 'Special'
-    }
+    { id: 'tag-idle', name: 'Idle', color: '#3b82f6', frameIndices: [0, 1, 2, 3], playbackMode: 'pingpong', category: 'Idle' },
+    { id: 'tag-walk', name: 'Walk', color: '#10b981', frameIndices: [4, 5, 6, 7, 8, 9], playbackMode: 'loop', category: 'Movement' },
+    { id: 'tag-run', name: 'Run', color: '#06b6d4', frameIndices: [10, 11, 12, 13], playbackMode: 'loop', category: 'Movement' },
+    { id: 'tag-jump', name: 'Jump', color: '#8b5cf6', frameIndices: [14, 15, 16, 17], playbackMode: 'once', category: 'Movement' },
+    { id: 'tag-crouch', name: 'Agachado', color: '#14b8a6', frameIndices: [18, 19, 20], playbackMode: 'pingpong', category: 'Movement' },
+    { id: 'tag-light', name: 'Ataque ligero', color: '#f59e0b', frameIndices: [21, 22, 23], playbackMode: 'once', category: 'Normal' },
+    { id: 'tag-heavy', name: 'Ataque fuerte', color: '#f97316', frameIndices: [24, 25, 26, 27], playbackMode: 'once', category: 'Normal' },
+    { id: 'tag-special', name: 'Especial simple', color: '#a855f7', frameIndices: [28, 29, 30, 31], playbackMode: 'once', category: 'Special' },
   ]);
   const [activeActionTagId, setActiveActionTagId] = useState<string | null>(null);
 
@@ -986,16 +1064,16 @@ export default function App() {
   const [showGrid, setShowGrid] = useState<boolean>(true);
   const [showHitboxes, setShowHitboxes] = useState<boolean>(true);
   const [showPivot, setShowPivot] = useState<boolean>(false);
-  const [globalPivot, setGlobalPivot] = useState<{ x: number; y: number }>({ x: 24, y: 38 });
+  const [globalPivot, setGlobalPivot] = useState<{ x: number; y: number }>({ x: 32, y: 53 });
   const [onionSkinEnabled, setOnionSkinEnabled] = useState<boolean>(true);
   const [onionSkinOpacity, setOnionSkinOpacity] = useState<number>(0.35);
   const [symmetryEnabled, setSymmetryEnabled] = useState<boolean>(false);
   const [symmetryConfig, setSymmetryConfig] = useState<SymmetryConfig>(() => ({
     ...DEFAULT_SYMMETRY_CONFIG,
-    axisX: 23.5,
-    axisY: 23.5,
+    axisX: 31.5,
+    axisY: 31.5,
     lineP1: { x: 8, y: 8 },
-    lineP2: { x: 40, y: 40 },
+    lineP2: { x: 54, y: 54 },
   }));
   const symmetryAxis = Math.round(symmetryConfig.axisX);
 
@@ -1009,13 +1087,13 @@ export default function App() {
   const [stageOpacity, setStageOpacity] = useState<number>(0.85);
   const [groundConfig, setGroundConfig] = useState<GroundConfig>({
     visible: true,
-    groundY: 40,
+    groundY: 54,
     showShadow: true,
   });
 
-  // Dummy Sparring Partner (1P vs 2P Collision)
+  // Dummy Sparring Partner (Hidden by default for clean startup; toggle via Fighter Mode)
   const [dummyOpponent, setDummyOpponent] = useState<DummyOpponent>({
-    enabled: true,
+    enabled: false,
     distance: 26,
     showHurtbox: true,
   });
@@ -1236,8 +1314,8 @@ export default function App() {
     {
       id: 'doc-initial',
       name: 'K.O. Fighter',
-      width: 48,
-      height: 48,
+      width: 64,
+      height: 64,
       snapshot: null,
       isDirty: false,
       isNewUnsaved: true,
@@ -1929,6 +2007,8 @@ export default function App() {
   currentFrameIndexRef.current = currentFrameIndex;
   const currentLayerIndexRef = useRef<number>(currentLayerIndex);
   currentLayerIndexRef.current = currentLayerIndex;
+  const activeTrackKeyRef = useRef<string | null>(activeTrackKey);
+  activeTrackKeyRef.current = activeTrackKey;
   const selectedVectorPathIdRef = useRef<string | null>(selectedVectorPathId);
   selectedVectorPathIdRef.current = selectedVectorPathId;
   const selectedVectorNodeIdsRef = useRef<string[]>(selectedVectorNodeIds);
@@ -2167,6 +2247,34 @@ export default function App() {
   useEffect(() => {
     setLiveCanvasPreview(null);
   }, [currentFrameIndex, currentLayerIndex]);
+
+  // Keep active persistent layer track synchronized when switching frames or playing animations
+  useEffect(() => {
+    const fr = frames[currentFrameIndex];
+    if (!fr || !fr.layers || fr.layers.length === 0) return;
+    const keys = computeFrameLayerTrackKeys(fr.layers);
+    const desiredTrackKey = activeTrackKeyRef.current;
+    if (desiredTrackKey) {
+      const matchIdx = keys.indexOf(desiredTrackKey);
+      if (matchIdx >= 0) {
+        if (matchIdx !== currentLayerIndexRef.current) {
+          currentLayerIndexRef.current = matchIdx;
+          setCurrentLayerIndex(matchIdx);
+          setSelectedLayerIndices([matchIdx]);
+        }
+        return;
+      }
+    } else if (keys[currentLayerIndexRef.current]) {
+      setActiveTrackKey(keys[currentLayerIndexRef.current]);
+      return;
+    }
+    if (currentLayerIndexRef.current >= fr.layers.length) {
+      const clamped = Math.max(0, fr.layers.length - 1);
+      currentLayerIndexRef.current = clamped;
+      setCurrentLayerIndex(clamped);
+      setSelectedLayerIndices([clamped]);
+    }
+  }, [currentFrameIndex, frames]);
 
   useEffect(() => {
     if (editingMask && !currentLayer?.mask) {
@@ -4509,8 +4617,10 @@ export default function App() {
         : layerType === 'animation'
         ? `Animación ${n}`
         : `Capa ${n}`;
+    const trackId = `trk-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const newLayer: Layer = {
       id: `layer-${Date.now()}`,
+      trackId,
       name: defaultName,
       visible: true,
       locked: layerType === 'reference',
@@ -4525,14 +4635,30 @@ export default function App() {
     const updated = prevFrames.map((f, i) =>
       i === currentFrameIndex ? { ...f, layers: [...f.layers, newLayer] } : f
     );
+    const nextTrackKey = `trk:${trackId}`;
     framesRef.current = updated;
     currentLayerIndexRef.current = nextIdx;
+    activeTrackKeyRef.current = nextTrackKey;
     setFrames(updated);
     setCurrentLayerIndex(nextIdx);
     setSelectedLayerIndices([nextIdx]);
+    setActiveTrackKey(nextTrackKey);
     setEditingMask(false);
     pushHistorySnapshot({ frames: updated, currentLayerIndex: nextIdx });
   };
+
+  const handleSelectLayerWithTrack = useCallback((index: number) => {
+    const curFr = framesRef.current[currentFrameIndexRef.current] || framesRef.current[0];
+    if (!curFr || curFr.layers.length === 0) return;
+    const safeIdx = Math.max(0, Math.min(curFr.layers.length - 1, index));
+    const keys = computeFrameLayerTrackKeys(curFr.layers);
+    const nextKey = keys[safeIdx] || null;
+    currentLayerIndexRef.current = safeIdx;
+    activeTrackKeyRef.current = nextKey;
+    setCurrentLayerIndex(safeIdx);
+    setSelectedLayerIndices([safeIdx]);
+    if (nextKey) setActiveTrackKey(nextKey);
+  }, []);
 
   const handleUpdateLayerMeta = useCallback(
     (index: number, patch: Partial<Layer>) => {
@@ -4609,31 +4735,53 @@ export default function App() {
   );
 
   const handleToggleLayerVisibility = (index: number) => {
-    setFrames((prev) =>
-      prev.map((f, i) => {
-        if (i !== currentFrameIndex) return f;
-        return {
-          ...f,
-          layers: f.layers.map((l, lIdx) =>
-            lIdx === index ? { ...l, visible: !l.visible } : l
-          ),
-        };
-      })
-    );
+    const prev = framesRef.current;
+    const curFr = prev[currentFrameIndex];
+    const targetLayer = curFr?.layers[index];
+    if (!targetLayer) return;
+    const curKeys = computeFrameLayerTrackKeys(curFr.layers);
+    const trackKey = curKeys[index];
+    const nextVisible = !targetLayer.visible;
+
+    const updated = prev.map((f, fIdx) => {
+      const fKeys = trackKey ? computeFrameLayerTrackKeys(f.layers) : [];
+      return {
+        ...f,
+        layers: f.layers.map((l, lIdx) => {
+          const matches = trackKey
+            ? fKeys[lIdx] === trackKey
+            : fIdx === currentFrameIndex && lIdx === index;
+          return matches ? { ...l, visible: nextVisible } : l;
+        }),
+      };
+    });
+    framesRef.current = updated;
+    setFrames(updated);
   };
 
   const handleToggleLayerLock = (index: number) => {
-    setFrames((prev) =>
-      prev.map((f, i) => {
-        if (i !== currentFrameIndex) return f;
-        return {
-          ...f,
-          layers: f.layers.map((l, lIdx) =>
-            lIdx === index ? { ...l, locked: !l.locked } : l
-          ),
-        };
-      })
-    );
+    const prev = framesRef.current;
+    const curFr = prev[currentFrameIndex];
+    const targetLayer = curFr?.layers[index];
+    if (!targetLayer) return;
+    const curKeys = computeFrameLayerTrackKeys(curFr.layers);
+    const trackKey = curKeys[index];
+    const nextLocked = !targetLayer.locked;
+
+    const updated = prev.map((f, fIdx) => {
+      const fKeys = trackKey ? computeFrameLayerTrackKeys(f.layers) : [];
+      return {
+        ...f,
+        layers: f.layers.map((l, lIdx) => {
+          const matches = trackKey
+            ? fKeys[lIdx] === trackKey
+            : fIdx === currentFrameIndex && lIdx === index;
+          return matches ? { ...l, locked: nextLocked } : l;
+        }),
+      };
+    });
+    framesRef.current = updated;
+    setFrames(updated);
   };
 
   const handleDeleteLayer = (index: number) => {
@@ -4643,13 +4791,260 @@ export default function App() {
         ? f
         : { ...f, layers: f.layers.filter((_, lIdx) => lIdx !== index) }
     );
+    const nextCur = updated[currentFrameIndex];
+    const nextIdx = Math.max(0, Math.min(index, (nextCur?.layers.length || 1) - 1));
+    const nextKeys = nextCur ? computeFrameLayerTrackKeys(nextCur.layers) : [];
+    const nextTrack = nextKeys[nextIdx] || null;
     framesRef.current = updated;
-    currentLayerIndexRef.current = 0;
+    currentLayerIndexRef.current = nextIdx;
+    activeTrackKeyRef.current = nextTrack;
     setFrames(updated);
-    setCurrentLayerIndex(0);
-    setSelectedLayerIndices([0]);
-    pushHistorySnapshot({ frames: updated, currentLayerIndex: 0 });
+    setCurrentLayerIndex(nextIdx);
+    setSelectedLayerIndices([nextIdx]);
+    setActiveTrackKey(nextTrack);
+    pushHistorySnapshot({ frames: updated, currentLayerIndex: nextIdx });
   };
+
+  // Persistent Project Layer Track Handlers (Video/Animation-style unified layers)
+  const handleSelectLayerTrack = useCallback(
+    (trackKey: string, frameLayerIndex: number) => {
+      activeTrackKeyRef.current = trackKey;
+      setActiveTrackKey(trackKey);
+      if (frameLayerIndex >= 0) {
+        currentLayerIndexRef.current = frameLayerIndex;
+        setCurrentLayerIndex(frameLayerIndex);
+        setSelectedLayerIndices([frameLayerIndex]);
+        setEditingMask(false);
+        return;
+      }
+
+      // Layer does not yet have a cel in the current frame; materialize an empty matching cel when paused so the artist can draw immediately
+      if (isPlaying) return;
+
+      const prev = framesRef.current;
+      const curIdx = currentFrameIndexRef.current;
+      const curFrameTarget = prev[curIdx];
+      if (!curFrameTarget) return;
+
+      let templateLayer: Layer | null = null;
+      let templateIndex = curFrameTarget.layers.length;
+      for (let fIdx = 0; fIdx < prev.length; fIdx++) {
+        const fKeys = computeFrameLayerTrackKeys(prev[fIdx].layers);
+        const foundIdx = fKeys.indexOf(trackKey);
+        if (foundIdx >= 0) {
+          templateLayer = prev[fIdx].layers[foundIdx];
+          templateIndex = foundIdx;
+          break;
+        }
+      }
+      if (!templateLayer) return;
+
+      const insertIdx = Math.max(0, Math.min(curFrameTarget.layers.length, templateIndex));
+      const newCel: Layer = {
+        id: `layer-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+        trackId: templateLayer.trackId,
+        name: templateLayer.name,
+        visible: templateLayer.visible,
+        locked: templateLayer.locked,
+        lockPixels: templateLayer.lockPixels,
+        lockPosition: templateLayer.lockPosition,
+        lockTransparency: templateLayer.lockTransparency,
+        opacity: templateLayer.opacity,
+        fillOpacity: templateLayer.fillOpacity ?? 1,
+        blendMode: templateLayer.blendMode,
+        layerType: templateLayer.layerType || 'raster',
+        groupId: templateLayer.groupId ?? null,
+        colorTag: templateLayer.colorTag,
+        adjustment: templateLayer.adjustment ? { ...templateLayer.adjustment } : undefined,
+        pixels: createEmptyGrid(canvasWidthRef.current, canvasHeightRef.current),
+      };
+
+      const updated = prev.map((f, fIdx) => {
+        if (fIdx !== curIdx) return f;
+        const nextLayers = [...f.layers];
+        nextLayers.splice(insertIdx, 0, newCel);
+        return { ...f, layers: nextLayers };
+      });
+
+      framesRef.current = updated;
+      currentLayerIndexRef.current = insertIdx;
+      setFrames(updated);
+      setCurrentLayerIndex(insertIdx);
+      setSelectedLayerIndices([insertIdx]);
+      setEditingMask(false);
+      pushHistorySnapshot({ frames: updated, currentLayerIndex: insertIdx });
+    },
+    [isPlaying, pushHistorySnapshot]
+  );
+
+  const handleToggleTrackVisibility = useCallback(
+    (trackKey: string, frameLayerIndex: number) => {
+      const prev = framesRef.current;
+      const curFr = prev[currentFrameIndexRef.current];
+      let currentVisible = true;
+      if (frameLayerIndex >= 0 && curFr?.layers[frameLayerIndex]) {
+        currentVisible = curFr.layers[frameLayerIndex].visible;
+      } else {
+        for (const f of prev) {
+          const fKeys = computeFrameLayerTrackKeys(f.layers);
+          const idx = fKeys.indexOf(trackKey);
+          if (idx >= 0) {
+            currentVisible = f.layers[idx].visible;
+            break;
+          }
+        }
+      }
+      const nextVisible = !currentVisible;
+      const updated = prev.map((f) => {
+        const fKeys = computeFrameLayerTrackKeys(f.layers);
+        return {
+          ...f,
+          layers: f.layers.map((l, lIdx) =>
+            fKeys[lIdx] === trackKey ? { ...l, visible: nextVisible } : l
+          ),
+        };
+      });
+      framesRef.current = updated;
+      setFrames(updated);
+    },
+    []
+  );
+
+  const handleToggleTrackLock = useCallback(
+    (trackKey: string, frameLayerIndex: number) => {
+      const prev = framesRef.current;
+      const curFr = prev[currentFrameIndexRef.current];
+      let currentLocked = false;
+      if (frameLayerIndex >= 0 && curFr?.layers[frameLayerIndex]) {
+        currentLocked = curFr.layers[frameLayerIndex].locked;
+      } else {
+        for (const f of prev) {
+          const fKeys = computeFrameLayerTrackKeys(f.layers);
+          const idx = fKeys.indexOf(trackKey);
+          if (idx >= 0) {
+            currentLocked = f.layers[idx].locked;
+            break;
+          }
+        }
+      }
+      const nextLocked = !currentLocked;
+      const updated = prev.map((f) => {
+        const fKeys = computeFrameLayerTrackKeys(f.layers);
+        return {
+          ...f,
+          layers: f.layers.map((l, lIdx) =>
+            fKeys[lIdx] === trackKey ? { ...l, locked: nextLocked } : l
+          ),
+        };
+      });
+      framesRef.current = updated;
+      setFrames(updated);
+    },
+    []
+  );
+
+  const handleUpdateTrackMeta = useCallback(
+    (trackKey: string, frameLayerIndex: number, patch: Partial<Layer>) => {
+      if (patch.isGlobal !== undefined && frameLayerIndex >= 0) {
+        handleUpdateLayerMeta(frameLayerIndex, patch);
+        return;
+      }
+      const prev = framesRef.current;
+      const updated = prev.map((f) => {
+        const fKeys = computeFrameLayerTrackKeys(f.layers);
+        return {
+          ...f,
+          layers: f.layers.map((l, lIdx) =>
+            fKeys[lIdx] === trackKey ? { ...l, ...patch } : l
+          ),
+        };
+      });
+      framesRef.current = updated;
+      setFrames(updated);
+      pushHistorySnapshot({ frames: updated });
+    },
+    [handleUpdateLayerMeta, pushHistorySnapshot]
+  );
+
+  const handleAssignTrackToGroup = useCallback(
+    (trackKey: string, _frameLayerIndex: number, groupId: string | null) => {
+      const prev = framesRef.current;
+      const updated = prev.map((f) => {
+        const fKeys = computeFrameLayerTrackKeys(f.layers);
+        return {
+          ...f,
+          layers: f.layers.map((l, lIdx) =>
+            fKeys[lIdx] === trackKey ? { ...l, groupId } : l
+          ),
+        };
+      });
+      framesRef.current = updated;
+      setFrames(updated);
+      pushHistorySnapshot({ frames: updated });
+    },
+    [pushHistorySnapshot]
+  );
+
+  const handleDeleteTrack = useCallback(
+    (trackKey: string, _frameLayerIndex: number) => {
+      const prev = framesRef.current;
+      const updated = prev.map((f) => {
+        if (f.layers.length <= 1) return f;
+        const fKeys = computeFrameLayerTrackKeys(f.layers);
+        const remaining = f.layers.filter((_, lIdx) => fKeys[lIdx] !== trackKey);
+        return remaining.length > 0 ? { ...f, layers: remaining } : f;
+      });
+      const curFr = updated[currentFrameIndexRef.current] || updated[0];
+      const nextIdx = Math.max(
+        0,
+        Math.min(currentLayerIndexRef.current, (curFr?.layers.length || 1) - 1)
+      );
+      const nextKeys = curFr ? computeFrameLayerTrackKeys(curFr.layers) : [];
+      const nextTrack = nextKeys[nextIdx] || null;
+      framesRef.current = updated;
+      currentLayerIndexRef.current = nextIdx;
+      activeTrackKeyRef.current = nextTrack;
+      setFrames(updated);
+      setCurrentLayerIndex(nextIdx);
+      setSelectedLayerIndices([nextIdx]);
+      setActiveTrackKey(nextTrack);
+      pushHistorySnapshot({ frames: updated, currentLayerIndex: nextIdx });
+    },
+    [pushHistorySnapshot]
+  );
+
+  const handleClearTrackInCurrentFrame = useCallback(
+    (trackKey: string) => {
+      const prev = framesRef.current;
+      const curIdx = currentFrameIndexRef.current;
+      const curFr = prev[curIdx];
+      if (!curFr) return;
+      const fKeys = computeFrameLayerTrackKeys(curFr.layers);
+      const targetIdx = fKeys.indexOf(trackKey);
+      if (targetIdx < 0) return;
+
+      const updated = prev.map((f, fIdx) => {
+        if (fIdx !== curIdx) return f;
+        return {
+          ...f,
+          layers: f.layers.map((l, lIdx) =>
+            lIdx === targetIdx
+              ? {
+                  ...l,
+                  pixels: createEmptyGrid(canvasWidthRef.current, canvasHeightRef.current),
+                  vectorPaths: [],
+                  parametricShapes: [],
+                }
+              : l
+          ),
+        };
+      });
+      framesRef.current = updated;
+      setFrames(updated);
+      pushHistorySnapshot({ frames: updated });
+    },
+    [pushHistorySnapshot]
+  );
 
   // Layer / Movement Groups & Nested Folders Handlers
   const handleCreateLayerGroup = (
@@ -4660,13 +5055,19 @@ export default function App() {
     const isParentRef =
       typeof categoryOrParentId === 'string' &&
       layerGroups.some((g) => g.id === categoryOrParentId);
+    const movementCategories = new Set(['Idle', 'Movement', 'Normal', 'Reaction', 'Special', 'VFX']);
+    const isMovementGroup =
+      typeof categoryOrParentId === 'string' &&
+      !isParentRef &&
+      movementCategories.has(categoryOrParentId);
+
     const newGroup: LayerGroup = {
       id: `group-${Date.now()}`,
       name,
       color,
-      category: !isParentRef && categoryOrParentId ? (categoryOrParentId as LayerGroup['category']) : 'Normal',
+      category: isMovementGroup ? (categoryOrParentId as LayerGroup['category']) : 'Normal',
       parentGroupId: isParentRef ? categoryOrParentId : null,
-      frameIndices: [currentFrameIndex],
+      frameIndices: isMovementGroup ? [currentFrameIndex] : [],
       collapsed: false,
       visible: true,
       locked: false,
@@ -4674,13 +5075,15 @@ export default function App() {
       fps: animationFps,
     };
     const nextGroups = [...layerGroupsRef.current, newGroup];
-    const updatedFrames = framesRef.current.map((f, idx) =>
-      idx === currentFrameIndex ? { ...f, groupId: newGroup.id } : f
-    );
+    const updatedFrames = isMovementGroup
+      ? framesRef.current.map((f, idx) =>
+          idx === currentFrameIndex ? { ...f, groupId: newGroup.id } : f
+        )
+      : framesRef.current;
     layerGroupsRef.current = nextGroups;
     framesRef.current = updatedFrames;
     setLayerGroups(nextGroups);
-    setFrames(updatedFrames);
+    if (isMovementGroup) setFrames(updatedFrames);
     pushHistorySnapshot({ frames: updatedFrames, layerGroups: nextGroups });
   };
 
@@ -9131,7 +9534,7 @@ export default function App() {
   );
 
   const createFreshBlankDocumentSnapshot = useCallback(
-    (name: string = 'Nuevo Proyecto', w: number = 48, h: number = 48): OpenDocumentSnapshot => ({
+    (name: string = 'Nuevo Proyecto', w: number = 64, h: number = 64): OpenDocumentSnapshot => ({
       name,
       width: w,
       height: h,
@@ -9184,7 +9587,7 @@ export default function App() {
 
       if (docs.length <= 1) {
         // Closing the final open tab resets workspace cleanly to a fresh blank document tab
-        const blankSnap = createFreshBlankDocumentSnapshot('Proyecto 1', 48, 48);
+        const blankSnap = createFreshBlankDocumentSnapshot('Proyecto 1', 64, 64);
         const freshId = `doc-blank-${Date.now()}`;
         setOpenDocuments([
           {
@@ -9426,7 +9829,7 @@ export default function App() {
         return;
       }
 
-      const blankSnap = createFreshBlankDocumentSnapshot('Proyecto 1', 48, 48);
+      const blankSnap = createFreshBlankDocumentSnapshot('Proyecto 1', 64, 64);
       const freshId = `doc-blank-${Date.now()}`;
       setOpenDocuments([
         {
@@ -9555,23 +9958,60 @@ export default function App() {
   const handleToggleMaximizeWindow = useCallback(() => {
     const bridge = getDesktopBridge();
     if (bridge?.windowToggleMaximize) {
-      void Promise.resolve(bridge.windowToggleMaximize()).then((res) => {
-        if (typeof res?.maximized === 'boolean') {
-          setIsWindowMaximized(res.maximized);
-        }
-      });
+      void Promise.resolve(bridge.windowToggleMaximize())
+        .then((res) => {
+          if (typeof res?.maximized === 'boolean') {
+            setIsWindowMaximized(res.maximized);
+          }
+        })
+        .catch(() => {
+          // Keep current state if native maximize failed
+        });
       return;
     }
-    if (!document.fullscreenElement) {
-      document.documentElement
-        .requestFullscreen?.()
-        .then(() => setIsWindowMaximized(true))
-        .catch(() => setIsWindowMaximized((v) => !v));
+
+    const doc = document as Document & {
+      webkitFullscreenElement?: Element | null;
+      webkitFullscreenEnabled?: boolean;
+      webkitExitFullscreen?: () => Promise<void> | void;
+    };
+    const rootEl = document.documentElement as HTMLElement & {
+      webkitRequestFullscreen?: () => Promise<void> | void;
+    };
+    const currentFullscreen = Boolean(document.fullscreenElement || doc.webkitFullscreenElement);
+
+    if (!currentFullscreen) {
+      const canRequest = Boolean(rootEl.requestFullscreen || rootEl.webkitRequestFullscreen);
+      const allowed = document.fullscreenEnabled ?? doc.webkitFullscreenEnabled ?? canRequest;
+      if (!canRequest || !allowed) {
+        setIsWindowMaximized(false);
+        setImportNotification('El navegador bloqueó pantalla completa en este visor; usa F11 o abre en una pestaña independiente.');
+        setTimeout(() => setImportNotification(null), 3500);
+        return;
+      }
+      const reqPromise = rootEl.requestFullscreen
+        ? rootEl.requestFullscreen()
+        : Promise.resolve(rootEl.webkitRequestFullscreen?.());
+      Promise.resolve(reqPromise)
+        .then(() => {
+          setIsWindowMaximized(true);
+        })
+        .catch(() => {
+          setIsWindowMaximized(Boolean(document.fullscreenElement || doc.webkitFullscreenElement));
+          setImportNotification('No se pudo activar pantalla completa automáticamente; prueba pulsar F11.');
+          setTimeout(() => setImportNotification(null), 3200);
+        });
     } else {
-      document
-        .exitFullscreen?.()
-        .then(() => setIsWindowMaximized(false))
-        .catch(() => setIsWindowMaximized((v) => !v));
+      const exitPromise = document.exitFullscreen
+        ? document.exitFullscreen()
+        : Promise.resolve(doc.webkitExitFullscreen?.());
+      Promise.resolve(exitPromise)
+        .then(() => {
+          setIsWindowMaximized(false);
+        })
+        .catch(() => {
+          setIsWindowMaximized(Boolean(document.fullscreenElement || doc.webkitFullscreenElement));
+        });
     }
   }, []);
 
@@ -9585,7 +10025,16 @@ export default function App() {
     let unsubMax: (() => void) | undefined;
     if (bridge?.isWindowMaximized) {
       void Promise.resolve(bridge.isWindowMaximized()).then((res) => {
-        if (typeof res?.maximized === 'boolean') setIsWindowMaximized(res.maximized);
+        if (typeof res?.maximized === 'boolean') {
+          setIsWindowMaximized(res.maximized);
+          if (!res.maximized && loadStartupPreferences().startMaximized && bridge.windowToggleMaximize) {
+            void Promise.resolve(bridge.windowToggleMaximize()).then((maxRes) => {
+              if (typeof maxRes?.maximized === 'boolean') {
+                setIsWindowMaximized(maxRes.maximized);
+              }
+            });
+          }
+        }
       });
     }
     if (bridge?.onWindowMaximizeChange) {
@@ -9593,13 +10042,16 @@ export default function App() {
     }
     const onFullscreenChange = () => {
       if (!bridge?.isNativeDesktop) {
-        setIsWindowMaximized(Boolean(document.fullscreenElement));
+        const doc = document as Document & { webkitFullscreenElement?: Element | null };
+        setIsWindowMaximized(Boolean(document.fullscreenElement || doc.webkitFullscreenElement));
       }
     };
     document.addEventListener('fullscreenchange', onFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', onFullscreenChange);
     return () => {
       if (typeof unsubMax === 'function') unsubMax();
       document.removeEventListener('fullscreenchange', onFullscreenChange);
+      document.removeEventListener('webkitfullscreenchange', onFullscreenChange);
     };
   }, []);
 
@@ -10776,6 +11228,9 @@ export default function App() {
         case 'view.grid':
           setShowGrid((v) => !v);
           break;
+        case 'view.toggle_fullscreen':
+          handleToggleMaximizeWindow();
+          break;
         case 'view.zoom_in':
           triggerZoomAction('in');
           break;
@@ -10945,6 +11400,15 @@ export default function App() {
         }
         return;
       }
+      if (e.key === 'F11') {
+        const bridge = getDesktopBridge();
+        if (bridge?.isNativeDesktop || document.fullscreenEnabled) {
+          e.preventDefault();
+          e.stopPropagation();
+          handleToggleMaximizeWindow();
+        }
+        return;
+      }
       if (combatTestActive) return;
       if (['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement).tagName)) {
         return;
@@ -11094,6 +11558,7 @@ export default function App() {
     handleRequestCloseAllDocuments,
     handleApplyCanvasEdit,
     handleCancelCanvasEdit,
+    handleToggleMaximizeWindow,
   ]);
 
   const currentProjectState: ProjectState = {
@@ -11307,9 +11772,13 @@ export default function App() {
       onOpenSpriteSheetModal={() => setSpriteSheetModalOpen(true)}
       layers={currentFrame.layers}
       currentLayerIndex={currentLayerIndex}
-      onSelectLayer={setCurrentLayerIndex}
+      onSelectLayer={handleSelectLayerWithTrack}
       onToggleLayerVisibility={handleToggleLayerVisibility}
       onToggleLayerLock={handleToggleLayerLock}
+      activeTrackKey={activeTrackKey}
+      onSelectLayerTrack={handleSelectLayerTrack}
+      onToggleTrackVisibility={handleToggleTrackVisibility}
+      onToggleTrackLock={handleToggleTrackLock}
       sectionOrder={workspaceLayout.timelineSectionOrder}
       timelinePosition={dockZone === 'top' ? 'top' : 'bottom'}
       linkMoveAllFrames={linkMoveAllFrames}
@@ -11499,6 +11968,7 @@ export default function App() {
           handleRequestCloseAllDocuments(Boolean(getDesktopBridge()?.isNativeDesktop))
         }
         dragEmptySpace={workspaceLayout.windowDragZones !== 'topbar_only'}
+        isWindowMaximized={isWindowMaximized}
         onToggleMaximizeWindow={handleToggleMaximizeWindow}
         onRestoreAutosave={handleRestoreAutosave}
         hasAutosave={hasAutosave}
@@ -11548,6 +12018,10 @@ export default function App() {
         onToggleGrid={() => setShowGrid((v) => !v)}
         showHitboxes={showHitboxes}
         onToggleHitboxes={() => setShowHitboxes((v) => !v)}
+        dummyEnabled={dummyOpponent.enabled}
+        onToggleDummy={() =>
+          setDummyOpponent((prev) => ({ ...prev, enabled: !prev.enabled }))
+        }
         showPivot={showPivot}
         onTogglePivot={() => setShowPivot((v) => !v)}
         onionSkinEnabled={onionSkinEnabled}
@@ -11912,9 +12386,17 @@ export default function App() {
         onReplaceColor={handleReplaceColor}
         layers={currentFrame.layers}
         currentLayerIndex={currentLayerIndex}
-        onSelectLayer={setCurrentLayerIndex}
+        onSelectLayer={handleSelectLayerWithTrack}
         onToggleLayerVisibility={handleToggleLayerVisibility}
         onToggleLayerLock={handleToggleLayerLock}
+        activeTrackKey={activeTrackKey}
+        onSelectLayerTrack={handleSelectLayerTrack}
+        onToggleTrackVisibility={handleToggleTrackVisibility}
+        onToggleTrackLock={handleToggleTrackLock}
+        onUpdateTrackMeta={handleUpdateTrackMeta}
+        onDeleteTrack={handleDeleteTrack}
+        onAssignTrackToGroup={handleAssignTrackToGroup}
+        onClearTrackInCurrentFrame={handleClearTrackInCurrentFrame}
         onAddLayer={handleAddLayer}
         onDeleteLayer={handleDeleteLayer}
         onChangeLayerOpacity={(idx, op) => {
@@ -13001,10 +13483,10 @@ export default function App() {
         })()}
       </StudioTopLayerPortal>
 
-      {/* Web Preview Window Minimize Restore Bar (renders cleanly when minimized in browser) */}
-      {isWindowMinimized && (
+      {/* Web Preview Window Minimize Restore Bar (renders cleanly above HomeScreen & Workspace) */}
+      <StudioTopLayerPortal isOpen={isWindowMinimized} tier="critical">
         <div
-          className="fixed inset-0 z-[200000] flex items-end justify-center p-6 pointer-events-auto"
+          className="fixed inset-0 flex items-end justify-center p-6 pointer-events-auto"
           style={{ backgroundColor: 'rgba(10, 9, 18, 0.94)' }}
         >
           <div
@@ -13055,7 +13537,7 @@ export default function App() {
             </div>
           </div>
         </div>
-      )}
+      </StudioTopLayerPortal>
 
       {/* Canvas Size Modal */}
       <StudioTopLayerPortal isOpen={canvasSizeModalOpen} tier="modal" autoFocus ariaRole="dialog">
@@ -13323,6 +13805,17 @@ export default function App() {
             shortcut: 'Ctrl+1',
             keywords: 'zoom 100 real escala',
             onExecute: () => triggerZoomAction('percent', 100),
+          },
+          {
+            id: 'view.toggle_fullscreen_action',
+            title: isWindowMaximized
+              ? 'Ventana: Restaurar Tamaño Normal'
+              : 'Ventana: Maximizar / Pantalla Completa',
+            subtitle: 'Inicio / Barra Superior / Ver > Maximizar',
+            category: 'Interfaz',
+            shortcut: 'F11',
+            keywords: 'maximizar pantalla completa fullscreen restaurar ventana',
+            onExecute: handleToggleMaximizeWindow,
           },
           {
             id: 'prefs.selection_display_open',
@@ -13971,6 +14464,10 @@ export default function App() {
           onOpenToolsGuide={() => setToolGuideModalOpen(true)}
           onOpenShortcutsModal={() => setShortcutsModalOpen(true)}
           onOpenInstallerGuide={() => setLocalInstallerModalOpen(true)}
+          isWindowMaximized={isWindowMaximized}
+          onMinimizeWindow={handleMinimizeWindow}
+          onToggleMaximizeWindow={handleToggleMaximizeWindow}
+          onCloseApplicationWindow={handleCloseApplicationWindow}
         />
       </StudioTopLayerPortal>
 

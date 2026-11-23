@@ -80,6 +80,10 @@ function buildContextualDirective(
     poseFidelity?: string;
     referenceFidelity?: string;
     customStyleDescription?: string;
+    referenceMode?: 'strict' | 'free';
+    preserveConstraints?: Record<string, boolean>;
+    phase1Analysis?: any;
+    referenceProject?: any;
   }
 ): string {
   const effectiveProfileKey =
@@ -97,9 +101,23 @@ function buildContextualDirective(
     ? `Active Project Visual Analysis -> Style: ${contextAnalysis.visualStyle} (${contextAnalysis.era || 'Arcade'}), Detected Profile: ${contextAnalysis.detectedProfileId || effectiveProfileKey}, Resolution: ${contextAnalysis.resolution}, Colors Used: ${contextAnalysis.uniqueColors}, Outline: ${contextAnalysis.lineThickness ?? 1}px, Shading: ${contextAnalysis.shadingType || 'cel'}, Light Direction: ${contextAnalysis.lightDirection || 'top-left'}, Anti-Alias: ${contextAnalysis.antiAliasLevel || 'none'}, Detail Level: ${contextAnalysis.detailLevel || 'medium'}, Animation: ${contextAnalysis.animationType}, Palette: ${(contextAnalysis.activePalette || palette).slice(0, 14).join(', ')}.`
     : `Project Palette: ${palette.slice(0, 14).join(', ')}.`;
 
+  const phase1Note = options?.phase1Analysis
+    ? ` PHASE 1 VERIFIED ANALYSIS -> Detected Style: ${options.phase1Analysis.detectedStyle}, Palette Colors: ${options.phase1Analysis.paletteCount}, Detected Pose: ${options.phase1Analysis.detectedPose}, Perspective: ${options.phase1Analysis.perspective}, Outline: ${options.phase1Analysis.outlinePx}px, Anatomy: ${options.phase1Analysis.anatomyNotes}.`
+    : '';
+
   const trainedNote = options?.trainedProfile
     ? ` TRAINED PROJECT BASELINE (${options.trainedProfile.summary}): Enforce master project palette [${(options.trainedProfile.masterPalette || []).slice(0, 12).join(', ')}], outline ${options.trainedProfile.lineThickness}px, light ${options.trainedProfile.lightDirection}, shading ${options.trainedProfile.shadingType}.`
     : '';
+
+  const preserveEntries = options?.preserveConstraints
+    ? Object.entries(options.preserveConstraints)
+        .filter(([, v]) => Boolean(v))
+        .map(([k]) => k)
+    : [];
+  const preserveRule =
+    preserveEntries.length > 0
+      ? ` MANDATORY PRESERVATION LOCKS: Strictly preserve [${preserveEntries.join(', ')}] across the generated pixels.`
+      : '';
 
   const coherence = options?.coherenceLevel || 'high';
   const coherenceRule =
@@ -109,13 +127,18 @@ function buildContextualDirective(
       ? 'COHERENCE: HIGH — Keep clean contiguous silhouettes, zero accidental 1px holes or isolated stray noise pixels, and crisp solid hex colors.'
       : 'COHERENCE: BALANCED — Maintain clean pixel clusters and readable fighting-game silhouettes without stray single-pixel noise.';
 
-  const fidelity = options?.referenceFidelity || options?.poseFidelity;
+  const refMode = options?.referenceMode || 'strict';
+  const fidelity = options?.referenceFidelity || options?.poseFidelity || 'high';
   const fidelityRule =
-    fidelity === 'exact'
-      ? ' FIDELITY: EXACT — Match silhouette, proportions, posture, hair, clothing, accessories, and limb geometry strictly as one holistic connected figure; NEVER cut or fragment limbs.'
+    refMode === 'free'
+      ? ' REFERENCE MODE: FREE INSPIRATION — Draw creative inspiration from the reference style, colors, and energy without copying its exact silhouette or pose pixel-for-pixel.'
+      : fidelity === 'exact'
+      ? ' REFERENCE MODE: STRICT (EXACT) — Strictly imitate the reference pose, keep exact body proportions and composition, preserve silhouette, hair, outfit, and limb continuity as ONE connected figure; NEVER cut or fragment limbs.'
       : fidelity === 'high'
-      ? ' FIDELITY: HIGH — Interpret the entire character coherently preserving hair, outfit, accessories, proportions, and intact body continuity.'
-      : '';
+      ? ' REFERENCE MODE: STRICT (HIGH) — Interpret the entire character coherently preserving pose, proportions, outfit, accessories, and intact body continuity.'
+      : fidelity === 'medium'
+      ? ' REFERENCE MODE: STRICT (MEDIUM) — Follow core reference stance and proportions while allowing minor dynamic arcade polish.'
+      : ' REFERENCE MODE: STRICT (LOW) — Loosely follow reference posture and framing cues.';
 
   let modeDirective = '';
   if (styleMode === 'adapt' || styleMode === 'custom') {
@@ -129,7 +152,11 @@ function buildContextualDirective(
     modeDirective = `MODE: KEEP CURRENT PROJECT STYLE strictly. Match existing palette, outline thickness, shading, and light direction.`;
   }
 
-  return `${ctxSummary}${trainedNote} ${modeDirective} ${coherenceRule}${fidelityRule}`;
+  const refProjectNote = options?.referenceProject
+    ? ` ${options.referenceProject.promptDirective || `GLOBAL REFERENCE PROJECT: ${options.referenceProject.name} (Sprites: ${options.referenceProject.spriteTraits}; FX: ${options.referenceProject.fxTraits}; HUD: ${options.referenceProject.hudTraits}; Stage: ${options.referenceProject.stageTraits}).`}`
+    : '';
+
+  return `${ctxSummary}${phase1Note}${trainedNote}${refProjectNote} ${modeDirective} ${coherenceRule}${fidelityRule}${preserveRule}`;
 }
 
 function appendReferenceGuideImages(parts: any[], referenceImagesBase64?: unknown) {
@@ -143,6 +170,69 @@ function appendReferenceGuideImages(parts: any[], referenceImagesBase64?: unknow
     }
   }
 }
+
+// API: Phase 1 Context & Reference Visual Analyzer (Two-Phase Generative AI Flow)
+app.post('/api/ai/analyze-context', async (req, res) => {
+  try {
+    const {
+      currentFrameBase64,
+      referenceImagesBase64 = [],
+      projectContext,
+      targetSection = 'personajes',
+      prompt = '',
+    } = req.body;
+
+    if (!ai) {
+      return res.status(503).json({
+        error: 'GEMINI_API_KEY not configured on server.',
+        fallback: true,
+      });
+    }
+
+    const parts: any[] = [];
+    if (typeof currentFrameBase64 === 'string') {
+      const match = currentFrameBase64.match(/^data:(image\/[a-zA-Z0-9+.-]+);base64,(.+)$/);
+      if (match) parts.push({ inlineData: { mimeType: match[1], data: match[2] } });
+    }
+    appendReferenceGuideImages(parts, referenceImagesBase64);
+
+    const systemInstruction = `You are a technical pixel-art director performing Phase 1 Pre-Generation Analysis for a 2D Fighting Game studio.
+Inspect the attached canvas/reference images and project telemetry carefully BEFORE generation happens.
+Output ONLY valid JSON:
+{
+  "detectedStyle": string,
+  "profileId": "nes" | "gameboy" | "snes" | "sega_genesis" | "cps1" | "cps2" | "snk_neogeo" | "kof" | "garou" | "sf_alpha" | "darkstalkers" | "metal_slug" | "guilty_gear" | "blazblue" | "skullgirls" | "pixel_fantasy" | "pixel_scifi" | "pixel_rpg" | "custom",
+  "paletteCount": number,
+  "detectedPose": string,
+  "perspective": "Lateral 2D" | "3/4" | "Frontal" | "Cenital / Mixta",
+  "outlinePx": number,
+  "shadingType": "flat" | "cel" | "gradient_dither",
+  "lightDirection": "top-left" | "top-right" | "top" | "front" | "rim",
+  "anatomyNotes": string
+}
+Rules:
+- Be concise and concrete in Spanish for detectedPose and anatomyNotes (e.g., "Patada frontal extendida", "Guardia media derecha", "Anatomía atlética compacta con contorno limpio").`;
+
+    parts.push({
+      text: `Analyze context for section "${targetSection}". Intent: "${prompt}". Local metrics: ${JSON.stringify(projectContext || {})}`,
+    });
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-4-hydrogen',
+      contents: parts,
+      config: {
+        systemInstruction,
+        responseMimeType: 'application/json',
+      },
+    });
+
+    const parsed = JSON.parse(response.text || '{}');
+    return res.json(parsed);
+  } catch (error: any) {
+    console.error('Error in Phase 1 analyze-context:', error);
+    return res.status(500).json({ error: error.message || 'Failed Phase 1 visual analysis' });
+  }
+});
 
 // API: AI Fighting Game VFX Generator & Optional FX Lab Assistant
 app.post('/api/ai/vfx-generate', async (req, res) => {
@@ -174,6 +264,10 @@ app.post('/api/ai/vfx-generate', async (req, res) => {
       animated = true,
       assistAction = 'generate',
       sourcePixels = [],
+      referenceMode = 'strict',
+      preserveConstraints,
+      phase1Analysis,
+      referenceProject,
     } = req.body;
 
     if (!ai) {
@@ -191,7 +285,7 @@ app.post('/api/ai/vfx-generate', async (req, res) => {
       blendRatio,
       contextAnalysis,
       palette,
-      { trainedProfile, coherenceLevel }
+      { trainedProfile, coherenceLevel, referenceMode, preserveConstraints, phase1Analysis, referenceProject }
     );
 
     const assistDirectiveMap: Record<string, string> = {
@@ -466,6 +560,10 @@ app.post('/api/ai/tween-frame', async (req, res) => {
       contextAnalysis,
       trainedProfile,
       coherenceLevel = 'high',
+      referenceMode = 'strict',
+      preserveConstraints,
+      phase1Analysis,
+      referenceProject,
     } = req.body;
 
     if (!ai) {
@@ -482,7 +580,7 @@ app.post('/api/ai/tween-frame', async (req, res) => {
       0.5,
       contextAnalysis,
       palette,
-      { trainedProfile, coherenceLevel, customStyleDescription }
+      { trainedProfile, coherenceLevel, customStyleDescription, referenceMode, preserveConstraints, phase1Analysis, referenceProject }
     );
 
     const parts: any[] = [];
@@ -554,6 +652,10 @@ app.post('/api/ai/character-generate', async (req, res) => {
       trainedProfile,
       coherenceLevel = 'high',
       referenceFidelity = 'high',
+      referenceMode = 'strict',
+      preserveConstraints,
+      phase1Analysis,
+      referenceProject,
       preserveFlags = {
         silhouette: true,
         proportions: true,
@@ -582,7 +684,7 @@ app.post('/api/ai/character-generate', async (req, res) => {
       blendRatio,
       contextAnalysis,
       palette,
-      { trainedProfile, coherenceLevel, referenceFidelity, customStyleDescription }
+      { trainedProfile, coherenceLevel, referenceFidelity, customStyleDescription, referenceMode, preserveConstraints, phase1Analysis, referenceProject }
     );
 
     const preserveList = Object.entries(preserveFlags)
@@ -592,11 +694,12 @@ app.post('/api/ai/character-generate', async (req, res) => {
 
     const modeDirectives: Record<string, string> = {
       create: 'CHARACTER CREATION: Design a complete original fighting-game pixel-art character matching the target style and proportions.',
-      variation: 'CHARACTER VARIATION: Generate an expressive costume/stance variation while respecting preserved character identity traits.',
+      variation: 'CHARACTER REDESIGN / VARIATION: Generate an expressive costume/stance redesign while respecting preserved character identity traits.',
       recolor: 'CHARACTER RECOLOR / 2P PALETTE: Keep linework & shading intact while remapping hue ramps harmonically to target palette.',
       outfit: 'OUTFIT CHANGE: Change clothing/armor cleanly while keeping face, hair, anatomy, and pose completely intact.',
-      anatomy: 'ANATOMY ADJUSTMENT: Refine muscularity, height/build, or fighting posture cohesively as one intact character.',
+      anatomy: 'ADAPT POSE / ANATOMY: Adjust muscularity, height/build, or fighting pose cohesively as one intact character.',
       reference_adapt: 'REFERENCE ADAPTATION: Faithfully adapt the attached reference character into crisp pixel art honoring silhouette, hair, outfit, accessories, and posture.',
+      clean_sprite: 'CLEAN & POLISH SPRITE: Preserve exact character design and pose, remove stray 1px orphan noise, fill accidental holes, unify outline thickness, and clamp cleanly to target palette.',
     };
 
     const systemInstruction = `You are a lead pixel-art character designer for 2D fighting games (Street Fighter, KOF, Garou, Skullgirls, Guilty Gear).
@@ -649,6 +752,11 @@ app.post('/api/ai/animation-generate', async (req, res) => {
       contextAnalysis,
       trainedProfile,
       coherenceLevel = 'high',
+      cyclePreset = '',
+      referenceMode = 'strict',
+      preserveConstraints,
+      phase1Analysis,
+      referenceProject,
     } = req.body;
 
     if (!ai) {
@@ -669,13 +777,13 @@ app.post('/api/ai/animation-generate', async (req, res) => {
       0.5,
       contextAnalysis,
       palette,
-      { trainedProfile, coherenceLevel, customStyleDescription }
+      { trainedProfile, coherenceLevel, customStyleDescription, referenceMode, preserveConstraints, phase1Analysis, referenceProject }
     );
 
     const animModeDesc: Record<string, string> = {
       generate: 'GENERATE FULL ANIMATION: Create anticipation, active strike/action, follow-through, and recovery frames.',
       fix: 'FIX & POLISH ANIMATION: Stabilize silhouette volume, fix jittery pixels, smooth arcs, and preserve character consistency.',
-      cycle: 'SEAMLESS LOOP CYCLE: Ensure final frame flows smoothly back into frame 1 (idle breathing, walk, run, aura loop).',
+      cycle: `SEAMLESS LOOP CYCLE${cyclePreset ? ` (${cyclePreset})` : ''}: Ensure final frame flows smoothly back into frame 1 (Walk Cycle, Run Cycle, Jump, Attack, or Idle).`,
       transition: 'ACTION TRANSITION: Bridge current stance smoothly into target stance with clean weight transfer.',
     };
 
@@ -879,6 +987,10 @@ app.post('/api/ai/stage-generate', async (req, res) => {
       customStyleDescription = '',
       palette = [],
       referenceImagesBase64 = [],
+      referenceMode = 'strict',
+      preserveConstraints,
+      phase1Analysis,
+      referenceProject,
     } = req.body;
 
     if (!ai) {
@@ -894,7 +1006,7 @@ app.post('/api/ai/stage-generate', async (req, res) => {
       blendRatio,
       contextAnalysis,
       palette,
-      { trainedProfile, coherenceLevel, customStyleDescription }
+      { trainedProfile, coherenceLevel, customStyleDescription, referenceMode, preserveConstraints, phase1Analysis, referenceProject }
     );
 
     const systemInstruction = `You are a master retro fighting game background, environment & tileset pixel artist.
@@ -902,7 +1014,7 @@ Generate a cohesive pixel-art environment asset (Category: ${stageCategory}) for
 NEVER draw fighter characters or UI bars here — produce ONLY world scenery/environment pixels.
 ${contextualDirective}
 ${biome ? `Stage Category / Biome: ${biome}.` : ''}
-Atmosphere/Mood: ${mood}. Layer Mode: ${layerMode}. Category Focus: ${stageCategory} (fondos/skyline | escenarios/arena | decoracion/props | parallax band | seamless tileset | world element).
+Atmosphere/Mood: ${mood}. Layer Mode: ${layerMode}. Category Focus: ${stageCategory} (fondos/skyline | escenarios/arena | decoracion/props | parallax band | seamless tileset | terreno/ground slabs | world element).
 If reference images are provided, analyze their palette, lighting direction, outline thickness, and visual era before generating.
 Output ONLY a valid JSON object:
 {
@@ -962,6 +1074,10 @@ app.post('/api/ai/hud-generate', async (req, res) => {
       customStyleDescription = '',
       palette = [],
       referenceImagesBase64 = [],
+      referenceMode = 'strict',
+      preserveConstraints,
+      phase1Analysis,
+      referenceProject,
     } = req.body;
 
     if (!ai) {
@@ -978,14 +1094,14 @@ app.post('/api/ai/hud-generate', async (req, res) => {
       blendRatio,
       contextAnalysis,
       palette,
-      { trainedProfile, coherenceLevel, customStyleDescription }
+      { trainedProfile, coherenceLevel, customStyleDescription, referenceMode, preserveConstraints, phase1Analysis, referenceProject }
     );
 
     const systemInstruction = `You are an expert arcade fighting game UI/HUD pixel designer.
 Generate a retro pixel-art HUD / UI asset (Category: ${elementCategory || hudCategory}) on a transparent ${width}x${height} grid tailored authentically to the target visual style (${styleProfile || activeTheme}).
 NEVER generate characters or stage backgrounds — ONLY crisp UI/HUD pixel components.
 ${contextualDirective}
-UI Element Category: ${elementCategory || hudCategory} (barras_vida | retratos | interfaces | menus | marcadores).
+UI Element Category: ${elementCategory || hudCategory} (barras_vida | retratos | temporizadores | interfaces | menus | marcadores).
 Include elements: ${Array.isArray(includeElements) ? includeElements.join(', ') : 'healthbars, timer, super'}.
 HUD Theme: ${activeTheme}.
 Output ONLY a valid JSON object:
@@ -1090,6 +1206,14 @@ app.post('/api/ai/pose-retarget', async (req, res) => {
       coherenceLevel = 'high',
       contextAnalysis,
       trainedProfile,
+      styleMode = 'keep',
+      styleProfile = 'kof',
+      referenceMode = 'strict',
+      preserveConstraints,
+      phase1Analysis,
+      referenceProject,
+      referenceImagesBase64 = [],
+      prompt = '',
     } = req.body;
 
     if (!ai) {
@@ -1100,16 +1224,18 @@ app.post('/api/ai/pose-retarget', async (req, res) => {
     }
 
     const contextualDirective = buildContextualDirective(
-      'keep',
-      contextAnalysis?.detectedProfileId || 'kof',
+      styleMode,
+      styleProfile || contextAnalysis?.detectedProfileId || 'kof',
       0.5,
       contextAnalysis,
       palette,
-      { trainedProfile, coherenceLevel, poseFidelity }
+      { trainedProfile, coherenceLevel, poseFidelity, referenceMode, preserveConstraints, phase1Analysis, referenceProject }
     );
 
     const fidelityNote =
-      poseFidelity === 'exact'
+      referenceMode === 'free'
+        ? 'FREE INSPIRATION: Adapt creatively toward the pose energy while keeping coherent fighter identity.'
+        : poseFidelity === 'exact'
         ? 'EXACT FIDELITY: Match the target joint coordinates, body lean, perspective, limb angles, and silhouette geometry strictly.'
         : poseFidelity === 'high'
         ? 'HIGH FIDELITY: Align all limbs, torso tilt, head gaze, and stance accurately to the target skeleton.'
@@ -1119,6 +1245,7 @@ app.post('/api/ai/pose-retarget', async (req, res) => {
 Look at the attached character sprite image and adapt the ENTIRE character cohesively into the requested target pose ("${poseName}", Rig: ${rigType}, Adaptation Intensity: ${intensity}%).
 ${contextualDirective}
 ${fidelityNote}
+${prompt ? `Additional Pose Guidance: ${prompt}` : ''}
 Target Joint Coordinates (normalized 0..1): ${jointSummary}
 CRITICAL ANTI-FRAGMENTATION & PIXEL INTEGRITY RULES:
 - Reinterpret the character as ONE continuous, intact body: NEVER split, chop, or leave floating disconnected limbs, head, or torso pieces.
@@ -1142,8 +1269,9 @@ CRITICAL ANTI-FRAGMENTATION & PIXEL INTEGRITY RULES:
         parts.push({ inlineData: { mimeType: match[1], data: match[2] } });
       }
     }
+    appendReferenceGuideImages(parts, referenceImagesBase64);
     parts.push({
-      text: `Holistically retarget the ENTIRE pixel character to pose "${poseName}" (${rigType}) with ${poseFidelity} pose fidelity at ${intensity}% adaptation on a ${width}x${height} grid without splitting any body parts.`,
+      text: `Holistically retarget the ENTIRE pixel character to pose "${poseName}" (${rigType}) with ${poseFidelity} pose fidelity (${referenceMode} mode) at ${intensity}% adaptation on a ${width}x${height} grid without splitting any body parts.`,
     });
 
     const response = await ai.models.generateContent({
@@ -1160,6 +1288,79 @@ CRITICAL ANTI-FRAGMENTATION & PIXEL INTEGRITY RULES:
   } catch (error: any) {
     console.error('Error in AI pose retarget:', error);
     return res.status(500).json({ error: error.message || 'Failed to retarget pose with AI' });
+  }
+});
+
+// API: AI Self-Evaluation (Evaluates Sprites, HUD, FX, Animations, and Visual Coherence)
+app.post('/api/ai/self-evaluate', async (req, res) => {
+  try {
+    const {
+      currentFrameBase64,
+      projectContext,
+      telemetryStats,
+      referenceProject,
+      trainedProfile,
+      framesCount = 1,
+    } = req.body;
+
+    if (!ai) {
+      return res.status(503).json({
+        error: 'GEMINI_API_KEY not configured on server.',
+        fallback: true,
+      });
+    }
+
+    const parts: any[] = [];
+    if (typeof currentFrameBase64 === 'string') {
+      const m = currentFrameBase64.match(/^data:(image\/[a-zA-Z0-9+.-]+);base64,(.+)$/);
+      if (m) parts.push({ inlineData: { mimeType: m[1], data: m[2] } });
+    }
+
+    const systemInstruction = `You are a Principal Art Director & AI Pipeline Auditor for a 2D Fighting Game Pixel Art studio.
+Perform an honest Self-Evaluation ("Autoevaluación IA") of the project's generated assets and AI workflow across 5 axes:
+1. "sprites" ("Sprites")
+2. "hud" ("HUD")
+3. "fx" ("FX")
+4. "animaciones" ("Animaciones")
+5. "coherencia" ("Coherencia visual")
+
+Output ONLY valid JSON matching this schema:
+{
+  "overallScore": number,
+  "summary": string,
+  "axes": [
+    {
+      "key": "sprites" | "hud" | "fx" | "animaciones" | "coherencia",
+      "label": "Sprites" | "HUD" | "FX" | "Animaciones" | "Coherencia visual",
+      "score": number,
+      "status": "Optimo" | "Mejorable" | "Requiere atencion",
+      "observation": string
+    }
+  ],
+  "improvements": string[]
+}
+Rules:
+- All text MUST be in natural, concise Spanish explaining WHAT can be improved and WHY.
+- Scores 0..100 based realistically on the attached sprite frame, frame count (${framesCount}), project context, telemetry stats, trained profile, and active reference project.`;
+
+    parts.push({
+      text: `Audit Project Context: ${JSON.stringify(projectContext || {})}. Telemetry: ${JSON.stringify(telemetryStats || {})}. Reference Project: ${JSON.stringify(referenceProject || null)}. Trained Profile: ${JSON.stringify(trainedProfile || null)}. Frames Count: ${framesCount}.`,
+    });
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-4-hydrogen',
+      contents: parts,
+      config: {
+        systemInstruction,
+        responseMimeType: 'application/json',
+      },
+    });
+
+    const parsed = JSON.parse(response.text || '{}');
+    return res.json(parsed);
+  } catch (error: any) {
+    console.error('Error in AI self-evaluation:', error);
+    return res.status(500).json({ error: error.message || 'Failed to self-evaluate AI quality' });
   }
 });
 

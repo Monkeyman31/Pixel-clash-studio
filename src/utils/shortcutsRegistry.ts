@@ -86,6 +86,7 @@ export const DEFAULT_SHORTCUT_BINDINGS: ShortcutBinding[] = [
   { id: 'pixel.brush_dec', label: 'Reducir Tamaño Pincel', category: 'Pixel Art', location: 'Pinceles', primary: '[' },
   { id: 'pixel.brush_inc', label: 'Aumentar Tamaño Pincel', category: 'Pixel Art', location: 'Pinceles', primary: ']' },
   { id: 'view.grid', label: 'Mostrar / Ocultar Cuadrícula', category: 'Pixel Art', location: 'Ver > Cuadrícula', primary: "Ctrl+'" },
+  { id: 'view.toggle_fullscreen', label: 'Maximizar Ventana / Pantalla Completa', category: 'General', location: 'Inicio / Barra Superior / Ver > Maximizar', primary: 'F11' },
 
   // Vectores
   { id: 'tool.line', label: 'Línea / Curva Vectorial (Ctrl = Selección Directa)', category: 'Vectores', location: 'Barra Herramientas', primary: 'L' },

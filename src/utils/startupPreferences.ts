@@ -11,6 +11,7 @@ export const DEFAULT_STARTUP_PREFERENCES: StartupPreferences = {
   showSplashAnimation: true,
   showSplashTips: true,
   splashMinDurationMs: 1500,
+  startMaximized: false,
   mascotMode: 'builtin',
   mascotCustomName: undefined,
   mascotSheetCols: 4,

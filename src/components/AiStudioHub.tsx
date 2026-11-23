@@ -1,10 +1,16 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
   Activity,
+  AlertTriangle,
   BookmarkPlus,
   Check,
+  CheckCircle2,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
+  Compass,
+  Eye,
   Film,
   Flame,
   FlaskConical,
@@ -17,8 +23,12 @@ import {
   Pause,
   Play,
   Plus,
+  RefreshCw,
+  ScanSearch,
+  ShieldAlert,
   Sliders,
   Sparkles,
+  Stethoscope,
   Upload,
   User,
   Wand2,
@@ -32,8 +42,14 @@ import {
   AiCustomStyleConfig,
   AiExplanationReport,
   AiExternalProfileId,
+  AiGenerationStatsSnapshot,
   AiHudCategory,
+  AiPhaseOneAnalysis,
   AiPoseFidelityLevel,
+  AiPreserveConstraints,
+  AiReferenceMode,
+  AiReferenceProjectId,
+  AiSelfEvaluationReport,
   AiStageCategory,
   AiWorkspaceSection,
   AssetCategory,
@@ -54,13 +70,17 @@ import {
   StageType,
 } from '../types';
 import { FIGHTING_GAME_PALETTES } from '../constants/palettes';
-import { compositeFrame, createEmptyGrid, frameToCanvas } from '../utils/pixelMath';
+import { compositeFrame, createEmptyGrid } from '../utils/pixelMath';
 import {
   AI_EXTERNAL_PROFILES,
   analyzeProjectContext,
   analyzeReferenceImageDataUrl,
   applyContextualStyleToGrid,
   buildExplainableAiReport,
+  buildPhaseOneAnalysis,
+  buildReferenceProjectProfile,
+  createDefaultAiGenerationStats,
+  generateAiDiagnosticsAndRecommendations,
   generateFallbackAnimationFrames,
   generateFallbackCharacterGrid,
   generateFallbackHudGrid,
@@ -68,7 +88,11 @@ import {
   generateMultiFrameInBetweensLocal,
   getAiStyleProfile,
   gridToPixels,
+  loadAiGenerationStats,
   pixelsToGrid,
+  recordAiGenerationEvent,
+  runLocalAiSelfEvaluation,
+  saveAiGenerationStats,
   trainAiOnCurrentProject,
   validateAndCleanAiPixelGrid,
 } from '../utils/projectContextAi';
@@ -194,16 +218,19 @@ const SECTION_TABS: { id: AiWorkspaceSection; label: string; icon: React.Compone
   { id: 'escenarios', label: 'Escenarios', icon: Monitor },
   { id: 'hud_ui', label: 'HUD/UI', icon: Layout },
   { id: 'adaptacion_estilo', label: 'Estilo', icon: Palette },
+  { id: 'proyecto_referencia', label: 'Ref. Global', icon: Compass },
+  { id: 'diagnostico_ia', label: 'Diagnóstico', icon: Stethoscope },
   { id: 'biblioteca_ia', label: 'Biblioteca', icon: FolderHeart },
   { id: 'configuracion_ia', label: 'Config', icon: Sliders },
 ];
 
 const CHARACTER_TASK_OPTIONS: { id: AiCharacterTaskMode; label: string }[] = [
   { id: 'create', label: 'Crear personaje' },
-  { id: 'variation', label: 'Variación' },
-  { id: 'recolor', label: 'Recolorear' },
-  { id: 'outfit', label: 'Vestimenta' },
-  { id: 'anatomy', label: 'Anatomía' },
+  { id: 'variation', label: 'Rediseñar personaje' },
+  { id: 'recolor', label: 'Recolorear personaje' },
+  { id: 'outfit', label: 'Cambiar vestuario' },
+  { id: 'anatomy', label: 'Adaptar pose' },
+  { id: 'clean_sprite', label: 'Limpiar sprite' },
   { id: 'reference_adapt', label: 'Adaptar Ref.' },
 ];
 
@@ -214,21 +241,40 @@ const ANIMATION_MODE_OPTIONS: { id: AiAnimationTaskMode; label: string }[] = [
   { id: 'transition', label: 'Transición' },
 ];
 
+const ANIMATION_CYCLE_PRESETS: { id: string; label: string; mode: AiAnimationTaskMode; prompt: string; frames: number }[] = [
+  { id: 'idle', label: 'Idle', mode: 'cycle', prompt: 'Ciclo Idle respiración de guardia firme en bucle suave', frames: 4 },
+  { id: 'walk', label: 'Walk Cycle', mode: 'cycle', prompt: 'Walk Cycle caminata lateral de combate paso a paso en bucle', frames: 6 },
+  { id: 'run', label: 'Run Cycle', mode: 'cycle', prompt: 'Run Cycle carrera inclinada hacia adelante con brazos dinámicos', frames: 6 },
+  { id: 'jump', label: 'Jump', mode: 'generate', prompt: 'Salto completo: agachado de impulso, ascenso aéreo, ápice y aterrizaje', frames: 5 },
+  { id: 'attack', label: 'Attack', mode: 'generate', prompt: 'Patada frontal / golpe rápido con anticipación, impacto activo y recuperación', frames: 4 },
+];
+
 const STAGE_CATEGORIES: { id: AiStageCategory; label: string }[] = [
-  { id: 'escenarios', label: 'Escenario' },
-  { id: 'fondos', label: 'Fondo' },
+  { id: 'fondos', label: 'Fondos' },
+  { id: 'tiles', label: 'Tiles' },
   { id: 'decoracion', label: 'Decoración' },
   { id: 'parallax', label: 'Parallax' },
-  { id: 'tiles', label: 'Tiles' },
-  { id: 'mundo', label: 'Mundo / Prop' },
+  { id: 'terreno', label: 'Terreno' },
+  { id: 'escenarios', label: 'Escenario' },
 ];
 
 const HUD_CATEGORIES: { id: AiHudCategory; label: string }[] = [
-  { id: 'barras_vida', label: 'Barras Vida' },
+  { id: 'barras_vida', label: 'Barras de vida' },
   { id: 'retratos', label: 'Retratos' },
-  { id: 'interfaces', label: 'Interfaz' },
+  { id: 'temporizadores', label: 'Temporizadores' },
+  { id: 'interfaces', label: 'Interfaces' },
   { id: 'menus', label: 'Menús' },
   { id: 'marcadores', label: 'Marcadores' },
+];
+
+const GUIDED_CREATE_TARGETS: { id: string; label: string; section: AiWorkspaceSection }[] = [
+  { id: 'fighter', label: 'Fighter', section: 'personajes' },
+  { id: 'pose', label: 'Pose', section: 'poses_dummie' },
+  { id: 'anim', label: 'Animación', section: 'animaciones' },
+  { id: 'inbetween', label: 'Inbetween', section: 'inbetweens' },
+  { id: 'fx', label: 'FX', section: 'fx_lab' },
+  { id: 'stage', label: 'Stage', section: 'escenarios' },
+  { id: 'hud', label: 'HUD', section: 'hud_ui' },
 ];
 
 export const AiStudioHub: React.FC<AiStudioHubProps> = ({
@@ -285,6 +331,19 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
   const [aiBlendRatio, setAiBlendRatio] = useState<number>(0.5);
   const [aiCoherenceLevel, setAiCoherenceLevel] = useState<AiCoherenceLevel>('high');
   const [aiPoseFidelity, setAiPoseFidelity] = useState<AiPoseFidelityLevel>('high');
+  const [referenceMode, setReferenceMode] = useState<AiReferenceMode>('strict');
+  const [preserveConstraints, setPreserveConstraints] = useState<AiPreserveConstraints>({
+    pose: true,
+    colors: true,
+    silhouette: true,
+    style: true,
+    proportions: true,
+    animation: false,
+  });
+  const [globalStyleCoherence, setGlobalStyleCoherence] = useState<boolean>(true);
+  const [phase1Analysis, setPhase1Analysis] = useState<AiPhaseOneAnalysis | null>(null);
+  const [isAnalyzingPhase1, setIsAnalyzingPhase1] = useState<boolean>(false);
+  const [showContextControls, setShowContextControls] = useState<boolean>(true);
   const [customStyle, setCustomStyle] = useState<AiCustomStyleConfig>({
     name: 'Estilo Arcade Propio',
     description: 'Pixel art nítido con contorno 1px tinta oscura y sombras cel de alto contraste',
@@ -297,6 +356,22 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
   const [lastAiExplanation, setLastAiExplanation] = useState<AiExplanationReport | null>(null);
   const [isAiLoading, setIsAiLoading] = useState<boolean>(false);
   const [aiError, setAiError] = useState<string | null>(null);
+
+  // Reference Project, AI Diagnostics, Recommendations & Self-Evaluation
+  const [activeRefProjectId, setActiveRefProjectId] = useState<AiReferenceProjectId | null>(null);
+  const [aiStats, setAiStats] = useState<AiGenerationStatsSnapshot>(() => loadAiGenerationStats());
+  const [diagSubTab, setDiagSubTab] = useState<'diagnostico' | 'recomendaciones' | 'autoevaluacion'>('diagnostico');
+  const [diagRefreshNonce, setDiagRefreshNonce] = useState<number>(0);
+  const [selfEvaluation, setSelfEvaluation] = useState<AiSelfEvaluationReport | null>(null);
+  const [isSelfEvaluating, setIsSelfEvaluating] = useState<boolean>(false);
+
+  // Periodic background diagnostic refresh (every 45s while IA hub is active)
+  useEffect(() => {
+    const t = window.setInterval(() => {
+      setDiagRefreshNonce((n) => n + 1);
+    }, 45000);
+    return () => window.clearInterval(t);
+  }, []);
 
   // Reference image upload
   const [referenceImageBase64, setReferenceImageBase64] = useState<string | null>(null);
@@ -320,8 +395,15 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
   const [charPreviewGrid, setCharPreviewGrid] = useState<(string | null)[][] | null>(null);
   const [charPreviewHitboxes, setCharPreviewHitboxes] = useState<any[] | undefined>(undefined);
 
+  // 2) Poses IA state (Dummie / Imagen / Frame existente)
+  const [poseInputSource, setPoseInputSource] = useState<'dummie' | 'image' | 'frame'>('dummie');
+  const [poseSourceFrameIdx, setPoseSourceFrameIdx] = useState<number>(currentFrameIndex);
+  const [posePrompt, setPosePrompt] = useState<string>('Adaptar personaje completo a pose dinámica manteniendo silueta intacta');
+  const [posePreviewGrid, setPosePreviewGrid] = useState<(string | null)[][] | null>(null);
+
   // 3) Animaciones state
   const [animMode, setAnimMode] = useState<AiAnimationTaskMode>('generate');
+  const [animCyclePreset, setAnimCyclePreset] = useState<string>('attack');
   const [animPrompt, setAnimPrompt] = useState<string>('Patada frontal rápida con anticipación, impacto y recuperación');
   const [animFrameCount, setAnimFrameCount] = useState<number>(4);
   const [animDetail, setAnimDetail] = useState<'low' | 'medium' | 'high' | 'ultra'>('high');
@@ -504,15 +586,55 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
     };
   }, [projectAnalysis, refVisualAnalysis]);
 
+  const activeRefProject = useMemo(() => {
+    if (!activeRefProjectId) return null;
+    return buildReferenceProjectProfile(
+      activeRefProjectId,
+      projectAnalysis,
+      trainedProjectProfile,
+      project?.name || 'Proyecto propio'
+    );
+  }, [activeRefProjectId, projectAnalysis, trainedProjectProfile, project?.name]);
+
+  const diagnosticsReport = useMemo(() => {
+    void diagRefreshNonce;
+    return generateAiDiagnosticsAndRecommendations({
+      stats: aiStats,
+      projectAnalysis,
+      trainedProfile: trainedProjectProfile,
+      referenceProject: activeRefProject,
+      framesCount: frames.length,
+      hasGuideReferences: Boolean(referenceImageBase64 || activeAiGuideRefs.length > 0),
+      poseFidelity: aiPoseFidelity,
+      referenceMode,
+      coherenceLevel: aiCoherenceLevel,
+    });
+  }, [
+    diagRefreshNonce,
+    aiStats,
+    projectAnalysis,
+    trainedProjectProfile,
+    activeRefProject,
+    frames.length,
+    referenceImageBase64,
+    activeAiGuideRefs.length,
+    aiPoseFidelity,
+    referenceMode,
+    aiCoherenceLevel,
+  ]);
+
   const activeReferenceLabel = useMemo(() => {
     const parts: string[] = ['Lienzo actual'];
+    if (activeRefProject) {
+      parts.push(`Ref. Global: ${activeRefProject.name}`);
+    }
     if (trainedProjectProfile) {
       parts.push(`Entrenado (${trainedProjectProfile.spriteLayerCount + trainedProjectProfile.stageLayerCount + trainedProjectProfile.hudLayerCount} capas)`);
     }
     if (referenceImageBase64) parts.push('Imagen guía');
     if (activeAiGuideRefs.length > 0) parts.push(`${activeAiGuideRefs.length} Ref(s)`);
     return parts.join(' + ');
-  }, [trainedProjectProfile, referenceImageBase64, activeAiGuideRefs]);
+  }, [activeRefProject, trainedProjectProfile, referenceImageBase64, activeAiGuideRefs]);
 
   const collectRefImages = () =>
     [...(referenceImageBase64 ? [referenceImageBase64] : []), ...activeAiGuideRefs.map((r) => r.dataUrl)].slice(0, 3);
@@ -553,18 +675,116 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
     e.target.value = '';
   };
 
+  const buildLocalPhase1 = useCallback(
+    (sourceLabelOverride?: string): AiPhaseOneAnalysis =>
+      buildPhaseOneAnalysis({
+        projectAnalysis,
+        refAnalysis: refVisualAnalysis,
+        styleMode: aiContextMode,
+        targetProfileId: effectiveTargetProfileId,
+        customStyleName: customStyle.name,
+        customOutlinePx: customStyle.outlinePx,
+        customPalette: customStyle.palette,
+        sourceLabel: sourceLabelOverride || activeReferenceLabel,
+      }),
+    [
+      projectAnalysis,
+      refVisualAnalysis,
+      aiContextMode,
+      effectiveTargetProfileId,
+      customStyle.name,
+      customStyle.outlinePx,
+      customStyle.palette,
+      activeReferenceLabel,
+    ]
+  );
+
+  const livePhase1Analysis = useMemo(
+    () => phase1Analysis || buildLocalPhase1(),
+    [phase1Analysis, buildLocalPhase1]
+  );
+
+  // Refresh heuristic Phase 1 when core canvas/style/reference changes (unless AI-analyzed explicitly right before)
+  useEffect(() => {
+    setPhase1Analysis(buildLocalPhase1());
+  }, [buildLocalPhase1]);
+
+  const handleRunPhaseOneAnalysis = async () => {
+    setIsAnalyzingPhase1(true);
+    setAiError(null);
+    const localBase = buildLocalPhase1();
+    try {
+      const res = await fetch('/api/ai/analyze-context', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          currentFrameBase64: frameToPngBase64(currentFrame),
+          referenceImagesBase64: collectRefImages(),
+          projectContext: projectAnalysis,
+          targetSection: section,
+          prompt:
+            section === 'personajes'
+              ? charPrompt
+              : section === 'animaciones'
+              ? animPrompt
+              : section === 'escenarios'
+              ? stagePrompt
+              : section === 'hud_ui'
+              ? hudPrompt
+              : section === 'fx_lab'
+              ? vfxPrompt
+              : posePrompt,
+        }),
+      });
+      const data = await res.json();
+      if (data.error || data.fallback) {
+        setPhase1Analysis(localBase);
+      } else {
+        setPhase1Analysis(
+          buildPhaseOneAnalysis({
+            projectAnalysis,
+            refAnalysis: refVisualAnalysis,
+            styleMode: aiContextMode,
+            targetProfileId: effectiveTargetProfileId,
+            customStyleName: customStyle.name,
+            customOutlinePx: customStyle.outlinePx,
+            customPalette: customStyle.palette,
+            sourceLabel: activeReferenceLabel,
+            aiOverride: {
+              detectedStyle: data.detectedStyle || localBase.detectedStyle,
+              paletteCount: typeof data.paletteCount === 'number' ? data.paletteCount : localBase.paletteCount,
+              detectedPose: data.detectedPose || localBase.detectedPose,
+              perspective: data.perspective || localBase.perspective,
+              outlinePx: typeof data.outlinePx === 'number' ? data.outlinePx : localBase.outlinePx,
+              shadingType: data.shadingType || localBase.shadingType,
+              lightDirection: data.lightDirection || localBase.lightDirection,
+              anatomyNotes: data.anatomyNotes || localBase.anatomyNotes,
+            },
+          })
+        );
+      }
+    } catch {
+      setPhase1Analysis(localBase);
+    } finally {
+      setIsAnalyzingPhase1(false);
+    }
+  };
+
   // =========================================================
-  // HANDLER 1: PERSONAJES
+  // HANDLER 1: PERSONAJES (FASE 2 CON ANÁLISIS Y RESTRICCIONES)
   // =========================================================
   const handleRunCharacterAi = async () => {
     setIsAiLoading(true);
     setAiError(null);
     const chosenId = effectiveTargetProfileId;
     const ctxForAi = buildEffectiveContextForAi();
+    const activePhase1 = phase1Analysis || buildLocalPhase1();
     const targetPalette = effectivePalette.length > 0 ? effectivePalette : FIGHTING_GAME_PALETTES[0].colors;
     const customDesc = chosenId === 'custom' ? `${customStyle.name}: ${customStyle.description}` : '';
+    const effectiveFidelity: AiPoseFidelityLevel = referenceMode === 'free' ? 'low' : charFidelity;
 
     try {
+      // Fast local path for 'clean_sprite' if server is offline or direct polish requested
       const res = await fetch('/api/ai/character-generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -583,7 +803,11 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
           contextAnalysis: ctxForAi,
           trainedProfile: trainedProjectProfile,
           coherenceLevel: aiCoherenceLevel,
-          referenceFidelity: charFidelity,
+          referenceFidelity: effectiveFidelity,
+          referenceMode,
+          preserveConstraints,
+          phase1Analysis: activePhase1,
+          referenceProject: activeRefProject,
           preserveFlags: charPreserve,
         }),
       });
@@ -608,17 +832,28 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
       });
       setCharPreviewGrid(cleaned.grid);
       setCharPreviewHitboxes(data.hitboxes);
+      setAiStats((prev) =>
+        recordAiGenerationEvent(prev, {
+          section: 'personajes',
+          usedApi: true,
+          stats: cleaned.stats,
+          lowPoseFidelity: effectiveFidelity === 'low' || referenceMode === 'free',
+        })
+      );
       setLastAiExplanation(
         buildExplainableAiReport({
           contextAnalysis: ctxForAi,
           styleMode: aiContextMode,
           profileId: chosenId,
           coherenceLevel: aiCoherenceLevel,
-          poseFidelity: charFidelity,
+          poseFidelity: effectiveFidelity,
+          referenceMode,
           referenceUsed: activeReferenceLabel,
           validationStats: cleaned.stats,
           customStyleName: customStyle.name,
           customPalette: customStyle.palette,
+          preserveConstraints,
+          phase1Analysis: activePhase1,
         })
       );
     } catch {
@@ -647,20 +882,182 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
       });
       setCharPreviewGrid(cleaned.grid);
       setCharPreviewHitboxes(undefined);
+      setAiStats((prev) =>
+        recordAiGenerationEvent(prev, {
+          section: 'personajes',
+          usedApi: false,
+          stats: cleaned.stats,
+          lowPoseFidelity: effectiveFidelity === 'low' || referenceMode === 'free',
+        })
+      );
       setLastAiExplanation(
         buildExplainableAiReport({
           contextAnalysis: ctxForAi,
           styleMode: aiContextMode,
           profileId: chosenId,
           coherenceLevel: aiCoherenceLevel,
-          poseFidelity: charFidelity,
+          poseFidelity: effectiveFidelity,
+          referenceMode,
           referenceUsed: activeReferenceLabel,
           validationStats: cleaned.stats,
           customStyleName: customStyle.name,
           customPalette: customStyle.palette,
+          preserveConstraints,
+          phase1Analysis: activePhase1,
         })
       );
-      setAiError('Vista previa de personaje generada en modo local adaptativo.');
+      setAiError(
+        charTaskMode === 'clean_sprite'
+          ? 'Limpieza de sprite completada con validación anatómica y de paleta.'
+          : 'Vista previa de personaje generada en modo local adaptativo.'
+      );
+    } finally {
+      setIsAiLoading(false);
+    }
+  };
+
+  // =========================================================
+  // HANDLER 2: POSES IA (DUMMIE / IMAGEN / FRAME EXISTENTE)
+  // =========================================================
+  const handleRunPoseAi = async () => {
+    setIsAiLoading(true);
+    setAiError(null);
+    const chosenId = effectiveTargetProfileId;
+    const ctxForAi = buildEffectiveContextForAi();
+    const activePhase1 = phase1Analysis || buildLocalPhase1();
+    const targetPalette = effectivePalette.length > 0 ? effectivePalette : FIGHTING_GAME_PALETTES[0].colors;
+    const sourceFrame =
+      poseInputSource === 'frame'
+        ? frames[Math.min(Math.max(0, poseSourceFrameIdx), Math.max(0, frames.length - 1))] || currentFrame
+        : currentFrame;
+    const jointSummary = dummiePose?.joints
+      ? Object.entries(dummiePose.joints)
+          .map(([k, v]: [string, any]) => `${k}:(${Math.round((v.x ?? 0.5) * 100)}%,${Math.round((v.y ?? 0.5) * 100)}%)`)
+          .join(' ')
+      : '';
+    const effectiveFidelity: AiPoseFidelityLevel = referenceMode === 'free' ? 'low' : aiPoseFidelity;
+    const poseRefLabel =
+      poseInputSource === 'dummie'
+        ? `Rig Dummie 2.5D (${dummiePose?.name || 'Pose'})`
+        : poseInputSource === 'image'
+        ? activeReferenceLabel
+        : `Frame #${poseSourceFrameIdx + 1} (${sourceFrame.name})`;
+
+    try {
+      const res = await fetch('/api/ai/pose-retarget', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          currentFrameBase64: frameToPngBase64(sourceFrame),
+          poseName: dummiePose?.name || activePhase1.detectedPose || 'Pose de combate',
+          rigType: dummiePose?.rigType || 'male',
+          jointSummary,
+          prompt: posePrompt,
+          width: canvasWidth,
+          height: canvasHeight,
+          palette: targetPalette,
+          intensity: effectiveFidelity === 'exact' ? 95 : 75,
+          poseFidelity: effectiveFidelity,
+          coherenceLevel: aiCoherenceLevel,
+          styleMode: aiContextMode,
+          styleProfile: chosenId,
+          referenceMode,
+          preserveConstraints,
+          phase1Analysis: activePhase1,
+          referenceProject: activeRefProject,
+          contextAnalysis: ctxForAi,
+          trainedProfile: trainedProjectProfile,
+          referenceImagesBase64: poseInputSource === 'image' ? collectRefImages() : [],
+        }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+
+      let grid = pixelsToGrid(Array.isArray(data.pixels) ? data.pixels : [], canvasWidth, canvasHeight);
+      grid = applyContextualStyleToGrid(
+        grid,
+        aiContextMode,
+        chosenId,
+        aiBlendRatio,
+        targetPalette,
+        aiCoherenceLevel,
+        projectAnalysis.detectedProfileId,
+        customStyle.palette
+      );
+      const cleaned = validateAndCleanAiPixelGrid(grid, 'pose', {
+        targetPalette,
+        coherenceLevel: aiCoherenceLevel,
+        repairOutlines: true,
+      });
+      setPosePreviewGrid(cleaned.grid);
+      setAiStats((prev) =>
+        recordAiGenerationEvent(prev, {
+          section: 'poses',
+          usedApi: true,
+          stats: cleaned.stats,
+          lowPoseFidelity: effectiveFidelity === 'low' || referenceMode === 'free',
+        })
+      );
+      setLastAiExplanation(
+        buildExplainableAiReport({
+          contextAnalysis: ctxForAi,
+          styleMode: aiContextMode,
+          profileId: chosenId,
+          coherenceLevel: aiCoherenceLevel,
+          poseFidelity: effectiveFidelity,
+          referenceMode,
+          referenceUsed: poseRefLabel,
+          validationStats: cleaned.stats,
+          customStyleName: customStyle.name,
+          customPalette: customStyle.palette,
+          preserveConstraints,
+          phase1Analysis: activePhase1,
+        })
+      );
+    } catch {
+      const baseComposite = compositeFrame(sourceFrame, canvasWidth, canvasHeight, currentFrameIndex);
+      let fallback = generateFallbackCharacterGrid(baseComposite, canvasWidth, canvasHeight, 'anatomy', targetPalette);
+      fallback = applyContextualStyleToGrid(
+        fallback,
+        aiContextMode,
+        chosenId,
+        aiBlendRatio,
+        targetPalette,
+        aiCoherenceLevel,
+        projectAnalysis.detectedProfileId,
+        customStyle.palette
+      );
+      const cleaned = validateAndCleanAiPixelGrid(fallback, 'pose', {
+        targetPalette,
+        coherenceLevel: aiCoherenceLevel,
+        repairOutlines: true,
+      });
+      setPosePreviewGrid(cleaned.grid);
+      setAiStats((prev) =>
+        recordAiGenerationEvent(prev, {
+          section: 'poses',
+          usedApi: false,
+          stats: cleaned.stats,
+          lowPoseFidelity: effectiveFidelity === 'low' || referenceMode === 'free',
+        })
+      );
+      setLastAiExplanation(
+        buildExplainableAiReport({
+          contextAnalysis: ctxForAi,
+          styleMode: aiContextMode,
+          profileId: chosenId,
+          coherenceLevel: aiCoherenceLevel,
+          poseFidelity: effectiveFidelity,
+          referenceMode,
+          referenceUsed: poseRefLabel,
+          validationStats: cleaned.stats,
+          customStyleName: customStyle.name,
+          customPalette: customStyle.palette,
+          preserveConstraints,
+          phase1Analysis: activePhase1,
+        })
+      );
+      setAiError('Pose adaptada localmente preservando silueta íntegra (sin fragmentar).');
     } finally {
       setIsAiLoading(false);
     }
@@ -698,6 +1095,7 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
           contextAnalysis: ctxForAi,
           trainedProfile: trainedProjectProfile,
           coherenceLevel: aiCoherenceLevel,
+          referenceProject: activeRefProject,
         }),
       });
       const data = await res.json();
@@ -730,6 +1128,7 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
 
       setAnimPreviewFrames(grids);
       setAnimPlayIdx(0);
+      setAiStats((prev) => recordAiGenerationEvent(prev, { section: 'animaciones', usedApi: true, stats: lastStats }));
       setLastAiExplanation(
         buildExplainableAiReport({
           contextAnalysis: ctxForAi,
@@ -755,6 +1154,7 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
       );
       setAnimPreviewFrames(localFrames);
       setAnimPlayIdx(0);
+      setAiStats((prev) => recordAiGenerationEvent(prev, { section: 'animaciones', usedApi: false }));
       setLastAiExplanation(
         buildExplainableAiReport({
           contextAnalysis: ctxForAi,
@@ -810,6 +1210,7 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
           contextAnalysis: ctxForAi,
           trainedProfile: trainedProjectProfile,
           coherenceLevel: aiCoherenceLevel,
+          referenceProject: activeRefProject,
         }),
       });
       const data = await res.json();
@@ -846,6 +1247,7 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
       });
       setTweenPreviewFrames(cleanedList);
       setTweenPreviewCursor(0);
+      setAiStats((prev) => recordAiGenerationEvent(prev, { section: 'inbetweens', usedApi: true, stats: lastStats }));
       setLastAiExplanation(
         buildExplainableAiReport({
           contextAnalysis: ctxForAi,
@@ -872,6 +1274,7 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
       );
       setTweenPreviewFrames(localList);
       setTweenPreviewCursor(0);
+      setAiStats((prev) => recordAiGenerationEvent(prev, { section: 'inbetweens', usedApi: false }));
       setLastAiExplanation(
         buildExplainableAiReport({
           contextAnalysis: ctxForAi,
@@ -915,6 +1318,7 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
           contextAnalysis: ctxForAi,
           trainedProfile: trainedProjectProfile,
           coherenceLevel: aiCoherenceLevel,
+          referenceProject: activeRefProject,
           referenceImagesBase64: collectRefImages(),
         }),
       });
@@ -942,6 +1346,7 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
       setVfxPreviewFrames(cleanedFrames);
       setVfxPreviewName(data.name || 'VFX IA');
       setVfxPreviewHitbox(data.hitbox);
+      setAiStats((prev) => recordAiGenerationEvent(prev, { section: 'fx', usedApi: true, stats: lastStats }));
       setLastAiExplanation(
         buildExplainableAiReport({
           contextAnalysis: ctxForAi,
@@ -969,6 +1374,7 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
       setVfxPreviewFrames(styled);
       setVfxPreviewName(`FX ${getAiStyleProfile(chosenId).name}`);
       setVfxPreviewHitbox({ x: 14, y: 12, width: 12, height: 8 });
+      setAiStats((prev) => recordAiGenerationEvent(prev, { section: 'fx', usedApi: false, stats: lastStats }));
       setLastAiExplanation(
         buildExplainableAiReport({
           contextAnalysis: ctxForAi,
@@ -1017,6 +1423,7 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
           contextAnalysis: ctxForAi,
           trainedProfile: trainedProjectProfile,
           coherenceLevel: aiCoherenceLevel,
+          referenceProject: activeRefProject,
           referenceImagesBase64: collectRefImages(),
         }),
       });
@@ -1040,6 +1447,7 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
       });
       setStagePreviewGrid(cleaned.grid);
       setStagePreviewName(data.name || 'Escenario IA');
+      setAiStats((prev) => recordAiGenerationEvent(prev, { section: 'escenarios', usedApi: true, stats: cleaned.stats }));
       setLastAiExplanation(
         buildExplainableAiReport({
           contextAnalysis: ctxForAi,
@@ -1076,6 +1484,7 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
       });
       setStagePreviewGrid(cleaned.grid);
       setStagePreviewName(`${STAGE_CATEGORIES.find((c) => c.id === stageCategory)?.label || 'Escenario'} ${getAiStyleProfile(chosenId).name}`);
+      setAiStats((prev) => recordAiGenerationEvent(prev, { section: 'escenarios', usedApi: false, stats: cleaned.stats }));
       setLastAiExplanation(
         buildExplainableAiReport({
           contextAnalysis: ctxForAi,
@@ -1127,6 +1536,7 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
           contextAnalysis: ctxForAi,
           trainedProfile: trainedProjectProfile,
           coherenceLevel: aiCoherenceLevel,
+          referenceProject: activeRefProject,
           referenceImagesBase64: collectRefImages(),
         }),
       });
@@ -1150,6 +1560,7 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
       });
       setHudPreviewGrid(cleaned.grid);
       setHudPreviewName(data.name || 'HUD IA');
+      setAiStats((prev) => recordAiGenerationEvent(prev, { section: 'hud', usedApi: true, stats: cleaned.stats }));
       setLastAiExplanation(
         buildExplainableAiReport({
           contextAnalysis: ctxForAi,
@@ -1188,6 +1599,7 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
       });
       setHudPreviewGrid(cleaned.grid);
       setHudPreviewName(`HUD ${getAiStyleProfile(chosenId).name}`);
+      setAiStats((prev) => recordAiGenerationEvent(prev, { section: 'hud', usedApi: false, stats: cleaned.stats }));
       setLastAiExplanation(
         buildExplainableAiReport({
           contextAnalysis: ctxForAi,
@@ -1203,6 +1615,70 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
     } finally {
       setIsAiLoading(false);
     }
+  };
+
+  // =========================================================
+  // HANDLER 8B: AUTOEVALUACIÓN IA
+  // =========================================================
+  const handleRunSelfEvaluation = async () => {
+    setIsSelfEvaluating(true);
+    setAiError(null);
+    const localReport = runLocalAiSelfEvaluation({
+      projectAnalysis,
+      stats: aiStats,
+      trainedProfile: trainedProjectProfile,
+      referenceProject: activeRefProject,
+      frames,
+      coherenceLevel: aiCoherenceLevel,
+    });
+    try {
+      const res = await fetch('/api/ai/self-evaluate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          currentFrameBase64: frameToPngBase64(currentFrame),
+          projectContext: projectAnalysis,
+          telemetryStats: aiStats,
+          referenceProject: activeRefProject,
+          trainedProfile: trainedProjectProfile,
+          framesCount: frames.length,
+        }),
+      });
+      const data = await res.json();
+      if (data.error || data.fallback || !Array.isArray(data.axes)) {
+        setSelfEvaluation(localReport);
+      } else {
+        setSelfEvaluation({
+          evaluatedAt: Date.now(),
+          evaluatedByAi: true,
+          overallScore: typeof data.overallScore === 'number' ? data.overallScore : localReport.overallScore,
+          axes: data.axes,
+          summary: data.summary || localReport.summary,
+          improvements: Array.isArray(data.improvements) && data.improvements.length > 0 ? data.improvements : localReport.improvements,
+        });
+      }
+    } catch {
+      setSelfEvaluation(localReport);
+    } finally {
+      setIsSelfEvaluating(false);
+    }
+  };
+
+  const handleSelectReferenceProject = (id: AiReferenceProjectId) => {
+    setActiveRefProjectId(id);
+    const prof = buildReferenceProjectProfile(id, projectAnalysis, trainedProjectProfile, project?.name || 'Proyecto propio');
+    if (id === 'custom_project') {
+      setAiContextMode('keep');
+      setAiExternalProfile(prof.styleProfileId);
+    } else {
+      setAiExternalProfile(prof.styleProfileId);
+      setAiContextMode('adapt');
+    }
+    setAiStats((prev) => {
+      const next = { ...prev, styleChangesCount: prev.styleChangesCount + 1, lastUpdatedAt: Date.now() };
+      saveAiGenerationStats(next);
+      return next;
+    });
   };
 
   // =========================================================
@@ -1244,18 +1720,24 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
     }
   };
 
-  const showMandatoryStyleQuestion = section !== 'adaptacion_estilo' && section !== 'configuracion_ia';
+  const showMandatoryStyleQuestion =
+    section !== 'adaptacion_estilo' &&
+    section !== 'proyecto_referencia' &&
+    section !== 'diagnostico_ia' &&
+    section !== 'configuracion_ia';
 
   const aiLibraryItems = useMemo(
     () => libraryItems.filter((item) => item.origin === 'ai' || item.tags?.includes('ai')),
     [libraryItems]
   );
 
+  const warningAlertsCount = diagnosticsReport.problemsDetected.filter((p) => p.severity === 'warning').length;
+
   return (
     <div className="flex flex-col gap-2 text-xs">
-      {/* 10-Section Navigation Rail (2 rows x 5 cols, clean hairline buttons) */}
+      {/* 12-Section Navigation Rail (3 rows x 4 cols, clean hairline buttons) */}
       <div
-        className="grid grid-cols-5 gap-1 p-1 rounded-lg border"
+        className="grid grid-cols-4 gap-1 p-1 rounded-lg border"
         style={{ backgroundColor: 'var(--studio-bg-panel)', borderColor: 'var(--studio-border)' }}
       >
         {SECTION_TABS.map((tab) => {
@@ -1266,7 +1748,7 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
               key={tab.id}
               type="button"
               onClick={() => setSection(tab.id)}
-              className="py-1.5 px-1 rounded flex flex-col items-center justify-center gap-0.5 text-[9px] font-semibold transition-colors whitespace-nowrap"
+              className="py-1.5 px-1 rounded flex flex-col items-center justify-center gap-0.5 text-[9px] font-semibold transition-colors whitespace-nowrap relative"
               style={{
                 backgroundColor: active ? 'var(--studio-accent)' : 'transparent',
                 color: active ? 'var(--studio-accent-text)' : 'var(--studio-text-muted)',
@@ -1275,91 +1757,346 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
             >
               <Icon className="w-3.5 h-3.5 shrink-0" />
               <span className="truncate max-w-full">{tab.label}</span>
+              {tab.id === 'diagnostico_ia' && warningAlertsCount > 0 && !active && (
+                <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-amber-400" />
+              )}
+              {tab.id === 'proyecto_referencia' && activeRefProject && !active && (
+                <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-emerald-400" />
+              )}
             </button>
           );
         })}
       </div>
 
-      {/* Mandatory Target Style Question Bar across generation tabs */}
-      {showMandatoryStyleQuestion && (
+      {/* Compact Active Reference Project + Periodic Diagnostic Status Strip */}
+      {(activeRefProject || (warningAlertsCount > 0 && section !== 'diagnostico_ia')) && (
         <div
-          className="px-2 py-1.5 rounded-lg border flex flex-col gap-1.5 text-[10px]"
+          className="px-2 py-1 rounded border flex items-center justify-between gap-2 text-[9.5px]"
           style={{ backgroundColor: 'var(--studio-bg-card)', borderColor: 'var(--studio-border)' }}
         >
-          <div className="flex items-center justify-between gap-2">
-            <span className="font-bold" style={{ color: 'var(--studio-text)' }}>
-              ¿Estilo objetivo?
-            </span>
-            <span className="font-mono text-[9px] truncate" style={{ color: 'var(--studio-accent)' }}>
-              {aiContextMode === 'keep'
-                ? `Actual (${projectAnalysis.visualStyle})`
-                : aiContextMode === 'auto_detect'
-                ? `Auto (${getAiStyleProfile(effectiveTargetProfileId).name})`
-                : aiExternalProfile === 'custom'
-                ? customStyle.name
-                : getAiStyleProfile(aiExternalProfile).name}
-            </span>
+          {activeRefProject ? (
+            <button
+              type="button"
+              onClick={() => setSection('proyecto_referencia')}
+              className="truncate text-left font-medium hover:underline"
+              style={{ color: 'var(--studio-accent)' }}
+            >
+              Ref: {activeRefProject.name}
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setSection('diagnostico_ia')}
+              className="truncate text-left font-medium text-amber-300 hover:underline flex items-center gap-1"
+            >
+              <AlertTriangle className="w-3 h-3 shrink-0" />
+              <span className="truncate">{diagnosticsReport.problemsDetected[0]?.title}</span>
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setSection('diagnostico_ia')}
+            className="font-mono text-[9px] shrink-0 whitespace-nowrap"
+            style={{ color: warningAlertsCount > 0 ? '#fbbf24' : '#34d399' }}
+          >
+            {warningAlertsCount > 0 ? `${warningAlertsCount} aviso(s)` : 'IA OK'}
+          </button>
+        </div>
+      )}
+
+      {/* Guided Creation Bar + Two-Phase Flow (Phase 1 Analysis + Constraints + Strict/Free Reference) */}
+      {showMandatoryStyleQuestion && (
+        <div className="flex flex-col gap-1.5">
+          {/* Guided Creation: ¿Qué desea crear? */}
+          <div
+            className="px-2 py-1.5 rounded-lg border flex flex-col gap-1 text-[10px]"
+            style={{ backgroundColor: 'var(--studio-bg-card)', borderColor: 'var(--studio-border)' }}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-bold" style={{ color: 'var(--studio-text)' }}>
+                ¿Qué desea crear?
+              </span>
+              <span className="font-mono text-[9px]" style={{ color: 'var(--studio-text-muted)' }}>
+                Flujo guiado 2 fases
+              </span>
+            </div>
+            <div className="grid grid-cols-4 gap-1">
+              {GUIDED_CREATE_TARGETS.map((t) => {
+                const active = section === t.section;
+                return (
+                  <button
+                    key={t.id}
+                    type="button"
+                    onClick={() => setSection(t.section)}
+                    className="py-1 px-1 rounded border text-[9px] font-semibold truncate whitespace-nowrap"
+                    style={{
+                      backgroundColor: active
+                        ? 'color-mix(in srgb, var(--studio-accent) 18%, var(--studio-bg-elevated))'
+                        : 'var(--studio-bg-elevated)',
+                      borderColor: active ? 'var(--studio-accent)' : 'var(--studio-border)',
+                      color: active ? 'var(--studio-accent)' : 'var(--studio-text-muted)',
+                    }}
+                  >
+                    {t.label}
+                  </button>
+                );
+              })}
+            </div>
           </div>
-          <div className="grid grid-cols-3 gap-1">
-            {(
-              [
-                { id: 'auto_detect', label: 'Detectar auto' },
-                { id: 'keep', label: 'Mantener actual' },
-                { id: 'custom', label: 'Elegir manual' },
-              ] as { id: AiContextualMode; label: string }[]
-            ).map((opt) => {
-              const active =
-                aiContextMode === opt.id ||
-                (opt.id === 'custom' && (aiContextMode === 'adapt' || aiContextMode === 'blend'));
-              return (
-                <button
-                  key={opt.id}
-                  type="button"
-                  onClick={() => setAiContextMode(opt.id)}
-                  className="py-1 px-1.5 rounded border text-[9px] font-semibold truncate"
-                  style={{
-                    backgroundColor: active ? 'color-mix(in srgb, var(--studio-accent) 18%, var(--studio-bg-elevated))' : 'var(--studio-bg-elevated)',
-                    borderColor: active ? 'var(--studio-accent)' : 'var(--studio-border)',
-                    color: active ? 'var(--studio-accent)' : 'var(--studio-text-muted)',
-                  }}
-                >
-                  {opt.label}
-                </button>
-              );
-            })}
-          </div>
-          {(aiContextMode === 'custom' || aiContextMode === 'adapt' || aiContextMode === 'blend') && (
-            <div className="flex items-center gap-1">
-              <select
-                value={aiExternalProfile}
-                onChange={(e) => setAiExternalProfile(e.target.value as AiExternalProfileId)}
-                className="flex-1 px-1.5 py-1 rounded border text-[10px] font-mono"
-                style={{
-                  backgroundColor: 'var(--studio-bg-elevated)',
-                  borderColor: 'var(--studio-border-strong)',
-                  color: 'var(--studio-text)',
-                }}
-              >
-                {AI_EXTERNAL_PROFILES.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name} — {p.era}
-                  </option>
-                ))}
-              </select>
+
+          {/* Style Governance + Phase 1 Context & Constraints Card */}
+          <div
+            className="px-2 py-1.5 rounded-lg border flex flex-col gap-1.5 text-[10px]"
+            style={{ backgroundColor: 'var(--studio-bg-card)', borderColor: 'var(--studio-border)' }}
+          >
+            <div className="flex items-center justify-between gap-2">
               <button
                 type="button"
-                onClick={() => setSection('adaptacion_estilo')}
-                className="px-2 py-1 rounded border text-[9px] font-semibold whitespace-nowrap"
-                style={{
-                  backgroundColor: 'var(--studio-bg-elevated)',
-                  borderColor: 'var(--studio-border-strong)',
-                  color: 'var(--studio-accent)',
-                }}
+                onClick={() => setShowContextControls((v) => !v)}
+                className="font-bold flex items-center gap-1 text-left"
+                style={{ color: 'var(--studio-text)' }}
               >
-                Editar
+                <ScanSearch className="w-3 h-3 shrink-0" style={{ color: 'var(--studio-accent)' }} />
+                <span>Fase 1: Contexto y Restricciones</span>
+                {showContextControls ? (
+                  <ChevronUp className="w-3 h-3 shrink-0 opacity-70" />
+                ) : (
+                  <ChevronDown className="w-3 h-3 shrink-0 opacity-70" />
+                )}
               </button>
+              <span className="font-mono text-[9px] truncate" style={{ color: 'var(--studio-accent)' }}>
+                {livePhase1Analysis.detectedStyle} · {livePhase1Analysis.paletteCount} col.
+              </span>
             </div>
-          )}
+
+            {showContextControls && (
+              <>
+                {/* Style selection: Auto Detectar / Mantener actual / Personalizado */}
+                <div className="grid grid-cols-3 gap-1">
+                  {(
+                    [
+                      { id: 'auto_detect', label: 'Auto Detectar' },
+                      { id: 'keep', label: 'Mantener actual' },
+                      { id: 'custom', label: 'Personalizado' },
+                    ] as { id: AiContextualMode; label: string }[]
+                  ).map((opt) => {
+                    const active =
+                      aiContextMode === opt.id ||
+                      (opt.id === 'custom' && (aiContextMode === 'adapt' || aiContextMode === 'blend'));
+                    return (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => setAiContextMode(opt.id)}
+                        className="py-1 px-1.5 rounded border text-[9px] font-semibold truncate whitespace-nowrap"
+                        style={{
+                          backgroundColor: active
+                            ? 'color-mix(in srgb, var(--studio-accent) 18%, var(--studio-bg-elevated))'
+                            : 'var(--studio-bg-elevated)',
+                          borderColor: active ? 'var(--studio-accent)' : 'var(--studio-border)',
+                          color: active ? 'var(--studio-accent)' : 'var(--studio-text-muted)',
+                        }}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {(aiContextMode === 'custom' || aiContextMode === 'adapt' || aiContextMode === 'blend') && (
+                  <div className="flex items-center gap-1">
+                    <select
+                      value={aiExternalProfile}
+                      onChange={(e) => setAiExternalProfile(e.target.value as AiExternalProfileId)}
+                      className="flex-1 px-1.5 py-1 rounded border text-[10px] font-mono"
+                      style={{
+                        backgroundColor: 'var(--studio-bg-elevated)',
+                        borderColor: 'var(--studio-border-strong)',
+                        color: 'var(--studio-text)',
+                      }}
+                    >
+                      {AI_EXTERNAL_PROFILES.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name} — {p.era}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => setSection('adaptacion_estilo')}
+                      className="px-2 py-1 rounded border text-[9px] font-semibold whitespace-nowrap"
+                      style={{
+                        backgroundColor: 'var(--studio-bg-elevated)',
+                        borderColor: 'var(--studio-border-strong)',
+                        color: 'var(--studio-accent)',
+                      }}
+                    >
+                      Editar
+                    </button>
+                  </div>
+                )}
+
+                {/* Phase 1 Readout Box */}
+                <div
+                  className="p-1.5 rounded border flex flex-col gap-1 text-[9.5px] font-mono"
+                  style={{ backgroundColor: 'var(--studio-bg-elevated)', borderColor: 'var(--studio-border-strong)' }}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-sans font-bold" style={{ color: 'var(--studio-accent)' }}>
+                      Análisis Fase 1 {livePhase1Analysis.analyzedByAi ? '(IA Multimodal)' : '(Contexto)'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleRunPhaseOneAnalysis}
+                      disabled={isAnalyzingPhase1}
+                      className="px-1.5 py-0.5 rounded border font-sans text-[9px] font-semibold whitespace-nowrap disabled:opacity-50"
+                      style={{
+                        backgroundColor: 'var(--studio-bg-card)',
+                        borderColor: 'var(--studio-border-strong)',
+                        color: 'var(--studio-text)',
+                      }}
+                    >
+                      {isAnalyzingPhase1 ? 'Analizando...' : 'Analizar con IA'}
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-x-2 gap-y-0.5" style={{ color: 'var(--studio-text-muted)' }}>
+                    <span className="truncate">
+                      Estilo detectado: <b style={{ color: 'var(--studio-text)' }}>{livePhase1Analysis.detectedStyle}</b>
+                    </span>
+                    <span className="tabular-nums">
+                      Paleta: <b style={{ color: 'var(--studio-text)' }}>{livePhase1Analysis.paletteCount} colores</b>
+                    </span>
+                    <span className="truncate">
+                      Pose: <b style={{ color: 'var(--studio-text)' }}>{livePhase1Analysis.detectedPose}</b>
+                    </span>
+                    <span>
+                      Perspectiva: <b style={{ color: 'var(--studio-text)' }}>{livePhase1Analysis.perspective}</b>
+                    </span>
+                    <span>
+                      Contorno: <b className="tabular-nums" style={{ color: 'var(--studio-text)' }}>{livePhase1Analysis.outlinePx}px</b>
+                    </span>
+                    <span className="tabular-nums">
+                      Resolución: <b style={{ color: 'var(--studio-text)' }}>{livePhase1Analysis.resolution}</b>
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1 flex-wrap pt-0.5">
+                    {livePhase1Analysis.palette.slice(0, 10).map((c, idx) => (
+                      <span
+                        key={`${c}-${idx}`}
+                        className="w-2.5 h-2.5 rounded-sm border border-white/25"
+                        style={{ backgroundColor: c }}
+                        title={c}
+                      />
+                    ))}
+                  </div>
+                </div>
+
+                {/* ¿Qué desea conservar? */}
+                <div className="flex flex-col gap-1 pt-0.5">
+                  <span className="text-[9.5px] font-bold" style={{ color: 'var(--studio-text)' }}>
+                    ¿Qué desea conservar?
+                  </span>
+                  <div className="grid grid-cols-3 gap-x-2 gap-y-1 text-[9.5px]">
+                    {(
+                      [
+                        ['pose', 'Pose'],
+                        ['colors', 'Colores'],
+                        ['silhouette', 'Silueta'],
+                        ['style', 'Estilo'],
+                        ['proportions', 'Proporciones'],
+                        ['animation', 'Animación'],
+                      ] as [keyof AiPreserveConstraints, string][]
+                    ).map(([k, lbl]) => (
+                      <label key={k} className="flex items-center gap-1 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={preserveConstraints[k]}
+                          onChange={(e) =>
+                            setPreserveConstraints((prev) => ({ ...prev, [k]: e.target.checked }))
+                          }
+                          className="accent-amber-400"
+                        />
+                        <span>{lbl}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Strict vs Free Reference Mode */}
+                <div className="pt-1 border-t flex flex-col gap-1" style={{ borderColor: 'var(--studio-border)' }}>
+                  <div className="grid grid-cols-2 gap-1">
+                    <button
+                      type="button"
+                      onClick={() => setReferenceMode('strict')}
+                      className="py-1 px-1.5 rounded border text-[9.5px] font-semibold whitespace-nowrap"
+                      style={{
+                        backgroundColor:
+                          referenceMode === 'strict'
+                            ? 'color-mix(in srgb, var(--studio-accent) 18%, var(--studio-bg-elevated))'
+                            : 'var(--studio-bg-elevated)',
+                        borderColor: referenceMode === 'strict' ? 'var(--studio-accent)' : 'var(--studio-border)',
+                        color: referenceMode === 'strict' ? 'var(--studio-accent)' : 'var(--studio-text-muted)',
+                      }}
+                    >
+                      Referencia Estricta
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setReferenceMode('free')}
+                      className="py-1 px-1.5 rounded border text-[9.5px] font-semibold whitespace-nowrap"
+                      style={{
+                        backgroundColor:
+                          referenceMode === 'free'
+                            ? 'color-mix(in srgb, var(--studio-accent) 18%, var(--studio-bg-elevated))'
+                            : 'var(--studio-bg-elevated)',
+                        borderColor: referenceMode === 'free' ? 'var(--studio-accent)' : 'var(--studio-border)',
+                        color: referenceMode === 'free' ? 'var(--studio-accent)' : 'var(--studio-text-muted)',
+                      }}
+                    >
+                      Referencia Libre
+                    </button>
+                  </div>
+
+                  {referenceMode === 'strict' ? (
+                    <div className="grid grid-cols-4 gap-1">
+                      {(
+                        [
+                          { id: 'low', label: 'Baja' },
+                          { id: 'medium', label: 'Media' },
+                          { id: 'high', label: 'Alta' },
+                          { id: 'exact', label: 'Exacta' },
+                        ] as { id: AiPoseFidelityLevel; label: string }[]
+                      ).map((lvl) => {
+                        const active = charFidelity === lvl.id;
+                        return (
+                          <button
+                            key={lvl.id}
+                            type="button"
+                            onClick={() => {
+                              setCharFidelity(lvl.id);
+                              setAiPoseFidelity(lvl.id);
+                            }}
+                            className="py-0.5 rounded border text-[9px] font-semibold whitespace-nowrap"
+                            style={{
+                              backgroundColor: active ? 'var(--studio-accent)' : 'var(--studio-bg-elevated)',
+                              color: active ? 'var(--studio-accent-text)' : 'var(--studio-text-muted)',
+                              borderColor: active ? 'var(--studio-accent)' : 'var(--studio-border)',
+                            }}
+                          >
+                            {lvl.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <p className="text-[9px]" style={{ color: 'var(--studio-text-muted)' }}>
+                      Inspirarse en la referencia sin copiar pose o composición exacta.
+                    </p>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
         </div>
       )}
 
@@ -1375,20 +2112,20 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
             <div className="flex items-center justify-between">
               <span className="text-[11px] font-bold flex items-center gap-1.5" style={{ color: 'var(--studio-accent)' }}>
                 <User className="w-3.5 h-3.5" />
-                <span>Estudio de Personajes IA</span>
+                <span>IA de Personajes (Fase 2)</span>
               </span>
               <span className="text-[9px] font-mono tabular-nums" style={{ color: 'var(--studio-text-muted)' }}>
                 {canvasWidth}×{canvasHeight}
               </span>
             </div>
 
-            <div className="grid grid-cols-3 gap-1">
+            <div className="grid grid-cols-2 gap-1">
               {CHARACTER_TASK_OPTIONS.map((opt) => (
                 <button
                   key={opt.id}
                   type="button"
                   onClick={() => setCharTaskMode(opt.id)}
-                  className="py-1 px-1.5 rounded border text-[9px] font-semibold truncate"
+                  className="py-1 px-1.5 rounded border text-[9px] font-semibold truncate whitespace-nowrap"
                   style={{
                     backgroundColor: charTaskMode === opt.id ? 'var(--studio-accent)' : 'var(--studio-bg-elevated)',
                     color: charTaskMode === opt.id ? 'var(--studio-accent-text)' : 'var(--studio-text-muted)',
@@ -1424,40 +2161,6 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
               <input ref={charFileInputRef} type="file" accept="image/*" onChange={handleUploadCharReference} className="sr-only" />
             </div>
 
-            {/* Fidelity level */}
-            <div className="flex flex-col gap-1">
-              <div className="flex items-center justify-between text-[10px]">
-                <span style={{ color: 'var(--studio-text-muted)' }}>Fidelidad a la referencia:</span>
-                <span className="font-mono font-bold uppercase" style={{ color: 'var(--studio-accent)' }}>
-                  {charFidelity === 'low' ? 'Baja' : charFidelity === 'medium' ? 'Media' : charFidelity === 'high' ? 'Alta' : 'Exacta'}
-                </span>
-              </div>
-              <div className="grid grid-cols-4 gap-1">
-                {(
-                  [
-                    { id: 'low', label: 'Baja' },
-                    { id: 'medium', label: 'Media' },
-                    { id: 'high', label: 'Alta' },
-                    { id: 'exact', label: 'Exacta' },
-                  ] as { id: AiPoseFidelityLevel; label: string }[]
-                ).map((f) => (
-                  <button
-                    key={f.id}
-                    type="button"
-                    onClick={() => setCharFidelity(f.id)}
-                    className="py-1 rounded border text-[9px] font-semibold"
-                    style={{
-                      backgroundColor: charFidelity === f.id ? 'color-mix(in srgb, var(--studio-accent) 20%, var(--studio-bg-elevated))' : 'var(--studio-bg-elevated)',
-                      borderColor: charFidelity === f.id ? 'var(--studio-accent)' : 'var(--studio-border)',
-                      color: charFidelity === f.id ? 'var(--studio-accent)' : 'var(--studio-text-muted)',
-                    }}
-                  >
-                    {f.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
             {/* Strict character preserve checkboxes */}
             <div className="pt-1 border-t flex flex-wrap gap-x-2.5 gap-y-1 text-[9px]" style={{ borderColor: 'var(--studio-border)' }}>
               {(
@@ -1487,7 +2190,7 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
               rows={2}
               value={charPrompt}
               onChange={(e) => setCharPrompt(e.target.value)}
-              placeholder="Describe personaje, atuendo, variaciones o recoloreado..."
+              placeholder="Describe personaje, vestuario, pose o limpieza..."
               className="w-full px-2 py-1.5 rounded border text-[11px] resize-none focus:outline-none"
               style={{
                 backgroundColor: 'var(--studio-bg-elevated)',
@@ -1504,7 +2207,7 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
               style={{ backgroundColor: 'var(--studio-accent)', color: 'var(--studio-accent-text)' }}
             >
               <Wand2 className="w-3.5 h-3.5" />
-              <span>{isAiLoading ? 'Procesando Personaje...' : 'Generar Comparativa de Personaje'}</span>
+              <span>{isAiLoading ? 'Fase 2: Generando Personaje...' : 'Fase 2: Generar usando Análisis'}</span>
             </button>
           </div>
 
@@ -1570,25 +2273,76 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
       )}
 
       {/* ================================================================= */}
-      {/* 2. POSES Y DUMMIE (UNIFIED RIG + REFERENCES + POSE AI)            */}
+      {/* 2. POSES Y DUMMIE (DUMMIE / IMAGEN / FRAME -> POSE COHESIVA IA)   */}
       {/* ================================================================= */}
       {section === 'poses_dummie' && (
         <div className="flex flex-col gap-2">
           <div
-            className="p-2 rounded-lg border flex flex-col gap-1.5 text-[10px]"
+            className="p-2.5 rounded-lg border flex flex-col gap-2 text-[10px]"
             style={{ backgroundColor: 'var(--studio-bg-card)', borderColor: 'var(--studio-border)' }}
           >
             <div className="flex items-center justify-between">
-              <span className="font-bold flex items-center gap-1.5" style={{ color: 'var(--studio-accent)' }}>
-                <ImagePlus className="w-3.5 h-3.5" />
-                <span>Referencias + Rig Dummie 2.5D + Pose IA</span>
+              <span className="text-[11px] font-bold flex items-center gap-1.5" style={{ color: 'var(--studio-accent)' }}>
+                <Activity className="w-3.5 h-3.5" />
+                <span>IA de Poses Coherentes (Fase 2)</span>
               </span>
               <span className="font-mono text-[9px]" style={{ color: 'var(--studio-text-muted)' }}>
                 {activeAiGuideRefs.length} refs
               </span>
             </div>
 
-            {activeAiGuideRefs.length > 0 && (
+            <div className="flex flex-col gap-1">
+              <span className="text-[9.5px]" style={{ color: 'var(--studio-text-muted)' }}>
+                Fuente de Pose:
+              </span>
+              <div className="grid grid-cols-3 gap-1">
+                {(
+                  [
+                    { id: 'dummie', label: 'Dummie 2.5D' },
+                    { id: 'image', label: 'Imagen Ref.' },
+                    { id: 'frame', label: 'Frame Existente' },
+                  ] as const
+                ).map((src) => (
+                  <button
+                    key={src.id}
+                    type="button"
+                    onClick={() => setPoseInputSource(src.id)}
+                    className="py-1 px-1.5 rounded border text-[9px] font-semibold whitespace-nowrap"
+                    style={{
+                      backgroundColor: poseInputSource === src.id ? 'var(--studio-accent)' : 'var(--studio-bg-elevated)',
+                      color: poseInputSource === src.id ? 'var(--studio-accent-text)' : 'var(--studio-text-muted)',
+                      borderColor: poseInputSource === src.id ? 'var(--studio-accent)' : 'var(--studio-border)',
+                    }}
+                  >
+                    {src.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {poseInputSource === 'frame' && (
+              <label className="flex items-center justify-between gap-2 text-[10px]">
+                <span style={{ color: 'var(--studio-text-muted)' }}>Frame origen:</span>
+                <select
+                  value={poseSourceFrameIdx}
+                  onChange={(e) => setPoseSourceFrameIdx(Number(e.target.value))}
+                  className="px-1.5 py-1 rounded border font-mono text-[10px]"
+                  style={{
+                    backgroundColor: 'var(--studio-bg-elevated)',
+                    borderColor: 'var(--studio-border-strong)',
+                    color: 'var(--studio-text)',
+                  }}
+                >
+                  {frames.map((f, idx) => (
+                    <option key={f.id} value={idx}>
+                      #{idx + 1} · {f.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+
+            {poseInputSource === 'image' && activeAiGuideRefs.length > 0 && (
               <div className="flex flex-wrap gap-1">
                 {activeAiGuideRefs.map((r) => (
                   <button
@@ -1606,18 +2360,89 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
               </div>
             )}
 
-            {onOpenApplyPoseModal && (
+            <input
+              type="text"
+              value={posePrompt}
+              onChange={(e) => setPosePrompt(e.target.value)}
+              placeholder="Ej: Patada frontal alta manteniendo casco y chaqueta..."
+              className="w-full px-2 py-1 rounded border text-[10.5px] focus:outline-none"
+              style={{
+                backgroundColor: 'var(--studio-bg-elevated)',
+                borderColor: 'var(--studio-border-strong)',
+                color: 'var(--studio-text)',
+              }}
+            />
+
+            <div className="grid grid-cols-1 gap-1.5">
               <button
                 type="button"
-                onClick={onOpenApplyPoseModal}
-                className="w-full py-1.5 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5"
+                onClick={handleRunPoseAi}
+                disabled={isAiLoading}
+                className="w-full py-1.5 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 disabled:opacity-50"
                 style={{ backgroundColor: 'var(--studio-accent)', color: 'var(--studio-accent-text)' }}
               >
                 <Sparkles className="w-3.5 h-3.5" />
-                <span>Adaptar Personaje a Pose Dummie con IA</span>
+                <span>{isAiLoading ? 'Fase 2: Generando Pose...' : 'Fase 2: Generar Pose Coherente'}</span>
               </button>
-            )}
+              {onOpenApplyPoseModal && (
+                <button
+                  type="button"
+                  onClick={onOpenApplyPoseModal}
+                  className="w-full py-1 rounded border text-[10px] font-semibold flex items-center justify-center gap-1.5"
+                  style={{
+                    backgroundColor: 'var(--studio-bg-elevated)',
+                    borderColor: 'var(--studio-border-strong)',
+                    color: 'var(--studio-text)',
+                  }}
+                >
+                  <Eye className="w-3 h-3" />
+                  <span>Abrir Modal Comparativa Rig Dummie</span>
+                </button>
+              )}
+            </div>
           </div>
+
+          {posePreviewGrid && (
+            <div className="p-2 rounded-lg border flex flex-col gap-2" style={{ backgroundColor: 'var(--studio-bg-card)', borderColor: 'var(--studio-accent)' }}>
+              <div className="grid grid-cols-2 gap-1.5">
+                <PixelGridMiniPreview
+                  grid={compositeFrame(currentFrame, canvasWidth, canvasHeight, currentFrameIndex)}
+                  width={canvasWidth}
+                  height={canvasHeight}
+                  className="w-full h-20 rounded border object-contain"
+                />
+                <PixelGridMiniPreview
+                  grid={posePreviewGrid}
+                  width={canvasWidth}
+                  height={canvasHeight}
+                  className="w-full h-20 rounded border object-contain"
+                />
+              </div>
+              {lastAiExplanation && <ExplainableAiCard report={lastAiExplanation} compact />}
+              <div className="grid grid-cols-2 gap-1">
+                <button
+                  type="button"
+                  onClick={() => setPosePreviewGrid(null)}
+                  className="py-1 rounded border text-[10px]"
+                  style={{ borderColor: 'var(--studio-border-strong)', color: 'var(--studio-text-muted)' }}
+                >
+                  Descartar
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onApplyFrameRemix(gridToPixels(posePreviewGrid), undefined, aiTargetMode, false);
+                    setPosePreviewGrid(null);
+                  }}
+                  className="py-1 rounded text-[10px] font-bold flex items-center justify-center gap-1"
+                  style={{ backgroundColor: 'var(--studio-accent)', color: 'var(--studio-accent-text)' }}
+                >
+                  <Check className="w-3 h-3" />
+                  <span>Aplicar Pose</span>
+                </button>
+              </div>
+            </div>
+          )}
 
           {dummiePose && onChangeDummiePose && onSaveDummiePose && onDeleteSavedDummiePose && onOpenApplyPoseModal ? (
             <DummiePosePanel
@@ -1652,8 +2477,41 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
           >
             <span className="text-[11px] font-bold flex items-center gap-1.5" style={{ color: 'var(--studio-accent)' }}>
               <Film className="w-3.5 h-3.5" />
-              <span>Generador y Corrector de Animaciones IA</span>
+              <span>IA de Animación (Ciclos y Combate)</span>
             </span>
+
+            <div className="flex flex-col gap-1">
+              <span className="text-[9.5px]" style={{ color: 'var(--studio-text-muted)' }}>
+                Ciclos y Acciones Clave:
+              </span>
+              <div className="grid grid-cols-3 gap-1">
+                {ANIMATION_CYCLE_PRESETS.map((preset) => {
+                  const active = animCyclePreset === preset.id;
+                  return (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      onClick={() => {
+                        setAnimCyclePreset(preset.id);
+                        setAnimMode(preset.mode);
+                        setAnimPrompt(preset.prompt);
+                        setAnimFrameCount(preset.frames);
+                      }}
+                      className="py-1 px-1.5 rounded border text-[9px] font-semibold truncate whitespace-nowrap"
+                      style={{
+                        backgroundColor: active
+                          ? 'color-mix(in srgb, var(--studio-accent) 18%, var(--studio-bg-elevated))'
+                          : 'var(--studio-bg-elevated)',
+                        borderColor: active ? 'var(--studio-accent)' : 'var(--studio-border)',
+                        color: active ? 'var(--studio-accent)' : 'var(--studio-text-muted)',
+                      }}
+                    >
+                      {preset.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
 
             <div className="grid grid-cols-2 gap-1">
               {ANIMATION_MODE_OPTIONS.map((opt) => (
@@ -2593,10 +3451,389 @@ export const AiStudioHub: React.FC<AiStudioHubProps> = ({
               </div>
             )}
 
-            <div className="pt-1.5 border-t text-[9px] font-mono" style={{ borderColor: 'var(--studio-border)', color: 'var(--studio-text-muted)' }}>
-              Sincronización activa para: <b style={{ color: 'var(--studio-text)' }}>Personajes · FX · HUD · Escenarios</b> ({getAiStyleProfile(effectiveTargetProfileId).name})
+            <div className="pt-1.5 border-t flex items-center justify-between gap-2 text-[9.5px]" style={{ borderColor: 'var(--studio-border)' }}>
+              <label className="flex items-center gap-1.5 cursor-pointer" style={{ color: 'var(--studio-text-muted)' }}>
+                <input
+                  type="checkbox"
+                  checked={globalStyleCoherence}
+                  onChange={(e) => setGlobalStyleCoherence(e.target.checked)}
+                  className="accent-amber-400"
+                />
+                <span>
+                  Adaptación global ({getAiStyleProfile(effectiveTargetProfileId).name}):{' '}
+                  <b style={{ color: 'var(--studio-text)' }}>FX · HUD · Escenarios · Retratos</b>
+                </span>
+              </label>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* ================================================================= */}
+      {/* 8B. PROYECTO DE REFERENCIA GLOBAL                                 */}
+      {/* ================================================================= */}
+      {section === 'proyecto_referencia' && (
+        <div className="flex flex-col gap-2">
+          <div
+            className="p-2.5 rounded-lg border flex flex-col gap-2"
+            style={{ backgroundColor: 'var(--studio-bg-card)', borderColor: 'var(--studio-border)' }}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] font-bold flex items-center gap-1.5" style={{ color: 'var(--studio-accent)' }}>
+                <Compass className="w-3.5 h-3.5" />
+                <span>Proyecto de Referencia Visual</span>
+              </span>
+              {activeRefProject && (
+                <button
+                  type="button"
+                  onClick={() => setActiveRefProjectId(null)}
+                  className="text-[9px] font-mono text-slate-400 hover:text-white"
+                >
+                  Desactivar
+                </button>
+              )}
+            </div>
+            <p className="text-[10px] leading-snug" style={{ color: 'var(--studio-text-muted)' }}>
+              Selecciona una obra o proyecto maestro. La IA analizará sus sprites, FX, HUD y escenarios y lo aplicará como referencia global en cada generación.
+            </p>
+
+            <div className="grid grid-cols-2 gap-1.5">
+              {(
+                [
+                  { id: 'kof', label: 'King of Fighters', sub: 'SNK Neo Geo Arcade' },
+                  { id: 'sf_alpha', label: 'Street Fighter Alpha', sub: 'Capcom CPS-2 Anime' },
+                  { id: 'guilty_gear', label: 'Guilty Gear', sub: 'ArcSys Heavy-Metal' },
+                  { id: 'custom_project', label: 'Proyecto propio', sub: 'Tu lienzo y paleta' },
+                ] as { id: AiReferenceProjectId; label: string; sub: string }[]
+              ).map((item) => {
+                const selected = activeRefProjectId === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => handleSelectReferenceProject(item.id)}
+                    className="p-2 rounded-lg border text-left flex flex-col gap-0.5 transition-colors"
+                    style={{
+                      backgroundColor: selected
+                        ? 'color-mix(in srgb, var(--studio-accent) 18%, var(--studio-bg-elevated))'
+                        : 'var(--studio-bg-elevated)',
+                      borderColor: selected ? 'var(--studio-accent)' : 'var(--studio-border)',
+                    }}
+                  >
+                    <span className="text-[10px] font-bold truncate" style={{ color: selected ? 'var(--studio-accent)' : 'var(--studio-text)' }}>
+                      {item.label}
+                    </span>
+                    <span className="text-[9px] truncate" style={{ color: 'var(--studio-text-muted)' }}>
+                      {item.sub}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {activeRefProject && (
+              <div
+                className="p-2 rounded border flex flex-col gap-1.5 text-[9.5px]"
+                style={{ backgroundColor: 'var(--studio-bg-elevated)', borderColor: 'var(--studio-accent)' }}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-bold" style={{ color: 'var(--studio-accent)' }}>
+                    Análisis Aplicado: {activeRefProject.name}
+                  </span>
+                  <span className="font-mono text-[9px] tabular-nums" style={{ color: 'var(--studio-text-muted)' }}>
+                    {activeRefProject.outlinePx}px · {activeRefProject.shadingType}
+                  </span>
+                </div>
+                <div className="flex items-center gap-1 flex-wrap">
+                  {activeRefProject.palette.slice(0, 10).map((c, idx) => (
+                    <span key={`${c}-${idx}`} className="w-3 h-3 rounded-sm border border-white/25" style={{ backgroundColor: c }} title={c} />
+                  ))}
+                </div>
+                <div className="flex flex-col gap-1 leading-snug" style={{ color: 'var(--studio-text-muted)' }}>
+                  <span><b style={{ color: 'var(--studio-text)' }}>Sprites:</b> {activeRefProject.spriteTraits}</span>
+                  <span><b style={{ color: 'var(--studio-text)' }}>FX:</b> {activeRefProject.fxTraits}</span>
+                  <span><b style={{ color: 'var(--studio-text)' }}>HUD:</b> {activeRefProject.hudTraits}</span>
+                  <span><b style={{ color: 'var(--studio-text)' }}>Escenarios:</b> {activeRefProject.stageTraits}</span>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ================================================================= */}
+      {/* 8C. DIAGNÓSTICO IA · RECOMENDACIONES · AUTOEVALUACIÓN IA          */}
+      {/* ================================================================= */}
+      {section === 'diagnostico_ia' && (
+        <div className="flex flex-col gap-2">
+          <div
+            className="grid grid-cols-3 gap-1 p-1 rounded-lg border"
+            style={{ backgroundColor: 'var(--studio-bg-panel)', borderColor: 'var(--studio-border)' }}
+          >
+            {(
+              [
+                { id: 'diagnostico', label: 'Diagnóstico IA' },
+                { id: 'recomendaciones', label: 'Recomendaciones' },
+                { id: 'autoevaluacion', label: 'Autoevaluación' },
+              ] as const
+            ).map((sub) => (
+              <button
+                key={sub.id}
+                type="button"
+                onClick={() => setDiagSubTab(sub.id)}
+                className="py-1 px-1 rounded text-[9.5px] font-semibold truncate whitespace-nowrap"
+                style={{
+                  backgroundColor: diagSubTab === sub.id ? 'var(--studio-accent)' : 'transparent',
+                  color: diagSubTab === sub.id ? 'var(--studio-accent-text)' : 'var(--studio-text-muted)',
+                }}
+              >
+                {sub.label}
+              </button>
+            ))}
+          </div>
+
+          {diagSubTab === 'diagnostico' && (
+            <div
+              className="p-2.5 rounded-lg border flex flex-col gap-2"
+              style={{ backgroundColor: 'var(--studio-bg-card)', borderColor: 'var(--studio-border)' }}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-bold flex items-center gap-1.5" style={{ color: 'var(--studio-accent)' }}>
+                  <Stethoscope className="w-3.5 h-3.5" />
+                  <span>Diagnóstico Periódico de IA</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setDiagRefreshNonce((n) => n + 1)}
+                  className="px-1.5 py-0.5 rounded border text-[9px] font-semibold flex items-center gap-1"
+                  style={{ borderColor: 'var(--studio-border-strong)', color: 'var(--studio-text-muted)' }}
+                >
+                  <RefreshCw className="w-2.5 h-2.5" />
+                  <span>Analizar</span>
+                </button>
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                {diagnosticsReport.problemsDetected.map((alert) => {
+                  const isWarn = alert.severity === 'warning';
+                  const isOk = alert.severity === 'ok';
+                  return (
+                    <div
+                      key={alert.id}
+                      className="p-2 rounded border flex flex-col gap-1"
+                      style={{
+                        backgroundColor: 'var(--studio-bg-elevated)',
+                        borderColor: isWarn
+                          ? 'rgba(245, 158, 11, 0.55)'
+                          : isOk
+                          ? 'rgba(16, 185, 129, 0.5)'
+                          : 'var(--studio-border)',
+                      }}
+                    >
+                      <div className="flex items-start justify-between gap-1.5">
+                        <span
+                          className="text-[10px] font-bold flex items-center gap-1 leading-tight"
+                          style={{ color: isWarn ? '#fbbf24' : isOk ? '#6ee7b7' : '#7dd3fc' }}
+                        >
+                          {isWarn ? (
+                            <AlertTriangle className="w-3 h-3 shrink-0" />
+                          ) : (
+                            <CheckCircle2 className="w-3 h-3 shrink-0" />
+                          )}
+                          <span>{alert.title}</span>
+                        </span>
+                      </div>
+                      <p className="text-[9.5px] leading-snug" style={{ color: 'var(--studio-text-muted)' }}>
+                        {alert.detail}
+                      </p>
+                      {alert.actionSection && alert.actionLabel && (
+                        <button
+                          type="button"
+                          onClick={() => setSection(alert.actionSection!)}
+                          className="self-start px-2 py-0.5 rounded border text-[9px] font-semibold mt-0.5"
+                          style={{ borderColor: 'var(--studio-border-strong)', color: 'var(--studio-text)' }}
+                        >
+                          {alert.actionLabel}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {diagSubTab === 'recomendaciones' && (
+            <div
+              className="p-2.5 rounded-lg border flex flex-col gap-2.5 text-[10px]"
+              style={{ backgroundColor: 'var(--studio-bg-card)', borderColor: 'var(--studio-border)' }}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-bold" style={{ color: 'var(--studio-accent)' }}>
+                  Panel de Recomendaciones IA
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const empty = createDefaultAiGenerationStats();
+                    saveAiGenerationStats(empty);
+                    setAiStats(empty);
+                  }}
+                  className="text-[9px] font-mono text-slate-400 hover:text-white"
+                >
+                  Reiniciar stats
+                </button>
+              </div>
+
+              {/* Estadísticas de generación */}
+              <div className="p-2 rounded border flex flex-col gap-1.5" style={{ backgroundColor: 'var(--studio-bg-elevated)', borderColor: 'var(--studio-border)' }}>
+                <span className="text-[9.5px] font-bold uppercase tracking-wider" style={{ color: 'var(--studio-text-muted)' }}>
+                  Estadísticas de generación
+                </span>
+                <div className="grid grid-cols-2 gap-1 font-mono text-[9.5px] tabular-nums">
+                  <span>Total generadas: <b style={{ color: 'var(--studio-text)' }}>{aiStats.totalGenerations}</b></span>
+                  <span>API / Local: <b style={{ color: 'var(--studio-text)' }}>{aiStats.apiGenerations} / {aiStats.localFallbacks}</b></span>
+                  <span>Píxeles aislados limp.: <b className="text-amber-300">{aiStats.totalOrphansRemoved}</b></span>
+                  <span>Huecos reparados: <b className="text-emerald-300">{aiStats.totalHolesFilled}</b></span>
+                  <span>Ajustes anatómicos: <b className="text-sky-300">{aiStats.totalAnatomicalFixes}</b></span>
+                  <span>Colores cuantizados: <b style={{ color: 'var(--studio-text)' }}>{aiStats.totalQuantizedColors}</b></span>
+                </div>
+                <div className="grid grid-cols-4 gap-1 pt-1 border-t text-[9px] font-mono tabular-nums" style={{ borderColor: 'var(--studio-border)', color: 'var(--studio-text-muted)' }}>
+                  <span>Pjs: {aiStats.bySection.personajes}</span>
+                  <span>Pos: {aiStats.bySection.poses}</span>
+                  <span>Anim: {aiStats.bySection.animaciones}</span>
+                  <span>FX: {aiStats.bySection.fx}</span>
+                  <span>Tween: {aiStats.bySection.inbetweens}</span>
+                  <span>Stg: {aiStats.bySection.escenarios}</span>
+                  <span>HUD: {aiStats.bySection.hud}</span>
+                  <span>Est: {aiStats.styleChangesCount}</span>
+                </div>
+              </div>
+
+              {/* Problemas detectados */}
+              <div className="flex flex-col gap-1">
+                <span className="text-[9.5px] font-bold uppercase tracking-wider text-amber-300">
+                  Problemas detectados ({diagnosticsReport.problemsDetected.length})
+                </span>
+                {diagnosticsReport.problemsDetected.map((p) => (
+                  <div key={p.id} className="text-[9.5px] leading-snug" style={{ color: 'var(--studio-text-muted)' }}>
+                    • <b style={{ color: 'var(--studio-text)' }}>{p.title}:</b> {p.detail}
+                  </div>
+                ))}
+              </div>
+
+              {/* Áreas mejorables */}
+              <div className="flex flex-col gap-1 pt-1 border-t" style={{ borderColor: 'var(--studio-border)' }}>
+                <span className="text-[9.5px] font-bold uppercase tracking-wider text-sky-300">
+                  Áreas mejorables
+                </span>
+                {diagnosticsReport.improvableAreas.map((area, i) => (
+                  <div key={i} className="text-[9.5px] leading-snug" style={{ color: 'var(--studio-text-muted)' }}>
+                    • {area}
+                  </div>
+                ))}
+              </div>
+
+              {/* Funciones futuras recomendadas */}
+              <div className="flex flex-col gap-1 pt-1 border-t" style={{ borderColor: 'var(--studio-border)' }}>
+                <span className="text-[9.5px] font-bold uppercase tracking-wider text-emerald-300">
+                  Funciones futuras recomendadas
+                </span>
+                {diagnosticsReport.futureFeatures.map((feat, i) => (
+                  <div key={i} className="text-[9.5px] leading-snug" style={{ color: 'var(--studio-text-muted)' }}>
+                    • {feat}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {diagSubTab === 'autoevaluacion' && (
+            <div
+              className="p-2.5 rounded-lg border flex flex-col gap-2"
+              style={{ backgroundColor: 'var(--studio-bg-card)', borderColor: 'var(--studio-border)' }}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-bold" style={{ color: 'var(--studio-accent)' }}>
+                  Autoevaluación de Calidad IA
+                </span>
+                {selfEvaluation && (
+                  <span className="text-[10px] font-mono font-bold tabular-nums text-emerald-300">
+                    {selfEvaluation.overallScore}/100
+                  </span>
+                )}
+              </div>
+              <p className="text-[9.5px] leading-snug" style={{ color: 'var(--studio-text-muted)' }}>
+                Evalúa la calidad actual de Sprites, HUD, FX, Animaciones y Coherencia Visual generados, explicando qué mejorar y por qué.
+              </p>
+
+              <button
+                type="button"
+                onClick={handleRunSelfEvaluation}
+                disabled={isSelfEvaluating}
+                className="w-full py-1.5 rounded-lg text-[10.5px] font-bold flex items-center justify-center gap-1.5 disabled:opacity-50"
+                style={{ backgroundColor: 'var(--studio-accent)', color: 'var(--studio-accent-text)' }}
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>{isSelfEvaluating ? 'Evaluando proyecto...' : 'Ejecutar Autoevaluación IA'}</span>
+              </button>
+
+              {selfEvaluation && (
+                <div className="flex flex-col gap-2 pt-1">
+                  <div
+                    className="p-2 rounded border text-[9.5px] leading-snug"
+                    style={{ backgroundColor: 'var(--studio-bg-elevated)', borderColor: 'var(--studio-border)' }}
+                  >
+                    <div className="flex items-center justify-between font-bold mb-1">
+                      <span>{selfEvaluation.evaluatedByAi ? 'Auditoría Gemini IA' : 'Auditoría Local Adaptativa'}</span>
+                      <span className="font-mono tabular-nums text-amber-300">{selfEvaluation.overallScore}/100</span>
+                    </div>
+                    <p style={{ color: 'var(--studio-text-muted)' }}>{selfEvaluation.summary}</p>
+                  </div>
+
+                  <div className="flex flex-col gap-1.5">
+                    {selfEvaluation.axes.map((ax) => (
+                      <div
+                        key={ax.key}
+                        className="p-1.5 rounded border flex flex-col gap-1"
+                        style={{ backgroundColor: 'var(--studio-bg-elevated)', borderColor: 'var(--studio-border)' }}
+                      >
+                        <div className="flex items-center justify-between text-[9.5px]">
+                          <span className="font-bold">{ax.label}</span>
+                          <span className="font-mono tabular-nums text-[9px]" style={{ color: ax.score >= 82 ? '#6ee7b7' : ax.score >= 68 ? '#fbbf24' : '#fda4af' }}>
+                            {ax.score}/100 · {ax.status}
+                          </span>
+                        </div>
+                        <div className="w-full h-1 rounded-full overflow-hidden bg-slate-900">
+                          <div
+                            className="h-full rounded-full"
+                            style={{
+                              width: `${Math.max(8, Math.min(100, ax.score))}%`,
+                              backgroundColor: ax.score >= 82 ? '#10b981' : ax.score >= 68 ? '#f59e0b' : '#f43f5e',
+                            }}
+                          />
+                        </div>
+                        <p className="text-[9px] leading-snug" style={{ color: 'var(--studio-text-muted)' }}>
+                          {ax.observation}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="flex flex-col gap-1 pt-1 border-t" style={{ borderColor: 'var(--studio-border)' }}>
+                    <span className="text-[9.5px] font-bold text-amber-300">
+                      Qué mejorar y por qué:
+                    </span>
+                    {selfEvaluation.improvements.map((imp, idx) => (
+                      <span key={idx} className="text-[9.5px] leading-snug" style={{ color: 'var(--studio-text-muted)' }}>
+                        • {imp}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 

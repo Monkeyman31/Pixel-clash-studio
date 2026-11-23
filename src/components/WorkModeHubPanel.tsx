@@ -23,6 +23,8 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import {
+  DummyBehaviorState,
+  DummyOpponent,
   EditableFxRecipe,
   FightingGameProfileId,
   GuidesConfig,
@@ -94,6 +96,9 @@ interface WorkModeHubPanelProps {
   onAddStageRoleLayer?: (role: StageBuilderRole) => void;
   onSelectTool?: (tool: ToolType) => void;
   onFocusTilesetsPanel?: () => void;
+  // Fighter Mode Practice Dummy
+  dummyOpponent?: DummyOpponent;
+  onChangeDummyOpponent?: (next: DummyOpponent) => void;
 }
 
 const MODE_ICON_MAP: Record<ProjectWorkMode, React.FC<{ className?: string }>> = {
@@ -135,6 +140,8 @@ export const WorkModeHubPanel: React.FC<WorkModeHubPanelProps> = ({
   onAddStageRoleLayer,
   onSelectTool,
   onFocusTilesetsPanel,
+  dummyOpponent,
+  onChangeDummyOpponent,
 }) => {
   const modeDef = WORK_MODES_REGISTRY[workMode];
   const repeatCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -1031,9 +1038,89 @@ export const WorkModeHubPanel: React.FC<WorkModeHubPanelProps> = ({
         </div>
       )}
 
-      {/* ===================== FIGHTER QUICK ACTIONS ===================== */}
+      {/* ===================== FIGHTER QUICK ACTIONS & PRACTICE DUMMY ===================== */}
       {workMode === 'fighter' && (
-        <div className="flex flex-col gap-1.5 pt-2 border-t" style={{ borderColor: 'var(--studio-border)' }}>
+        <div className="flex flex-col gap-2 pt-2 border-t" style={{ borderColor: 'var(--studio-border)' }}>
+          {dummyOpponent && onChangeDummyOpponent && (
+            <div
+              className="p-2.5 rounded-lg border flex flex-col gap-2"
+              style={{
+                borderColor: dummyOpponent.enabled ? 'rgba(244, 63, 94, 0.5)' : 'var(--studio-border)',
+                backgroundColor: 'var(--studio-bg-elevated)',
+              }}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-rose-400">
+                  Herramientas · Dummy de Práctica
+                </span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    onChangeDummyOpponent({ ...dummyOpponent, enabled: !dummyOpponent.enabled })
+                  }
+                  className="px-2 py-0.5 rounded border text-[10px] font-semibold whitespace-nowrap transition-colors"
+                  style={{
+                    backgroundColor: dummyOpponent.enabled ? 'rgba(244, 63, 94, 0.2)' : 'var(--studio-bg-card)',
+                    borderColor: dummyOpponent.enabled ? '#f43f5e' : 'var(--studio-border-strong)',
+                    color: dummyOpponent.enabled ? '#fda4af' : 'var(--studio-text)',
+                  }}
+                >
+                  {dummyOpponent.enabled ? 'Desactivar Dummy' : 'Activar Sparring Dummy'}
+                </button>
+              </div>
+
+              {dummyOpponent.enabled && (
+                <div className="flex flex-col gap-2 pt-1 border-t" style={{ borderColor: 'var(--studio-border)' }}>
+                  <div className="grid grid-cols-3 gap-1">
+                    {(
+                      [
+                        { id: 'idle', label: 'Idle' },
+                        { id: 'walk', label: 'Walk' },
+                        { id: 'block', label: 'Block' },
+                        { id: 'jump', label: 'Jump' },
+                        { id: 'hitstun', label: 'Hitstun' },
+                        { id: 'counter_hit', label: 'Counter' },
+                      ] as { id: DummyBehaviorState; label: string }[]
+                    ).map((st) => {
+                      const active = (dummyOpponent.state || 'idle') === st.id;
+                      return (
+                        <button
+                          key={st.id}
+                          type="button"
+                          onClick={() => onChangeDummyOpponent({ ...dummyOpponent, state: st.id })}
+                          className="py-1 rounded border text-[9.5px] font-semibold transition-colors"
+                          style={{
+                            backgroundColor: active ? 'rgba(244, 63, 94, 0.22)' : 'var(--studio-bg-card)',
+                            borderColor: active ? '#f43f5e' : 'var(--studio-border)',
+                            color: active ? '#fecdd3' : 'var(--studio-text-muted)',
+                          }}
+                        >
+                          {st.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="flex items-center justify-between gap-2 text-[10px]">
+                    <label className="flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={dummyOpponent.showHurtbox}
+                        onChange={(e) =>
+                          onChangeDummyOpponent({ ...dummyOpponent, showHurtbox: e.target.checked })
+                        }
+                        className="accent-rose-500"
+                      />
+                      <span>Mostrar Hurtbox P2</span>
+                    </label>
+                    <span className="font-mono tabular-nums opacity-75">
+                      Dist: {dummyOpponent.distance}px
+                    </span>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="grid grid-cols-2 gap-1.5">
             <button
               type="button"
