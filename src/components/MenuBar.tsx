@@ -84,9 +84,11 @@ import {
   WorkspaceLayoutConfig,
 } from '../constants/workspaceThemes';
 import {
+  DEFAULT_ONION_SKIN_TRAIL_CONFIG,
   GuidePresetKind,
   GuidesConfig,
   GuidesModalTab,
+  OnionSkinConfig,
   PerformanceMode,
   PerspectiveGuideType,
   ProjectWorkMode,
@@ -96,6 +98,12 @@ import {
   TransformActionId,
   WheelNavigationMode,
 } from '../types';
+import {
+  ONION_BLEND_MODE_OPTIONS,
+  ONION_DISPLAY_MODE_OPTIONS,
+  applyOnionSkinPreset,
+  resolveOnionColorModeHex,
+} from '../utils/onionSkinEngine';
 import { PERSPECTIVE_TYPE_META, SCENARIO_GUIDE_PRESETS } from '../utils/guidesEngine';
 import { WORK_MODES_REGISTRY, WORK_MODE_ORDER } from '../utils/workModesEngine';
 import { STUDIO_Z } from './StudioTopLayer';
@@ -166,6 +174,8 @@ interface MenuBarProps {
   onTogglePivot: () => void;
   onionSkinEnabled: boolean;
   onToggleOnionSkin: () => void;
+  onionSkinConfig?: OnionSkinConfig;
+  onChangeOnionSkinConfig?: (next: OnionSkinConfig) => void;
   clipOutsideCanvas?: boolean;
   onToggleClipOutsideCanvas?: () => void;
   onOpenShortcuts: () => void;
@@ -344,6 +354,8 @@ export const MenuBar: React.FC<MenuBarProps> = ({
   onTogglePivot,
   onionSkinEnabled,
   onToggleOnionSkin,
+  onionSkinConfig,
+  onChangeOnionSkinConfig,
   clipOutsideCanvas = false,
   onToggleClipOutsideCanvas,
   onOpenShortcuts,
@@ -2050,6 +2062,231 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             >
               <span>Eliminar Fotograma Actual</span>
             </button>
+
+            <div className="h-[1px] bg-[#22283a] my-1" />
+
+            <SubMenu
+              label="Papel Cebolla"
+              icon={<Layers className="w-3.5 h-3.5 text-emerald-400" />}
+              widthClass="w-72"
+            >
+              <button
+                type="button"
+                onClick={() => handleItemClick(onToggleOnionSkin)}
+                className="px-3 py-1.5 flex items-center justify-between hover:bg-[#20273a] text-left"
+              >
+                <span className="font-semibold">Activar Papel Cebolla</span>
+                <span className="text-[10px] font-mono text-emerald-400">
+                  O {onionSkinEnabled ? '✓' : ''}
+                </span>
+              </button>
+
+              {onionSkinConfig && onChangeOnionSkinConfig && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleItemClick(() =>
+                        onChangeOnionSkinConfig(applyOnionSkinPreset(onionSkinConfig, 'animator'))
+                      )
+                    }
+                    className="px-3 py-1.5 flex items-center justify-between hover:bg-[#20273a] text-left"
+                  >
+                    <span className="text-rose-300 font-semibold">Preset Animador (Rojo / Verde)</span>
+                    <span className="text-[10px] font-mono text-emerald-400">
+                      {onionSkinConfig.prev.displayMode === 'tinted_ghost' &&
+                      onionSkinConfig.prev.colorMode === 'red' &&
+                      onionSkinConfig.next.displayMode === 'tinted_ghost' &&
+                      onionSkinConfig.next.colorMode === 'green'
+                        ? '✓'
+                        : ''}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleItemClick(() =>
+                        onChangeOnionSkinConfig(applyOnionSkinPreset(onionSkinConfig, 'ghost_clean'))
+                      )
+                    }
+                    className="px-3 py-1.5 flex items-center justify-between hover:bg-[#20273a] text-left"
+                  >
+                    <span className="text-cyan-300 font-semibold">Preset Fotograma Fantasma</span>
+                    <span className="text-[10px] font-mono text-cyan-400">
+                      {onionSkinConfig.prev.displayMode === 'ghost' &&
+                      (onionSkinConfig.prev.colorMode || 'original') === 'original'
+                        ? '✓'
+                        : ''}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleItemClick(() => {
+                        const baseTrail = onionSkinConfig.trail || DEFAULT_ONION_SKIN_TRAIL_CONFIG;
+                        onChangeOnionSkinConfig({
+                          ...onionSkinConfig,
+                          enabled: true,
+                          trail: { ...baseTrail, enabled: !baseTrail.enabled },
+                        });
+                      })
+                    }
+                    className="px-3 py-1.5 flex items-center justify-between hover:bg-[#20273a] text-left"
+                  >
+                    <span className="text-amber-300 font-semibold">Modo Trail (Estela FX / KOF)</span>
+                    <span className="text-[10px] font-mono text-amber-400">
+                      {onionSkinConfig.trail?.enabled ? '✓' : ''}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleItemClick(() =>
+                        onChangeOnionSkinConfig({
+                          ...onionSkinConfig,
+                          motionPath: {
+                            ...onionSkinConfig.motionPath,
+                            enabled: !onionSkinConfig.motionPath.enabled,
+                          },
+                        })
+                      )
+                    }
+                    className="px-3 py-1.5 flex items-center justify-between hover:bg-[#20273a] text-left"
+                  >
+                    <span className="text-sky-300 font-semibold">Modo Trazo de Movimiento</span>
+                    <span className="text-[10px] font-mono text-sky-400">
+                      {onionSkinConfig.motionPath.enabled ? '✓' : ''}
+                    </span>
+                  </button>
+
+                  <div className="h-[1px] bg-[#22283a] my-1" />
+                  <div className="px-3 py-1 text-[10px] uppercase tracking-wider text-slate-400 font-bold">
+                    Modo Visual Anteriores ({onionSkinConfig.prev.count} F)
+                  </div>
+                  {ONION_DISPLAY_MODE_OPTIONS.map((m) => (
+                    <button
+                      key={`menu-prev-${m.id}`}
+                      type="button"
+                      onClick={() =>
+                        handleItemClick(() => {
+                          const prevColorMode =
+                            m.id === 'ghost'
+                              ? 'original'
+                              : m.id === 'tinted_ghost' &&
+                                (onionSkinConfig.prev.colorMode || 'original') === 'original'
+                              ? 'red'
+                              : onionSkinConfig.prev.colorMode === 'original'
+                              ? 'custom'
+                              : onionSkinConfig.prev.colorMode;
+                          onChangeOnionSkinConfig({
+                            ...onionSkinConfig,
+                            enabled: true,
+                            prev: {
+                              ...onionSkinConfig.prev,
+                              displayMode: m.id,
+                              colorMode: prevColorMode,
+                              color:
+                                resolveOnionColorModeHex(prevColorMode, onionSkinConfig.prev.color) ||
+                                onionSkinConfig.prev.color,
+                            },
+                          });
+                        })
+                      }
+                      className="px-3 py-1 flex items-center justify-between hover:bg-[#20273a] text-left text-[11px]"
+                    >
+                      <span>{m.label}</span>
+                      <span className="text-[10px] text-amber-400 font-mono">
+                        {onionSkinConfig.prev.displayMode === m.id ? '✓' : ''}
+                      </span>
+                    </button>
+                  ))}
+
+                  <div className="h-[1px] bg-[#22283a] my-1" />
+                  <div className="px-3 py-1 text-[10px] uppercase tracking-wider text-slate-400 font-bold">
+                    Modo Visual Posteriores ({onionSkinConfig.next.count} F)
+                  </div>
+                  {ONION_DISPLAY_MODE_OPTIONS.map((m) => (
+                    <button
+                      key={`menu-next-${m.id}`}
+                      type="button"
+                      onClick={() =>
+                        handleItemClick(() => {
+                          const nextColorMode =
+                            m.id === 'ghost'
+                              ? 'original'
+                              : m.id === 'tinted_ghost' &&
+                                (onionSkinConfig.next.colorMode || 'original') === 'original'
+                              ? 'green'
+                              : onionSkinConfig.next.colorMode === 'original'
+                              ? 'custom'
+                              : onionSkinConfig.next.colorMode;
+                          onChangeOnionSkinConfig({
+                            ...onionSkinConfig,
+                            enabled: true,
+                            next: {
+                              ...onionSkinConfig.next,
+                              displayMode: m.id,
+                              colorMode: nextColorMode,
+                              color:
+                                resolveOnionColorModeHex(nextColorMode, onionSkinConfig.next.color) ||
+                                onionSkinConfig.next.color,
+                            },
+                          });
+                        })
+                      }
+                      className="px-3 py-1 flex items-center justify-between hover:bg-[#20273a] text-left text-[11px]"
+                    >
+                      <span>{m.label}</span>
+                      <span className="text-[10px] text-emerald-400 font-mono">
+                        {onionSkinConfig.next.displayMode === m.id ? '✓' : ''}
+                      </span>
+                    </button>
+                  ))}
+
+                  <div className="h-[1px] bg-[#22283a] my-1" />
+                  <div className="px-3 py-1 text-[10px] uppercase tracking-wider text-slate-400 font-bold">
+                    Modo de Mezcla
+                  </div>
+                  {ONION_BLEND_MODE_OPTIONS.map((b) => (
+                    <button
+                      key={`menu-blend-${b.id}`}
+                      type="button"
+                      onClick={() =>
+                        handleItemClick(() =>
+                          onChangeOnionSkinConfig({
+                            ...onionSkinConfig,
+                            blendMode: b.id,
+                          })
+                        )
+                      }
+                      className="px-3 py-1 flex items-center justify-between hover:bg-[#20273a] text-left text-[11px]"
+                    >
+                      <span>{b.label}</span>
+                      <span className="text-[10px] text-emerald-400 font-mono">
+                        {onionSkinConfig.blendMode === b.id ? '✓' : ''}
+                      </span>
+                    </button>
+                  ))}
+                </>
+              )}
+
+              {onFocusPanel && (
+                <>
+                  <div className="h-[1px] bg-[#22283a] my-1" />
+                  <button
+                    type="button"
+                    onClick={() => handleItemClick(() => onFocusPanel('animation'))}
+                    className="px-3 py-1.5 flex items-center gap-2 hover:bg-[#20273a] text-left text-emerald-300 font-semibold"
+                  >
+                    <Sliders className="w-3.5 h-3.5" />
+                    <span>Abrir Ajustes Completos...</span>
+                  </button>
+                </>
+              )}
+            </SubMenu>
 
             {onFocusPanel && (
               <>

@@ -1,6 +1,4 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
-import { STUDIO_Z } from './StudioTopLayer';
 import {
   Command,
   HelpCircle,
@@ -32,6 +30,7 @@ interface CommandPaletteModalProps {
   onExecuteCommand: (commandId: string) => void;
   onRunMacro: (macro: RecordedMacro) => void;
   onActivateWhatIsThis?: () => void;
+  onExecutionError?: (context: { action: string; selectedResult?: string; panelId?: string; error: unknown }) => void;
 }
 
 interface PaletteEntry {
@@ -99,6 +98,7 @@ export const CommandPaletteModal: React.FC<CommandPaletteModalProps> = ({
   onExecuteCommand,
   onRunMacro,
   onActivateWhatIsThis,
+  onExecutionError,
 }) => {
   const [query, setQuery] = useState('');
   const [activeCategory, setActiveCategory] = useState<
@@ -108,16 +108,26 @@ export const CommandPaletteModal: React.FC<CommandPaletteModalProps> = ({
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
+  // Keep latest callbacks in refs so indexing never churns on parent re-renders
+  const onExecuteCommandRef = useRef(onExecuteCommand);
+  const onRunMacroRef = useRef(onRunMacro);
+  const onExecutionErrorRef = useRef(onExecutionError);
+  useEffect(() => {
+    onExecuteCommandRef.current = onExecuteCommand;
+    onRunMacroRef.current = onRunMacro;
+    onExecutionErrorRef.current = onExecutionError;
+  });
+
   useEffect(() => {
     if (!isOpen) return;
     setQuery('');
     setActiveIdx(0);
     setActiveCategory('Todo');
     const raf = requestAnimationFrame(() => {
-      inputRef.current?.focus();
+      inputRef.current?.focus({ preventScroll: true });
     });
     const timer = window.setTimeout(() => {
-      inputRef.current?.focus();
+      inputRef.current?.focus({ preventScroll: true });
     }, 25);
     return () => {
       cancelAnimationFrame(raf);
@@ -126,6 +136,7 @@ export const CommandPaletteModal: React.FC<CommandPaletteModalProps> = ({
   }, [isOpen]);
 
   const allEntries = useMemo<PaletteEntry[]>(() => {
+    if (!isOpen) return [];
     const entries: PaletteEntry[] = [];
     const seenIds = new Set<string>();
 
@@ -160,7 +171,7 @@ export const CommandPaletteModal: React.FC<CommandPaletteModalProps> = ({
             : 'Atajos',
         shortcut: b.primary,
         keywords: `${b.category} ${b.location} ${b.id}`,
-        onRun: () => onExecuteCommand(b.id),
+        onRun: () => onExecuteCommandRef.current(b.id),
       });
     }
 
@@ -173,14 +184,15 @@ export const CommandPaletteModal: React.FC<CommandPaletteModalProps> = ({
         category: 'Macros',
         shortcut: m.shortcut || '',
         keywords: m.steps.map((s) => s.label).join(' '),
-        onRun: () => onRunMacro(m),
+        onRun: () => onRunMacroRef.current(m),
       });
     }
 
     return entries;
-  }, [bindings, macros, universalItems, onExecuteCommand, onRunMacro]);
+  }, [isOpen, bindings, macros, universalItems]);
 
   const results = useMemo(() => {
+    if (!isOpen) return [];
     const byCat =
       activeCategory === 'Todo'
         ? allEntries
@@ -214,7 +226,7 @@ export const CommandPaletteModal: React.FC<CommandPaletteModalProps> = ({
 
     scored.sort((a, b) => b.score - a.score);
     return scored.slice(0, 60).map((s) => s.entry);
-  }, [allEntries, activeCategory, query]);
+  }, [isOpen, allEntries, activeCategory, query]);
 
   useEffect(() => {
     setActiveIdx((prev) => Math.max(0, Math.min(prev, Math.max(0, results.length - 1))));
@@ -225,7 +237,13 @@ export const CommandPaletteModal: React.FC<CommandPaletteModalProps> = ({
     if (!container) return;
     const activeEl = container.querySelector(`[data-result-index="${activeIdx}"]`) as HTMLElement | null;
     if (activeEl) {
-      activeEl.scrollIntoView({ block: 'nearest' });
+      const top = activeEl.offsetTop;
+      const bottom = top + activeEl.offsetHeight;
+      if (top < container.scrollTop) {
+        container.scrollTop = top;
+      } else if (bottom > container.scrollTop + container.clientHeight) {
+        container.scrollTop = bottom - container.clientHeight;
+      }
     }
   }, [activeIdx]);
 
@@ -235,13 +253,25 @@ export const CommandPaletteModal: React.FC<CommandPaletteModalProps> = ({
     const item = results[idx];
     if (!item) return;
     onClose();
-    item.onRun();
+    // Defer execution by 1 animation frame so palette unmounts cleanly before opening/focusing targets
+    window.requestAnimationFrame(() => {
+      try {
+        item.onRun();
+      } catch (err) {
+        onExecutionErrorRef.current?.({
+          action: 'command_palette_execute',
+          selectedResult: `${item.id} (${item.title})`,
+          panelId: item.id.startsWith('panel:') ? item.id.slice(6) : undefined,
+          error: err,
+        });
+      }
+    });
   };
 
-  return createPortal(
+  return (
     <div
+      data-what-is-this-ui="true"
       className="fixed inset-0 bg-black/65 backdrop-blur-sm flex items-start justify-center pt-14 p-4"
-      style={{ zIndex: STUDIO_Z.COMMAND_PALETTE }}
       onMouseDown={onClose}
     >
       <div
@@ -292,10 +322,16 @@ export const CommandPaletteModal: React.FC<CommandPaletteModalProps> = ({
               type="button"
               onClick={() => {
                 onClose();
-                onActivateWhatIsThis();
+                window.requestAnimationFrame(() => {
+                  try {
+                    onActivateWhatIsThis();
+                  } catch (err) {
+                    onExecutionErrorRef.current?.({ action: 'activate_what_is_this', error: err });
+                  }
+                });
               }}
               title="Activar Modo Inspector Visual ¿Dónde está? (Shift+F1)"
-              className="px-2 py-1 rounded border text-[10px] font-semibold flex items-center gap-1 hover:opacity-90 shrink-0"
+              className="px-2 py-1 rounded border text-[10px] font-semibold flex items-center gap-1 hover:opacity-90 shrink-0 whitespace-nowrap"
               style={{
                 backgroundColor: 'var(--studio-bg-card)',
                 borderColor: 'var(--studio-border-strong)',
@@ -330,7 +366,7 @@ export const CommandPaletteModal: React.FC<CommandPaletteModalProps> = ({
                 onClick={() => {
                   setActiveCategory(cat);
                   setActiveIdx(0);
-                  inputRef.current?.focus();
+                  inputRef.current?.focus({ preventScroll: true });
                 }}
                 className="px-2 py-0.5 rounded text-[10px] font-semibold whitespace-nowrap transition-colors shrink-0 border"
                 style={{
@@ -349,7 +385,7 @@ export const CommandPaletteModal: React.FC<CommandPaletteModalProps> = ({
         <div ref={listRef} className="max-h-[400px] overflow-y-auto p-1.5 flex flex-col gap-0.5">
           {results.length === 0 && (
             <div className="py-10 text-center text-xs" style={{ color: 'var(--studio-text-muted)' }}>
-              No se encontraron acciones para "{query}".
+              No se encontraron acciones para &quot;{query}&quot;.
             </div>
           )}
           {results.map((item, idx) => {
@@ -411,7 +447,6 @@ export const CommandPaletteModal: React.FC<CommandPaletteModalProps> = ({
           <span>{results.length} resultados · F1</span>
         </div>
       </div>
-    </div>,
-    document.body
+    </div>
   );
 };

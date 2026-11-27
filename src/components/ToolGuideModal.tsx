@@ -259,9 +259,22 @@ export const ToolGuideModal: React.FC<ToolGuideModalProps> = ({
     if (isOpen && focusSearchNonce) {
       setActiveTab('catalog');
       setSelectedCategory('Todas');
-      window.setTimeout(() => searchInputRef.current?.focus(), 40);
+      window.setTimeout(() => searchInputRef.current?.focus({ preventScroll: true }), 40);
     }
   }, [isOpen, focusSearchNonce]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [isOpen, onClose]);
 
   const filteredItems = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -293,8 +306,15 @@ export const ToolGuideModal: React.FC<ToolGuideModalProps> = ({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-[110] bg-black/80 backdrop-blur-xs flex items-center justify-center p-3 sm:p-5">
-      <div className="bg-[#121521] border border-[#2a324a] rounded-xl w-full max-w-5xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+    <div
+      data-what-is-this-ui="true"
+      className="fixed inset-0 bg-black/80 backdrop-blur-xs flex items-center justify-center p-3 sm:p-5"
+      onMouseDown={onClose}
+    >
+      <div
+        className="bg-[#121521] border border-[#2a324a] rounded-xl w-full max-w-5xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
         {/* Header */}
         <div className="px-5 py-3.5 border-b border-[#242b40] bg-[#0f121d] flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
@@ -314,9 +334,10 @@ export const ToolGuideModal: React.FC<ToolGuideModalProps> = ({
           <div className="flex items-center gap-2">
             {onActivateWhatIsThis && (
               <button
+                type="button"
                 onClick={() => {
                   onClose();
-                  onActivateWhatIsThis();
+                  window.requestAnimationFrame(() => onActivateWhatIsThis());
                 }}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-sky-500/40 bg-sky-500/15 hover:bg-sky-500/25 text-sky-200 text-xs font-semibold cursor-pointer"
                 title="Pasa el cursor sobre cualquier parte del programa para identificarla (F1)"
@@ -462,9 +483,10 @@ export const ToolGuideModal: React.FC<ToolGuideModalProps> = ({
                     )}
                     {onLocateEntry && (
                       <button
+                        type="button"
                         onClick={() => {
-                          onLocateEntry(selectedItem);
                           onClose();
+                          window.requestAnimationFrame(() => onLocateEntry(selectedItem));
                         }}
                         className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs cursor-pointer shadow-lg"
                       >
@@ -580,9 +602,10 @@ export const ToolGuideModal: React.FC<ToolGuideModalProps> = ({
                         <p className="text-[11px] text-slate-400 leading-relaxed">{step.detail}</p>
                         {targetItem && onLocateEntry && (
                           <button
+                            type="button"
                             onClick={() => {
-                              onLocateEntry(targetItem);
                               onClose();
+                              window.requestAnimationFrame(() => onLocateEntry(targetItem));
                             }}
                             className="mt-1 inline-flex items-center gap-1 text-[10px] font-bold text-amber-400 hover:text-amber-300 cursor-pointer"
                           >

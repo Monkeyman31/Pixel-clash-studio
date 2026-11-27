@@ -81,6 +81,7 @@ import {
   LayerKeyframe,
   LayerMaskType,
   LayerType,
+  OnionSkinConfig,
   PalettePreset,
   PerformanceMode,
   ProjectState,
@@ -496,6 +497,8 @@ interface RightSidebarProps {
   onChangeOnionSkinNext?: (n: number) => void;
   onionSkinOpacity?: number;
   onChangeOnionSkinOpacity?: (op: number) => void;
+  onionSkinConfig?: OnionSkinConfig;
+  onChangeOnionSkinConfig?: (next: OnionSkinConfig) => void;
   showGrid?: boolean;
   onToggleGrid?: () => void;
   showHitboxes?: boolean;
@@ -847,6 +850,8 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
   onChangeOnionSkinNext,
   onionSkinOpacity = 0.35,
   onChangeOnionSkinOpacity,
+  onionSkinConfig,
+  onChangeOnionSkinConfig,
   showGrid = true,
   onToggleGrid,
   showHitboxes = true,
@@ -2479,6 +2484,8 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                       onChangeOnionSkinNext={(n) => onChangeOnionSkinNext?.(n)}
                       onionSkinOpacity={onionSkinOpacity}
                       onChangeOnionSkinOpacity={(op) => onChangeOnionSkinOpacity?.(op)}
+                      onionSkinConfig={onionSkinConfig}
+                      onChangeOnionSkinConfig={onChangeOnionSkinConfig}
                       cameraShake={cameraShake}
                       onChangeCameraShake={onChangeCameraShake}
                       onTriggerCameraShakeTest={onTriggerCameraShakeTest}

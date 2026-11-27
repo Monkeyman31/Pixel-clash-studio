@@ -101,6 +101,8 @@ import {
   ClipboardFitMode,
   ClipboardPasteDestination,
   CombatFxConfig,
+  DEFAULT_ONION_SKIN_CONFIG,
+  DEFAULT_ONION_SKIN_TRAIL_CONFIG,
   DitherConfig,
   DummyOpponent,
   DummieApplyConfig,
@@ -131,6 +133,7 @@ import {
   MoveSubTool,
   MoveToolOptions,
   NewProjectConfig,
+  OnionSkinConfig,
   OptionsBarState,
   ParametricShapeObject,
   PencilBrushSubMode,
@@ -181,6 +184,7 @@ import {
   ZoomCommand,
   ZoomToolMode
 } from './types';
+import { applyOnionSkinPreset } from './utils/onionSkinEngine';
 import {
   FIGHTING_GAME_PROFILES,
   buildFightingProfileGuides,
@@ -394,6 +398,7 @@ interface OpenDocumentSnapshot {
   activePaletteColors: string[];
   guides?: CanvasGuide[];
   workMode?: ProjectWorkMode;
+  onionSkinConfig?: OnionSkinConfig;
 }
 
 function formatRecentDate(timestamp?: number): string {
@@ -1066,7 +1071,148 @@ export default function App() {
   const [showPivot, setShowPivot] = useState<boolean>(false);
   const [globalPivot, setGlobalPivot] = useState<{ x: number; y: number }>({ x: 32, y: 53 });
   const [onionSkinEnabled, setOnionSkinEnabled] = useState<boolean>(true);
-  const [onionSkinOpacity, setOnionSkinOpacity] = useState<number>(0.35);
+  const [onionSkinOpacity, setOnionSkinOpacity] = useState<number>(DEFAULT_ONION_SKIN_CONFIG.globalOpacity);
+  const [onionSkinPrev, setOnionSkinPrev] = useState<number>(DEFAULT_ONION_SKIN_CONFIG.prev.count);
+  const [onionSkinNext, setOnionSkinNext] = useState<number>(DEFAULT_ONION_SKIN_CONFIG.next.count);
+  const [onionSkinConfig, setOnionSkinConfig] = useState<OnionSkinConfig>(() => ({
+    ...DEFAULT_ONION_SKIN_CONFIG,
+    prev: { ...DEFAULT_ONION_SKIN_CONFIG.prev },
+    next: { ...DEFAULT_ONION_SKIN_CONFIG.next },
+    trail: { ...DEFAULT_ONION_SKIN_TRAIL_CONFIG },
+    motionPath: { ...DEFAULT_ONION_SKIN_CONFIG.motionPath },
+  }));
+
+  const normalizeLoadedOnionSkinConfig = useCallback(
+    (raw?: Partial<OnionSkinConfig> | null, legacy?: {
+      enabled?: boolean;
+      opacity?: number;
+      prev?: number;
+      next?: number;
+    }): OnionSkinConfig => {
+      const prevCount = Math.max(
+        0,
+        Math.min(20, Math.round(raw?.prev?.count ?? legacy?.prev ?? DEFAULT_ONION_SKIN_CONFIG.prev.count))
+      );
+      const nextCount = Math.max(
+        0,
+        Math.min(20, Math.round(raw?.next?.count ?? legacy?.next ?? DEFAULT_ONION_SKIN_CONFIG.next.count))
+      );
+      const globalOpacity = Math.max(
+        0,
+        Math.min(1, raw?.globalOpacity ?? legacy?.opacity ?? DEFAULT_ONION_SKIN_CONFIG.globalOpacity)
+      );
+      const prevOpacity = Math.max(
+        0,
+        Math.min(1, raw?.prev?.opacity ?? DEFAULT_ONION_SKIN_CONFIG.prev.opacity)
+      );
+      const nextOpacity = Math.max(
+        0,
+        Math.min(1, raw?.next?.opacity ?? DEFAULT_ONION_SKIN_CONFIG.next.opacity)
+      );
+      const trailRaw = raw?.trail;
+      return {
+        ...DEFAULT_ONION_SKIN_CONFIG,
+        ...(raw || {}),
+        enabled: raw?.enabled ?? legacy?.enabled ?? DEFAULT_ONION_SKIN_CONFIG.enabled,
+        globalOpacity,
+        prev: {
+          ...DEFAULT_ONION_SKIN_CONFIG.prev,
+          ...(raw?.prev || {}),
+          count: prevCount,
+          opacity: prevOpacity,
+        },
+        next: {
+          ...DEFAULT_ONION_SKIN_CONFIG.next,
+          ...(raw?.next || {}),
+          count: nextCount,
+          opacity: nextOpacity,
+        },
+        trail: {
+          ...DEFAULT_ONION_SKIN_TRAIL_CONFIG,
+          ...(trailRaw || {}),
+          framesCount: Math.max(
+            1,
+            Math.min(20, Math.round(trailRaw?.framesCount ?? DEFAULT_ONION_SKIN_TRAIL_CONFIG.framesCount))
+          ),
+          opacity: Math.max(0, Math.min(1, trailRaw?.opacity ?? DEFAULT_ONION_SKIN_TRAIL_CONFIG.opacity)),
+          decay: Math.max(0, Math.min(0.95, trailRaw?.decay ?? DEFAULT_ONION_SKIN_TRAIL_CONFIG.decay)),
+        },
+        motionPath: {
+          ...DEFAULT_ONION_SKIN_CONFIG.motionPath,
+          ...(raw?.motionPath || {}),
+        },
+      };
+    },
+    []
+  );
+
+  const handleChangeOnionSkinConfig = useCallback((next: OnionSkinConfig) => {
+    const trailRaw = next.trail || DEFAULT_ONION_SKIN_TRAIL_CONFIG;
+    const normalized: OnionSkinConfig = {
+      ...next,
+      globalOpacity: Math.max(0, Math.min(1, next.globalOpacity)),
+      prev: {
+        ...next.prev,
+        count: Math.max(0, Math.min(20, Math.round(next.prev.count))),
+        opacity: Math.max(0, Math.min(1, next.prev.opacity)),
+      },
+      next: {
+        ...next.next,
+        count: Math.max(0, Math.min(20, Math.round(next.next.count))),
+        opacity: Math.max(0, Math.min(1, next.next.opacity)),
+      },
+      trail: {
+        ...DEFAULT_ONION_SKIN_TRAIL_CONFIG,
+        ...trailRaw,
+        framesCount: Math.max(1, Math.min(20, Math.round(trailRaw.framesCount))),
+        opacity: Math.max(0, Math.min(1, trailRaw.opacity)),
+        decay: Math.max(0, Math.min(0.95, trailRaw.decay)),
+      },
+    };
+    setOnionSkinConfig(normalized);
+    setOnionSkinEnabled(Boolean(normalized.enabled));
+    setOnionSkinOpacity(normalized.globalOpacity);
+    setOnionSkinPrev(normalized.prev.count);
+    setOnionSkinNext(normalized.next.count);
+  }, []);
+
+  const handleToggleOnionSkinSynced = useCallback(() => {
+    setOnionSkinConfig((prev) => {
+      const nextEnabled = !prev.enabled;
+      setOnionSkinEnabled(nextEnabled);
+      return { ...prev, enabled: nextEnabled };
+    });
+  }, []);
+
+  const handleSetOnionSkinEnabledSynced = useCallback((enabled: boolean) => {
+    setOnionSkinEnabled(enabled);
+    setOnionSkinConfig((prev) => (prev.enabled === enabled ? prev : { ...prev, enabled }));
+  }, []);
+
+  const handleChangeOnionSkinOpacitySynced = useCallback((opacity: number) => {
+    const clamped = Math.max(0, Math.min(1, opacity));
+    setOnionSkinOpacity(clamped);
+    setOnionSkinConfig((prev) =>
+      prev.globalOpacity === clamped ? prev : { ...prev, globalOpacity: clamped }
+    );
+  }, []);
+
+  const handleChangeOnionSkinPrevSynced = useCallback((count: number) => {
+    const clamped = Math.max(0, Math.min(20, Math.round(count)));
+    setOnionSkinPrev(clamped);
+    setOnionSkinConfig((prev) =>
+      prev.prev.count === clamped ? prev : { ...prev, prev: { ...prev.prev, count: clamped } }
+    );
+  }, []);
+
+  const handleChangeOnionSkinNextSynced = useCallback((count: number) => {
+    const clamped = Math.max(0, Math.min(20, Math.round(count)));
+    setOnionSkinNext(clamped);
+    setOnionSkinConfig((prev) =>
+      prev.next.count === clamped ? prev : { ...prev, next: { ...prev.next, count: clamped } }
+    );
+  }, []);
+
   const [symmetryEnabled, setSymmetryEnabled] = useState<boolean>(false);
   const [symmetryConfig, setSymmetryConfig] = useState<SymmetryConfig>(() => ({
     ...DEFAULT_SYMMETRY_CONFIG,
@@ -1158,8 +1304,6 @@ export default function App() {
   const [lospecModalOpen, setLospecModalOpen] = useState<boolean>(false);
   const [localInstallerModalOpen, setLocalInstallerModalOpen] = useState<boolean>(false);
   const [spriteSheetModalOpen, setSpriteSheetModalOpen] = useState<boolean>(false);
-  const [onionSkinPrev, setOnionSkinPrev] = useState<number>(1);
-  const [onionSkinNext, setOnionSkinNext] = useState<number>(0);
   const [animationFps, setAnimationFps] = useState<number>(12);
   const [activeGroupId, setActiveGroupId] = useState<string | null>(null);
   const [isolateActiveGroup, setIsolateActiveGroup] = useState<boolean>(false);
@@ -4119,6 +4263,7 @@ export default function App() {
         onionSkinPrev,
         onionSkinNext,
         onionSkinOpacity,
+        onionSkinConfig,
         playbackMode,
         activeGroupId,
         isolateActiveGroup,
@@ -4155,6 +4300,7 @@ export default function App() {
         activePaletteColors: [...activePaletteColors],
         guides: JSON.parse(JSON.stringify(guidesRef.current)),
         workMode,
+        onionSkinConfig: JSON.parse(JSON.stringify(onionSkinConfig)),
       };
       recordRecentProject({
         name: projectName,
@@ -4184,7 +4330,7 @@ export default function App() {
     brushSize, pixelPerfect, ditherPattern, activeHitboxType, symmetryEnabled,
     symmetryAxis, showGrid, showHitboxes, showPivot, globalPivot, stageType,
     stageOpacity, groundConfig, dummyOpponent, combatFx, cameraShake, cameraKeyframes, onionSkinEnabled,
-    onionSkinPrev, onionSkinNext, onionSkinOpacity, playbackMode, activeGroupId,
+    onionSkinPrev, onionSkinNext, onionSkinOpacity, onionSkinConfig, playbackMode, activeGroupId,
     isolateActiveGroup, brushSettings, activePaletteColors, animationFps,
     references, referenceGroups, timelineMarkers, workMode, recordRecentProject, markDocumentSaved,
   ]);
@@ -4211,6 +4357,11 @@ export default function App() {
             combatFx,
             cameraShake,
             cameraKeyframes,
+            onionSkinEnabled,
+            onionSkinPrev,
+            onionSkinNext,
+            onionSkinOpacity,
+            onionSkinConfig,
             playbackMode,
             brushSettings,
             activePaletteColors,
@@ -4227,7 +4378,8 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [
     projectName, canvasWidth, canvasHeight, frames, clips, actionTags, layerGroups,
-    globalPivot, stageType, groundConfig, dummyOpponent, combatFx, cameraShake, cameraKeyframes, playbackMode,
+    globalPivot, stageType, groundConfig, dummyOpponent, combatFx, cameraShake, cameraKeyframes,
+    onionSkinEnabled, onionSkinPrev, onionSkinNext, onionSkinOpacity, onionSkinConfig, playbackMode,
     brushSettings, activePaletteColors, animationFps, performanceMode,
   ]);
 
@@ -4257,6 +4409,16 @@ export default function App() {
       if (saved.combatFx) setCombatFx(saved.combatFx);
       if (saved.cameraShake) setCameraShake(saved.cameraShake);
       if (Array.isArray(saved.cameraKeyframes)) setCameraKeyframes(saved.cameraKeyframes);
+      if (saved.onionSkinConfig || typeof saved.onionSkinEnabled === 'boolean') {
+        handleChangeOnionSkinConfig(
+          normalizeLoadedOnionSkinConfig(saved.onionSkinConfig, {
+            enabled: saved.onionSkinEnabled,
+            opacity: saved.onionSkinOpacity,
+            prev: saved.onionSkinPrev,
+            next: saved.onionSkinNext,
+          })
+        );
+      }
       if (saved.playbackMode) setPlaybackMode(saved.playbackMode);
       if (saved.brushSettings) handleChangeBrushSettings({ ...DEFAULT_BRUSH_SETTINGS, ...saved.brushSettings });
       if (Array.isArray(saved.activePaletteColors)) setActivePaletteColors(saved.activePaletteColors);
@@ -4268,7 +4430,7 @@ export default function App() {
       setImportNotification(`No se pudo restaurar autoguardado: ${err.message}`);
       setTimeout(() => setImportNotification(null), 4000);
     }
-  }, [handleChangeBrushSettings, pushHistory]);
+  }, [handleChangeBrushSettings, handleChangeOnionSkinConfig, normalizeLoadedOnionSkinConfig, pushHistory]);
 
   // Save Project JSON
   const handleSaveProjectJson = () => {
@@ -6236,35 +6398,107 @@ export default function App() {
     );
   };
 
-  // Focus & Reveal a specific modular panel (auto-expands, switches active tab, un-minimizes float)
-  const handleFocusPanel = useCallback((panelId: RightPanelId) => {
-    setWorkspaceLayout((prev) => {
-      const targetDock: PanelDockZone = prev.sidebarPosition === 'left' ? 'left-main' : 'right-main';
-      const nextFloating = { ...(prev.floatingPanels || {}) };
-      if (nextFloating[panelId]) {
-        nextFloating[panelId] = { ...nextFloating[panelId], minimized: false };
+  const reportHelpOrSearchError = useCallback(
+    (ctx: { action: string; selectedResult?: string; panelId?: string; error: unknown }) => {
+      const msg =
+        ctx.error instanceof Error
+          ? ctx.error.message
+          : typeof ctx.error === 'string'
+          ? ctx.error
+          : 'Error inesperado al ejecutar acción de Ayuda o Buscador F1';
+      console.error('[PixelClash Help/F1 Error]', {
+        action: ctx.action,
+        selectedResult: ctx.selectedResult || null,
+        panelId: ctx.panelId || null,
+        message: msg,
+        error: ctx.error,
+      });
+      appendStudioLog(
+        `[Ayuda/F1] Error en "${ctx.action}" (${ctx.selectedResult || ctx.panelId || 'sin destino'}): ${msg}`
+      );
+      setImportNotification(`No se pudo abrir "${ctx.selectedResult || ctx.panelId || ctx.action}": ${msg}`);
+      window.setTimeout(() => setImportNotification(null), 4500);
+    },
+    [appendStudioLog]
+  );
+
+  // Focus & Reveal a specific modular panel (auto-expands, injects missing registry panel, switches active tab, un-minimizes float)
+  const handleFocusPanel = useCallback(
+    (panelId: RightPanelId) => {
+      try {
+        if (framesRef.current.length > 0) {
+          setHomeScreenOpen(false);
+        }
+        setWorkspaceLayout((prev) => {
+          const targetDock: PanelDockZone = prev.sidebarPosition === 'left' ? 'left-main' : 'right-main';
+          const nextFloating = { ...(prev.floatingPanels || {}) };
+          if (nextFloating[panelId]) {
+            nextFloating[panelId] = { ...nextFloating[panelId], minimized: false };
+          }
+          const hasPanel = prev.rightPanels.some((p) => p.id === panelId);
+          let nextPanels = prev.rightPanels.map((p) => {
+            if (p.id !== panelId) return p;
+            if (panelId === 'topbar') {
+              return { ...p, visible: true, expanded: true, dock: p.dock || 'top' };
+            }
+            if (panelId === 'toolbar') {
+              return { ...p, visible: true, expanded: true, dock: p.dock || 'left-main' };
+            }
+            return {
+              ...p,
+              visible: true,
+              expanded: true,
+              dock: p.dock && p.dock.endsWith('mini') ? targetDock : p.dock || targetDock,
+            };
+          });
+          if (!hasPanel) {
+            const reg = PANEL_REGISTRY.find((r) => r.id === panelId);
+            if (reg) {
+              const fallbackDock: PanelDockZone =
+                panelId === 'topbar'
+                  ? 'top'
+                  : panelId === 'toolbar'
+                  ? 'left-main'
+                  : targetDock;
+              nextPanels = [
+                ...nextPanels,
+                {
+                  id: reg.id,
+                  title: reg.title,
+                  visible: true,
+                  expanded: true,
+                  dock: fallbackDock,
+                },
+              ];
+            }
+          }
+          return {
+            ...prev,
+            showTopBar: panelId === 'topbar' ? true : prev.showTopBar,
+            toolbarPosition:
+              panelId === 'toolbar' && prev.toolbarPosition === 'hidden'
+                ? 'left'
+                : prev.toolbarPosition,
+            sidebarPosition:
+              panelId !== 'topbar' && panelId !== 'toolbar' && prev.sidebarPosition === 'hidden'
+                ? 'right'
+                : prev.sidebarPosition,
+            floatingPanels: nextFloating,
+            tabGroups: (prev.tabGroups || []).map((g) =>
+              g.panelIds.includes(panelId) ? { ...g, activePanelId: panelId } : g
+            ),
+            rightPanels: nextPanels,
+          };
+        });
+        if (panelId !== 'topbar' && panelId !== 'toolbar') {
+          setRightSidebarOpen(true);
+        }
+      } catch (error) {
+        reportHelpOrSearchError({ action: 'focus_panel', panelId, error });
       }
-      return {
-        ...prev,
-        sidebarPosition: prev.sidebarPosition === 'hidden' ? 'right' : prev.sidebarPosition,
-        floatingPanels: nextFloating,
-        tabGroups: (prev.tabGroups || []).map((g) =>
-          g.panelIds.includes(panelId) ? { ...g, activePanelId: panelId } : g
-        ),
-        rightPanels: prev.rightPanels.map((p) =>
-          p.id === panelId
-            ? {
-                ...p,
-                visible: true,
-                expanded: true,
-                dock: p.dock && p.dock.endsWith('mini') ? targetDock : p.dock || targetDock,
-              }
-            : p
-        ),
-      };
-    });
-    setRightSidebarOpen(true);
-  }, []);
+    },
+    [reportHelpOrSearchError]
+  );
 
   const handleToggleFloatToolbar = useCallback(() => {
     setWorkspaceLayout((prev) => {
@@ -6295,61 +6529,99 @@ export default function App() {
 
   const handleLocateHelpItem = useCallback(
     (item: HelpCatalogItem) => {
-      setToolGuideModalOpen(false);
-      setWhatIsThisActive(false);
+      try {
+        setToolGuideModalOpen(false);
+        setWhatIsThisActive(false);
+        if (framesRef.current.length > 0) {
+          setHomeScreenOpen(false);
+        }
 
-      if (item.toolId) {
-        handleSelectTool(item.toolId);
-      }
-      if (item.panelId) {
-        if (item.panelId === 'toolbar') {
-          setWorkspaceLayout((prev) => ({
+        if (item.id === 'tool.shading') {
+          setActiveTool('pencil');
+          setBrushSettings((prev) => ({
             ...prev,
-            toolbarPosition: prev.toolbarPosition === 'hidden' ? 'left' : prev.toolbarPosition,
-            rightPanels: prev.rightPanels.map((p) =>
-              p.id === 'toolbar' ? { ...p, visible: true, expanded: true } : p
-            ),
+            celShadeEnabled: true,
+            smearEnabled: false,
           }));
-        } else {
+          handleFocusPanel('brushes');
+        } else if (item.id === 'tool.smear') {
+          setActiveTool('pencil');
+          setBrushSettings((prev) => ({
+            ...prev,
+            smearEnabled: true,
+            celShadeEnabled: false,
+          }));
+          handleFocusPanel('brushes');
+        } else if (item.id === 'tool.dither') {
+          setActiveTool('pencil');
+          setDitherConfig((prev) => ({ ...prev, enabled: true }));
+          handleFocusPanel('brushes');
+        } else if (item.id === 'tool.move_reference') {
+          setActiveTool('move');
+          setMoveSubTool('move_reference');
+          handleFocusPanel('references');
+        } else if (item.id === 'panel.pureref') {
+          handleFocusPanel('references');
+        } else if (item.toolId) {
+          handleSelectTool(item.toolId);
+        }
+
+        if (item.panelId) {
           handleFocusPanel(item.panelId);
         }
-      }
-      if (item.actionId) {
-        switch (item.actionId) {
-          case 'open_transform':
-            startTransformSession('free');
-            handleFocusPanel('properties');
-            break;
-          case 'open_appearance':
-            openLayoutModal('style');
-            break;
-          case 'open_new_project':
-            setNewProjectModalOpen(true);
-            break;
-          case 'open_workspace':
-            openLayoutModal('layout');
-            break;
-          case 'toggle_ui_edit':
-            setWorkspaceLayout((prev) => ({ ...prev, uiEditMode: true, totalFreedomMode: true }));
-            break;
-          case 'open_camera_shake':
-            handleFocusPanel('animation');
-            break;
-          case 'open_timeline_curves':
-            setForceOpenCurvesNonce((n) => n + 1);
-            break;
+        if (item.actionId) {
+          switch (item.actionId) {
+            case 'open_transform':
+              startTransformSession('free');
+              handleFocusPanel('properties');
+              break;
+            case 'open_appearance':
+              openLayoutModal('style');
+              break;
+            case 'open_new_project':
+              setNewProjectModalOpen(true);
+              break;
+            case 'open_workspace':
+              openLayoutModal('layout');
+              break;
+            case 'toggle_ui_edit':
+              setWorkspaceLayout((prev) => ({ ...prev, uiEditMode: true, totalFreedomMode: true }));
+              break;
+            case 'open_camera_shake':
+              handleFocusPanel('animation');
+              break;
+            case 'open_timeline_curves':
+              setForceOpenCurvesNonce((n) => n + 1);
+              break;
+          }
         }
-      }
 
-      window.setTimeout(() => {
-        setSpotlightTarget({
-          helpId: item.id,
-          label: item.name,
-          hint: item.howToAccess,
+        window.setTimeout(() => {
+          try {
+            setSpotlightTarget({
+              helpId: item.id,
+              label: item.name,
+              hint: item.howToAccess,
+            });
+          } catch (innerError) {
+            reportHelpOrSearchError({
+              action: 'locate_help_spotlight',
+              selectedResult: item.name,
+              panelId: item.panelId,
+              error: innerError,
+            });
+          }
+        }, 150);
+      } catch (error) {
+        reportHelpOrSearchError({
+          action: 'locate_help_item',
+          selectedResult: item?.name || item?.id,
+          panelId: item?.panelId,
+          error,
         });
-      }, 150);
+      }
     },
-    [handleFocusPanel, handleSelectTool, openLayoutModal, startTransformSession]
+    [handleFocusPanel, handleSelectTool, openLayoutModal, reportHelpOrSearchError, startTransformSession]
   );
 
   // =========================================================
@@ -8214,6 +8486,7 @@ export default function App() {
     activePaletteColors: [...activePaletteColors],
     guides: JSON.parse(JSON.stringify(guidesRef.current)),
     workMode,
+    onionSkinConfig: JSON.parse(JSON.stringify(onionSkinConfig)),
   }), [
     projectName,
     canvasWidth,
@@ -8227,6 +8500,7 @@ export default function App() {
     cameraShake,
     activePaletteColors,
     workMode,
+    onionSkinConfig,
   ]);
 
   const applyDocumentSnapshot = useCallback(
@@ -8262,13 +8536,16 @@ export default function App() {
       guidesRef.current = nextGuides;
       setGuides(nextGuides);
       setWorkMode(snap.workMode || 'fighter');
+      if (snap.onionSkinConfig) {
+        handleChangeOnionSkinConfig(normalizeLoadedOnionSkinConfig(snap.onionSkinConfig));
+      }
       setSelectedGuideId(null);
       setSelection(null);
       suppressDirtyMarkRef.current = true;
       pushHistorySnapshot({ frames: nextFrames, guides: nextGuides, layerGroups: nextGroups });
       suppressDirtyMarkRef.current = false;
     },
-    [pushHistorySnapshot]
+    [handleChangeOnionSkinConfig, normalizeLoadedOnionSkinConfig, pushHistorySnapshot]
   );
 
   // =========================================================================
@@ -9008,6 +9285,7 @@ export default function App() {
       let nextPalette: string[] = [];
       let nextGuides: CanvasGuide[] = [];
       let nextWorkMode: ProjectWorkMode = 'fighter';
+      let nextOnionSkinConfig: OnionSkinConfig | undefined;
 
       if (res.projectState) {
         const ps = res.projectState;
@@ -9032,6 +9310,15 @@ export default function App() {
         if (Array.isArray(ps.timelineMarkers)) nextMarkers = ps.timelineMarkers;
         if (Array.isArray(ps.guides)) nextGuides = ps.guides;
         if (ps.workMode) nextWorkMode = ps.workMode;
+        if (ps.onionSkinConfig || typeof ps.onionSkinEnabled === 'boolean') {
+          nextOnionSkinConfig = normalizeLoadedOnionSkinConfig(ps.onionSkinConfig, {
+            enabled: ps.onionSkinEnabled,
+            opacity: ps.onionSkinOpacity,
+            prev: ps.onionSkinPrev,
+            next: ps.onionSkinNext,
+          });
+          handleChangeOnionSkinConfig(nextOnionSkinConfig);
+        }
       }
 
       const openedSnapshot: OpenDocumentSnapshot = {
@@ -9054,6 +9341,7 @@ export default function App() {
         activePaletteColors: nextPalette,
         guides: nextGuides,
         workMode: nextWorkMode,
+        onionSkinConfig: nextOnionSkinConfig,
       };
 
       const fmt: RecentProjectFileFormat =
@@ -9114,7 +9402,14 @@ export default function App() {
         setPsdCompatibilityReport(res.psdCompatibilityReport);
       }
     },
-    [cameraShake, handleChangeBrushSettings, hydrateOpenedDocumentSnapshot, recordRecentProject]
+    [
+      cameraShake,
+      handleChangeBrushSettings,
+      handleChangeOnionSkinConfig,
+      hydrateOpenedDocumentSnapshot,
+      normalizeLoadedOnionSkinConfig,
+      recordRecentProject,
+    ]
   );
 
   // =========================================================================
@@ -9695,6 +9990,7 @@ export default function App() {
         onionSkinPrev,
         onionSkinNext,
         onionSkinOpacity,
+        onionSkinConfig: isLive ? onionSkinConfig : snap!.onionSkinConfig || onionSkinConfig,
         playbackMode: isLive ? playbackMode : snap!.playbackMode || 'loop',
         activeGroupId,
         isolateActiveGroup,
@@ -9714,7 +10010,7 @@ export default function App() {
       pixelPerfect, ditherPattern, activeHitboxType, symmetryEnabled, symmetryAxis,
       showGrid, showHitboxes, showPivot, globalPivot, stageType, stageOpacity,
       groundConfig, dummyOpponent, combatFx, cameraShake, onionSkinEnabled, onionSkinPrev,
-      onionSkinNext, onionSkinOpacity, playbackMode, activeGroupId, isolateActiveGroup,
+      onionSkinNext, onionSkinOpacity, onionSkinConfig, playbackMode, activeGroupId, isolateActiveGroup,
       brushSettings, activePaletteColors, animationFps, workMode,
     ]
   );
@@ -11033,279 +11329,314 @@ export default function App() {
   // System 3: Unified Command Dispatcher & Macro Recorder / Runner
   const executeCommandById = useCallback(
     (commandId: string, recordStep: boolean = true) => {
-      if (recordStep && isRecordingMacro && commandId !== 'cmd.shortcuts_editor') {
-        const meta = shortcutBindings.find((b) => b.id === commandId);
-        setRecordedMacroSteps((prev) => [
-          ...prev,
-          { id: `step-${Date.now()}-${prev.length}`, actionId: commandId, label: meta?.label || commandId },
-        ]);
-      }
+      try {
+        if (recordStep && isRecordingMacro && commandId !== 'cmd.shortcuts_editor') {
+          const meta = shortcutBindings.find((b) => b.id === commandId);
+          setRecordedMacroSteps((prev) => [
+            ...prev,
+            { id: `step-${Date.now()}-${prev.length}`, actionId: commandId, label: meta?.label || commandId },
+          ]);
+        }
 
-      switch (commandId) {
-        case 'cmd.command_palette':
-          setCommandPaletteOpen((v) => !v);
-          break;
-        case 'cmd.what_is_this_mode':
-          setWhatIsThisActive((v) => !v);
-          break;
-        case 'cmd.where_is_tool':
-          setToolGuideFocusSearchNonce((n) => n + 1);
-          setToolGuideModalOpen(true);
-          break;
-        case 'cmd.shortcuts_editor':
-          setShortcutsModalOpen(true);
-          break;
-        case 'cmd.save_pcs':
-          void handleSmartSave();
-          break;
-        case 'cmd.open_file':
-          void handleOpenFilePicker();
-          break;
-        case 'cmd.smart_import':
-          handleTriggerImport('smart');
-          break;
-        case 'cmd.new_project':
-          setNewProjectModalOpen(true);
-          break;
-        case 'cmd.workspace_modal':
-          openLayoutModal('layout');
-          break;
-        case 'cmd.toggle_ui_edit_mode':
-        case 'cmd.toggle_total_freedom':
-          setWorkspaceLayout((prev) => {
-            const nextEditMode = !prev.uiEditMode;
-            if (nextEditMode) {
-              appendStudioLog('Modo Edición Libre: ACTIVADO (TopBar, Herramientas, Paneles y Orden de Herramientas desbloqueados)');
+        switch (commandId) {
+          case 'cmd.command_palette':
+            setCommandPaletteOpen((v) => !v);
+            break;
+          case 'cmd.what_is_this_mode':
+            setWhatIsThisActive((v) => !v);
+            break;
+          case 'cmd.where_is_tool':
+            setToolGuideFocusSearchNonce((n) => n + 1);
+            setToolGuideModalOpen(true);
+            break;
+          case 'cmd.shortcuts_editor':
+            setShortcutsModalOpen(true);
+            break;
+          case 'cmd.save_pcs':
+            void handleSmartSave();
+            break;
+          case 'cmd.open_file':
+            void handleOpenFilePicker();
+            break;
+          case 'cmd.smart_import':
+            handleTriggerImport('smart');
+            break;
+          case 'cmd.new_project':
+            setNewProjectModalOpen(true);
+            break;
+          case 'cmd.workspace_modal':
+            openLayoutModal('layout');
+            break;
+          case 'cmd.toggle_ui_edit_mode':
+          case 'cmd.toggle_total_freedom':
+            setWorkspaceLayout((prev) => {
+              const nextEditMode = !prev.uiEditMode;
+              if (nextEditMode) {
+                appendStudioLog('Modo Edición Libre: ACTIVADO (TopBar, Herramientas, Paneles y Orden de Herramientas desbloqueados)');
+                return {
+                  ...prev,
+                  uiEditMode: true,
+                  totalFreedomMode: true,
+                  rightPanels: prev.rightPanels.map((p) =>
+                    p.id === 'toolbar'
+                      ? { ...p, visible: prev.toolbarPosition !== 'hidden' }
+                      : p.id === 'topbar'
+                      ? { ...p, visible: prev.showTopBar }
+                      : p
+                  ),
+                };
+              }
+              const toolbarPanel = prev.rightPanels.find((p) => p.id === 'toolbar');
+              const topbarPanel = prev.rightPanels.find((p) => p.id === 'topbar');
+              const hasCustomBarDock =
+                Boolean(prev.floatingPanels?.toolbar?.isFloating) ||
+                Boolean(prev.floatingPanels?.topbar?.isFloating) ||
+                (toolbarPanel && (toolbarPanel.dock || 'left-main') !== 'left-main') ||
+                (topbarPanel && (topbarPanel.dock || 'top') !== 'top') ||
+                Boolean(
+                  prev.tabGroups?.some(
+                    (g) => g.panelIds.includes('toolbar') || g.panelIds.includes('topbar')
+                  )
+                );
+              appendStudioLog('Modo Edición Libre: DESACTIVADO');
               return {
                 ...prev,
-                uiEditMode: true,
-                totalFreedomMode: true,
-                rightPanels: prev.rightPanels.map((p) =>
-                  p.id === 'toolbar'
-                    ? { ...p, visible: prev.toolbarPosition !== 'hidden' }
-                    : p.id === 'topbar'
-                    ? { ...p, visible: prev.showTopBar }
-                    : p
-                ),
+                uiEditMode: false,
+                totalFreedomMode: hasCustomBarDock,
               };
-            }
-            const toolbarPanel = prev.rightPanels.find((p) => p.id === 'toolbar');
-            const topbarPanel = prev.rightPanels.find((p) => p.id === 'topbar');
-            const hasCustomBarDock =
-              Boolean(prev.floatingPanels?.toolbar?.isFloating) ||
-              Boolean(prev.floatingPanels?.topbar?.isFloating) ||
-              (toolbarPanel && (toolbarPanel.dock || 'left-main') !== 'left-main') ||
-              (topbarPanel && (topbarPanel.dock || 'top') !== 'top') ||
-              Boolean(
-                prev.tabGroups?.some(
-                  (g) => g.panelIds.includes('toolbar') || g.panelIds.includes('topbar')
-                )
-              );
-            appendStudioLog('Modo Edición Libre: DESACTIVADO');
-            return {
+            });
+            setRightSidebarOpen(true);
+            break;
+          case 'cmd.compact_mode':
+            setWorkspaceLayout((prev) => ({
               ...prev,
-              uiEditMode: false,
-              totalFreedomMode: hasCustomBarDock,
-            };
-          });
-          setRightSidebarOpen(true);
-          break;
-        case 'cmd.compact_mode':
-          setWorkspaceLayout((prev) => ({
-            ...prev,
-            compactMode: !prev.compactMode,
-            templateId: 'custom',
-          }));
-          break;
-        case 'cmd.export_modal':
-          setExportModalTab('advanced');
-          setExportModalOpen(true);
-          break;
-        case 'edit.undo':
-          handleUndo();
-          break;
-        case 'edit.redo':
-          handleRedo();
-          break;
-        case 'edit.copy':
-          handleCopyLayerOrSelection();
-          break;
-        case 'edit.cut':
-          handleCutLayerOrSelection();
-          break;
-        case 'edit.paste':
-          void handleSmartGlobalPaste(false);
-          break;
-        case 'edit.paste_in_place':
-          handlePasteClipboard(true, true);
-          break;
-        case 'edit.swap_colors':
-          setPrimaryColor(secondaryColor);
-          setSecondaryColor(primaryColor);
-          break;
-        case 'edit.smart_delete':
-          handleSmartDelete();
-          break;
-        case 'edit.clear_frame':
-          handleClearFrame();
-          break;
-        case 'layer.new':
-          handleAddLayer('raster');
-          break;
-        case 'layer.duplicate':
-          handleMassDuplicateLayers(
-            selectedLayerIndices.length > 0 ? selectedLayerIndices : [currentLayerIndex]
-          );
-          break;
-        case 'layer.toggle_global':
-          if (currentLayer) {
-            handleUpdateLayerMeta(currentLayerIndex, { isGlobal: !currentLayer.isGlobal });
+              compactMode: !prev.compactMode,
+              templateId: 'custom',
+            }));
+            break;
+          case 'cmd.export_modal':
+            setExportModalTab('advanced');
+            setExportModalOpen(true);
+            break;
+          case 'edit.undo':
+            handleUndo();
+            break;
+          case 'edit.redo':
+            handleRedo();
+            break;
+          case 'edit.copy':
+            handleCopyLayerOrSelection();
+            break;
+          case 'edit.cut':
+            handleCutLayerOrSelection();
+            break;
+          case 'edit.paste':
+            void handleSmartGlobalPaste(false);
+            break;
+          case 'edit.paste_in_place':
+            handlePasteClipboard(true, true);
+            break;
+          case 'edit.swap_colors':
+            setPrimaryColor(secondaryColor);
+            setSecondaryColor(primaryColor);
+            break;
+          case 'edit.smart_delete':
+            handleSmartDelete();
+            break;
+          case 'edit.clear_frame':
+            handleClearFrame();
+            break;
+          case 'layer.new':
+            handleAddLayer('raster');
+            break;
+          case 'layer.duplicate':
+            handleMassDuplicateLayers(
+              selectedLayerIndices.length > 0 ? selectedLayerIndices : [currentLayerIndex]
+            );
+            break;
+          case 'layer.toggle_global':
+            if (currentLayer) {
+              handleUpdateLayerMeta(currentLayerIndex, { isGlobal: !currentLayer.isGlobal });
+            }
+            break;
+          case 'layer.new_adjustment':
+            handleCreateAdjustmentLayer(DEFAULT_ADJUSTMENT_CONFIG, 'Ajuste Color');
+            break;
+          case 'layer.new_group':
+            handleCreateLayerGroup(`Carpeta ${layerGroups.length + 1}`, '#3b82f6');
+            break;
+          case 'layer.merge':
+            if (selectedLayerIndices.length >= 2) handleMergeLayers(selectedLayerIndices);
+            break;
+          case 'layer.rename_shadow':
+            handleUpdateLayerMeta(currentLayerIndex, { name: 'Sombras' });
+            break;
+          case 'layer.blend_multiply':
+            handleUpdateLayerMeta(currentLayerIndex, { blendMode: 'multiply', opacity: 0.65 });
+            break;
+          case 'sel.deselect':
+            setSelection(null);
+            break;
+          case 'transform.free':
+            startTransformSession('free');
+            break;
+          case 'transform.flip_h':
+            handleTransformAction('flip_h');
+            break;
+          case 'transform.flip_v':
+            handleTransformAction('flip_v');
+            break;
+          case 'transform.rot_90_cw':
+            handleTransformAction('rot_90_cw');
+            break;
+          case 'transform.rot_90_ccw':
+            handleTransformAction('rot_90_ccw');
+            break;
+          case 'transform.center':
+            handleTransformAction('center_canvas');
+            break;
+          case 'anim.play_pause':
+            setIsPlaying((p) => !p);
+            break;
+          case 'anim.add_frame':
+            handleAddFrame();
+            break;
+          case 'anim.prev_frame':
+            setCurrentFrameIndex((prev) => (prev > 0 ? prev - 1 : frames.length - 1));
+            break;
+          case 'anim.next_frame':
+            setCurrentFrameIndex((prev) => (prev < frames.length - 1 ? prev + 1 : 0));
+            break;
+          case 'anim.onion_skin':
+            handleToggleOnionSkinSynced();
+            break;
+          case 'anim.animator_preset':
+            handleChangeOnionSkinConfig(applyOnionSkinPreset(onionSkinConfig, 'animator'));
+            break;
+          case 'anim.trail_mode': {
+            const baseTrail = onionSkinConfig.trail || DEFAULT_ONION_SKIN_TRAIL_CONFIG;
+            handleChangeOnionSkinConfig({
+              ...onionSkinConfig,
+              enabled: true,
+              trail: { ...baseTrail, enabled: !baseTrail.enabled },
+            });
+            break;
           }
-          break;
-        case 'layer.new_adjustment':
-          handleCreateAdjustmentLayer(DEFAULT_ADJUSTMENT_CONFIG, 'Ajuste Color');
-          break;
-        case 'layer.new_group':
-          handleCreateLayerGroup(`Carpeta ${layerGroups.length + 1}`, '#3b82f6');
-          break;
-        case 'layer.merge':
-          if (selectedLayerIndices.length >= 2) handleMergeLayers(selectedLayerIndices);
-          break;
-        case 'layer.rename_shadow':
-          handleUpdateLayerMeta(currentLayerIndex, { name: 'Sombras' });
-          break;
-        case 'layer.blend_multiply':
-          handleUpdateLayerMeta(currentLayerIndex, { blendMode: 'multiply', opacity: 0.65 });
-          break;
-        case 'sel.deselect':
-          setSelection(null);
-          break;
-        case 'transform.free':
-          startTransformSession('free');
-          break;
-        case 'transform.flip_h':
-          handleTransformAction('flip_h');
-          break;
-        case 'transform.flip_v':
-          handleTransformAction('flip_v');
-          break;
-        case 'transform.rot_90_cw':
-          handleTransformAction('rot_90_cw');
-          break;
-        case 'transform.rot_90_ccw':
-          handleTransformAction('rot_90_ccw');
-          break;
-        case 'transform.center':
-          handleTransformAction('center_canvas');
-          break;
-        case 'anim.play_pause':
-          setIsPlaying((p) => !p);
-          break;
-        case 'anim.add_frame':
-          handleAddFrame();
-          break;
-        case 'anim.prev_frame':
-          setCurrentFrameIndex((prev) => (prev > 0 ? prev - 1 : frames.length - 1));
-          break;
-        case 'anim.next_frame':
-          setCurrentFrameIndex((prev) => (prev < frames.length - 1 ? prev + 1 : 0));
-          break;
-        case 'anim.onion_skin':
-          setOnionSkinEnabled((v) => !v);
-          break;
-        case 'anim.camera_shake_test':
-          setCameraShakeTestNonce((n) => n + 1);
-          break;
-        case 'vector.pixel_preview_toggle':
-          setShowPixelPerfectVectorPreview((v) => !v);
-          break;
-        case 'pixel.brush_dec':
-          handleChangeBrushSizeSynced(brushSize - 1);
-          break;
-        case 'pixel.brush_inc':
-          handleChangeBrushSizeSynced(brushSize + 1);
-          break;
-        case 'view.grid':
-          setShowGrid((v) => !v);
-          break;
-        case 'view.toggle_fullscreen':
-          handleToggleMaximizeWindow();
-          break;
-        case 'view.zoom_in':
-          triggerZoomAction('in');
-          break;
-        case 'view.zoom_out':
-          triggerZoomAction('out');
-          break;
-        case 'view.zoom_fit':
-          triggerZoomAction('fit');
-          break;
-        case 'view.zoom_100':
-          triggerZoomAction('percent', 100);
-          break;
-        case 'prefs.selection_display':
-          openLayoutModal('selections');
-          break;
-        case 'ai.open_panel':
-          handleFocusPanel('ai');
-          break;
-        case 'ai.dummie_apply':
-          handleFocusPanel('references');
-          setApplyPoseModalOpen(true);
-          break;
-        case 'fg.toggle_hitboxes':
-          setShowHitboxes((v) => !v);
-          break;
-        case 'fg.combat_test':
-          setCombatTestActive((v) => !v);
-          break;
-        case 'cmd.pure_ref_toggle':
-          setPureRefConfig((prev) => ({ ...prev, enabled: !prev.enabled }));
-          break;
-        case 'cmd.center_references':
-          handleCenterAllReferences();
-          break;
-        case 'tool.move_object':
-          setActiveTool('move');
-          setMoveSubTool('move_object');
-          break;
-        case 'tool.move_layer':
-          setActiveTool('move');
-          setMoveSubTool('move_layer');
-          break;
-        case 'tool.move_selection':
-          setActiveTool('move');
-          setMoveSubTool('move_selection');
-          break;
-        case 'tool.move_reference':
-          setActiveTool('move');
-          setMoveSubTool('move_reference');
-          break;
-        case 'tool.direct_select':
-          setActiveTool('move');
-          setMoveSubTool('direct_select');
-          break;
-        case 'tool.lasso_magnetic':
-          setLassoMode('magnetic');
-          setActiveTool('lasso');
-          break;
-        case 'tool.bucket_gradient':
-          setBucketSubTool('gradient');
-          setActiveTool('bucket');
-          break;
-        case 'tool.bucket_dither_gradient':
-          setBucketSubTool('dither_gradient');
-          setActiveTool('bucket');
-          break;
-        case 'tool.zoom':
-          handleSelectTool('zoom');
-          break;
-        default:
-          if (commandId.startsWith('tool.')) {
-            const toolId = commandId.slice(5) as ToolType;
-            handleSelectTool(toolId);
-          }
-          break;
+          case 'anim.motion_path':
+            handleChangeOnionSkinConfig({
+              ...onionSkinConfig,
+              motionPath: {
+                ...onionSkinConfig.motionPath,
+                enabled: !onionSkinConfig.motionPath.enabled,
+              },
+            });
+            break;
+          case 'anim.camera_shake_test':
+            setCameraShakeTestNonce((n) => n + 1);
+            break;
+          case 'vector.pixel_preview_toggle':
+            setShowPixelPerfectVectorPreview((v) => !v);
+            break;
+          case 'pixel.brush_dec':
+            handleChangeBrushSizeSynced(brushSize - 1);
+            break;
+          case 'pixel.brush_inc':
+            handleChangeBrushSizeSynced(brushSize + 1);
+            break;
+          case 'view.grid':
+            setShowGrid((v) => !v);
+            break;
+          case 'view.toggle_fullscreen':
+            handleToggleMaximizeWindow();
+            break;
+          case 'view.zoom_in':
+            triggerZoomAction('in');
+            break;
+          case 'view.zoom_out':
+            triggerZoomAction('out');
+            break;
+          case 'view.zoom_fit':
+            triggerZoomAction('fit');
+            break;
+          case 'view.zoom_100':
+            triggerZoomAction('percent', 100);
+            break;
+          case 'prefs.selection_display':
+            openLayoutModal('selections');
+            break;
+          case 'ai.open_panel':
+            handleFocusPanel('ai');
+            break;
+          case 'ai.dummie_apply':
+            handleFocusPanel('references');
+            setApplyPoseModalOpen(true);
+            break;
+          case 'fg.toggle_hitboxes':
+            setShowHitboxes((v) => !v);
+            break;
+          case 'fg.combat_test':
+            setCombatTestActive((v) => !v);
+            break;
+          case 'cmd.pure_ref_toggle':
+            setPureRefConfig((prev) => ({ ...prev, enabled: !prev.enabled }));
+            break;
+          case 'cmd.center_references':
+            handleCenterAllReferences();
+            break;
+          case 'tool.move_object':
+            setActiveTool('move');
+            setMoveSubTool('move_object');
+            break;
+          case 'tool.move_layer':
+            setActiveTool('move');
+            setMoveSubTool('move_layer');
+            break;
+          case 'tool.move_selection':
+            setActiveTool('move');
+            setMoveSubTool('move_selection');
+            break;
+          case 'tool.move_reference':
+            setActiveTool('move');
+            setMoveSubTool('move_reference');
+            break;
+          case 'tool.direct_select':
+            setActiveTool('move');
+            setMoveSubTool('direct_select');
+            break;
+          case 'tool.lasso_magnetic':
+            setLassoMode('magnetic');
+            setActiveTool('lasso');
+            break;
+          case 'tool.bucket_gradient':
+            setBucketSubTool('gradient');
+            setActiveTool('bucket');
+            break;
+          case 'tool.bucket_dither_gradient':
+            setBucketSubTool('dither_gradient');
+            setActiveTool('bucket');
+            break;
+          case 'tool.zoom':
+            handleSelectTool('zoom');
+            break;
+          default:
+            if (commandId.startsWith('tool.')) {
+              const toolId = commandId.slice(5) as ToolType;
+              handleSelectTool(toolId);
+            } else {
+              reportHelpOrSearchError({
+                action: 'execute_command_unknown',
+                selectedResult: commandId,
+                error: new Error(`Comando no reconocido: "${commandId}"`),
+              });
+            }
+            break;
+        }
+      } catch (error) {
+        reportHelpOrSearchError({
+          action: 'execute_command',
+          selectedResult: commandId,
+          error,
+        });
       }
     },
     [
@@ -11313,6 +11644,7 @@ export default function App() {
       shortcutBindings,
       handleSmartSave,
       handleOpenFilePicker,
+      handleTriggerImport,
       openLayoutModal,
       handleUndo,
       handleRedo,
@@ -11321,6 +11653,8 @@ export default function App() {
       handleSmartGlobalPaste,
       handlePasteClipboard,
       handleSmartDelete,
+      handleClearFrame,
+      handleAddLayer,
       secondaryColor,
       primaryColor,
       handleMassDuplicateLayers,
@@ -11329,18 +11663,25 @@ export default function App() {
       currentLayer,
       handleUpdateLayerMeta,
       handleCreateAdjustmentLayer,
+      handleCreateLayerGroup,
       layerGroups.length,
       handleMergeLayers,
       startTransformSession,
       handleTransformAction,
+      handleAddFrame,
       frames.length,
+      handleToggleOnionSkinSynced,
+      handleChangeOnionSkinConfig,
+      onionSkinConfig,
       handleChangeBrushSizeSynced,
       brushSize,
+      handleToggleMaximizeWindow,
       handleFocusPanel,
       appendStudioLog,
       handleCenterAllReferences,
       handleSelectTool,
       triggerZoomAction,
+      reportHelpOrSearchError,
     ]
   );
 
@@ -11599,6 +11940,7 @@ export default function App() {
     onionSkinPrev,
     onionSkinNext,
     onionSkinOpacity,
+    onionSkinConfig,
     playbackMode,
     activeGroupId,
     isolateActiveGroup,
@@ -11610,6 +11952,683 @@ export default function App() {
     timelineMarkers,
     workMode,
   };
+
+  const memoizedUniversalItems = useMemo<UniversalSearchItem[]>(() => [
+    // 0. Project Work Modes & FX Studio / FX Lab
+    {
+      id: 'fx.studio_generator',
+      title: 'Generar Efecto (Estudio FX Avanzado)',
+      subtitle: '17 tipos · 12 estilos · 9 sliders · preview en tiempo real y multi-capa',
+      category: 'IA',
+      keywords: 'fx efecto fuego rayo energia explosion particulas slash aura ia',
+      onExecute: () => handleOpenFxStudio('generator'),
+    },
+    {
+      id: 'fx.lab_modular',
+      title: 'FX Lab (Editor Visual Modular de Efectos)',
+      subtitle: 'Combina Partículas, Brillos, Rayos, Humo, Chispas y Ondas por capas',
+      category: 'IA',
+      keywords: 'fx lab modular particulas brillos rayos humo chispas ondas',
+      onExecute: () => handleOpenFxStudio('lab'),
+    },
+    ...WORK_MODE_ORDER.map((modeId): UniversalSearchItem => {
+      const def = WORK_MODES_REGISTRY[modeId];
+      return {
+        id: `workmode.${modeId}`,
+        title: `Modo de Trabajo: ${def.label}`,
+        subtitle: def.description,
+        category: 'Interfaz',
+        keywords: `modo trabajo proyecto ${def.label} ${def.shortLabel} ${def.badge} ${def.description}`,
+        onExecute: () => handleChangeWorkMode(modeId),
+      };
+    }),
+    // 1. Move Subtools & Reference Actions
+    {
+      id: 'sub.move_object',
+      title: 'Mover Objeto (Capas / Hitboxes / Vectores / Pivote)',
+      subtitle: 'Subherramienta de Mover · Predeterminada',
+      category: 'Herramientas',
+      shortcut: 'V',
+      keywords: 'mover objeto seleccionar capas vector hitbox pivote',
+      onExecute: () => {
+        setActiveTool('move');
+        setMoveSubTool('move_object');
+      },
+    },
+    {
+      id: 'sub.move_layer',
+      title: 'Mover Capa (Solo píxeles de capa activa)',
+      subtitle: 'Subherramienta de Mover',
+      category: 'Herramientas',
+      keywords: 'mover capa layer pixeles desplazar',
+      onExecute: () => {
+        setActiveTool('move');
+        setMoveSubTool('move_layer');
+      },
+    },
+    {
+      id: 'sub.move_selection',
+      title: 'Mover Selección (Contenido y marco de selección)',
+      subtitle: 'Subherramienta de Mover',
+      category: 'Herramientas',
+      keywords: 'mover seleccion marquee lazo varita',
+      onExecute: () => {
+        setActiveTool('move');
+        setMoveSubTool('move_selection');
+      },
+    },
+    {
+      id: 'sub.move_reference',
+      title: 'Mover Referencia (Solo referencias, no afecta capas)',
+      subtitle: 'Subherramienta de Mover · PureRef / Lienzo',
+      category: 'Referencias',
+      shortcut: 'Shift+R',
+      keywords: 'mover referencia pureref camara escalar rotar',
+      onExecute: () => {
+        setActiveTool('move');
+        setMoveSubTool('move_reference');
+      },
+    },
+    {
+      id: 'sub.direct_select',
+      title: 'Selección Directa (Flecha Blanca · Nodos y Tangentes)',
+      subtitle: 'Subherramienta de Mover · También Ctrl temporal en Línea',
+      category: 'Herramientas',
+      shortcut: 'A',
+      keywords: 'seleccion directa flecha blanca nodos bezier tangentes curva vector',
+      onExecute: () => {
+        setActiveTool('move');
+        setMoveSubTool('direct_select');
+      },
+    },
+    {
+      id: 'sub.lasso_magnetic',
+      title: 'Lazo Magnético (Ajuste inteligente a contornos)',
+      subtitle: 'Subherramienta de Lazo · Detección de bordes',
+      category: 'Herramientas',
+      shortcut: 'Shift+Q',
+      keywords: 'lazo magnetico contorno bordes seleccion inteligente',
+      onExecute: () => {
+        setLassoMode('magnetic');
+        setActiveTool('lasso');
+      },
+    },
+    {
+      id: 'sub.bucket_gradient',
+      title: 'Degradado (Lineal, Radial, Angular, Reflejado, Diamante)',
+      subtitle: 'Subherramienta de Bote de Pintura',
+      category: 'Herramientas',
+      keywords: 'degradado gradient bote pintura lineal radial diamante',
+      onExecute: () => {
+        setBucketSubTool('gradient');
+        setActiveTool('bucket');
+      },
+    },
+    {
+      id: 'sub.bucket_dither_gradient',
+      title: 'Degradado con Dithering (Bayer / Ordenado / Ruido / Matriz)',
+      subtitle: 'Subherramienta de Bote de Pintura · Pixel Art',
+      category: 'Herramientas',
+      keywords: 'degradado dithering bayer tramado pixel art bote',
+      onExecute: () => {
+        setBucketSubTool('dither_gradient');
+        setActiveTool('bucket');
+      },
+    },
+    {
+      id: 'tool.lupa_zoom',
+      title: 'Herramienta Lupa (Zoom por Clic y Zoom por Región)',
+      subtitle: 'Clic acerca, Alt+Clic aleja, Arrastrar encuadra zona',
+      category: 'Herramientas',
+      shortcut: 'Z',
+      keywords: 'lupa zoom acercar alejar region vista 100 200 400 800',
+      onExecute: () => handleSelectTool('zoom'),
+    },
+    {
+      id: 'view.zoom_fit_action',
+      title: 'Zoom: Ajustar Lienzo a la Ventana',
+      subtitle: 'Ver > Ajustar a pantalla',
+      category: 'Interfaz',
+      shortcut: 'Ctrl+0',
+      keywords: 'zoom ajustar ventana pantalla fit encuadrar',
+      onExecute: () => triggerZoomAction('fit'),
+    },
+    {
+      id: 'view.zoom_100_action',
+      title: 'Zoom: 100% Real',
+      subtitle: 'Ver > Zoom 100%',
+      category: 'Interfaz',
+      shortcut: 'Ctrl+1',
+      keywords: 'zoom 100 real escala',
+      onExecute: () => triggerZoomAction('percent', 100),
+    },
+    {
+      id: 'view.toggle_fullscreen_action',
+      title: isWindowMaximized
+        ? 'Ventana: Restaurar Tamaño Normal'
+        : 'Ventana: Maximizar / Pantalla Completa',
+      subtitle: 'Inicio / Barra Superior / Ver > Maximizar',
+      category: 'Interfaz',
+      shortcut: 'F11',
+      keywords: 'maximizar pantalla completa fullscreen restaurar ventana',
+      onExecute: handleToggleMaximizeWindow,
+    },
+    {
+      id: 'prefs.selection_display_open',
+      title: 'Preferencias de Visualización de Selecciones',
+      subtitle: 'Interfaz > Selecciones (Hormigas, Relleno, Velocidad, Color)',
+      category: 'Interfaz',
+      keywords: 'preferencias seleccion hormigas relleno contorno grosor velocidad opacidad',
+      onExecute: () => openLayoutModal('selections'),
+    },
+    {
+      id: 'prefs.mini_preview_open',
+      title: 'Preferencias → Interfaz → Mini Preview',
+      subtitle: 'Recordar último estado, Iniciar contraída, No abrir automáticamente, Solo bajo demanda',
+      category: 'Interfaz',
+      keywords: 'preferencias mini preview reproductor flotante contraida tamaño automatico',
+      onExecute: () => openLayoutModal('minipreview'),
+    },
+    {
+      id: 'ref.pureref_toggle',
+      title: pureRefConfig.enabled
+        ? 'Desactivar Modo PureRef (Volver a dibujar en lienzo)'
+        : 'Activar Modo PureRef (Organizar referencias sin dibujar por error)',
+      subtitle: 'Referencias en Cámara y Mesa',
+      category: 'Referencias',
+      shortcut: 'Ctrl+Alt+R',
+      keywords: 'pureref referencias camara bloquear lienzo opacidad',
+      onExecute: () => setPureRefConfig((p) => ({ ...p, enabled: !p.enabled })),
+    },
+    {
+      id: 'ref.always_on_top',
+      title: pureRefConfig.alwaysOnTop
+        ? 'Referencias: Desactivar "Siempre visible"'
+        : 'Referencias: Activar "Siempre visible" (Por encima de guías)',
+      subtitle: 'Referencias en Modo Cámara',
+      category: 'Referencias',
+      keywords: 'siempre visible pin fija pureref camara',
+      onExecute: () => setPureRefConfig((p) => ({ ...p, alwaysOnTop: !p.alwaysOnTop })),
+    },
+    {
+      id: 'ref.center_all',
+      title: 'Centrar Todas las Referencias en Pantalla',
+      subtitle: 'Recuperar referencias perdidas o fuera de vista',
+      category: 'Referencias',
+      shortcut: 'Ctrl+Alt+0',
+      keywords: 'centrar referencias encuadrar mesa pureref camara',
+      onExecute: handleCenterAllReferences,
+    },
+    // 2. All 29 Modular Panels
+    ...PANEL_REGISTRY.map((p): UniversalSearchItem => ({
+      id: `panel:${p.id}`,
+      title: `Panel: ${p.title}`,
+      subtitle: `Abrir / Enfocar panel (${p.description})`,
+      category: 'Paneles',
+      keywords: `panel ventana dock ${p.shortLabel} ${p.title} ${p.id}`,
+      onExecute: () => handleFocusPanel(p.id),
+    })),
+    // 2.5. Parametric Shapes & Contextual Options Bar Shortcuts
+    ...(
+      [
+        ['rectangle', 'Forma Paramétrica: Rectángulo', 'Esquinas redondeadas independientes y transformación directa'],
+        ['ellipse', 'Forma Paramétrica: Elipse / Arco', 'Elipse interactiva con apertura de arco en vivo'],
+        ['polygon', 'Forma Paramétrica: Polígono', '3–24 lados, radio interno y redondeado de vértices'],
+        ['star', 'Forma Paramétrica: Estrella', 'Puntas, profundidad y simetría ajustables en lienzo'],
+        ['arrow', 'Forma Paramétrica: Flecha', 'Punta personalizable, grosor de cuerpo y curvatura'],
+        ['custom', 'Forma Paramétrica: Personalizada', 'Presets (corazón, escudo, rayo, nube, bocadillo, cruz)'],
+      ] as const
+    ).map(([kind, title, subtitle]): UniversalSearchItem => ({
+      id: `shape:${kind}`,
+      title,
+      subtitle,
+      category: 'Herramientas',
+      keywords: `forma parametrica ${kind} ${title} ${subtitle}`,
+      onExecute: () => {
+        handleChangeShapeConfig({ ...shapeConfig, shapeKind: kind });
+        setActiveTool(kind === 'ellipse' ? 'circle' : 'rectangle');
+      },
+    })),
+    {
+      id: 'ui.toggle_options_bar',
+      title: optionsBarState.visible
+        ? 'Ocultar Barra de Opciones Contextual'
+        : 'Mostrar Barra de Opciones Contextual',
+      subtitle: 'Interfaz > Barra de Opciones bajo el menú principal',
+      category: 'Interfaz',
+      keywords: 'barra opciones contextual herramientas flotar acoplar',
+      onExecute: () => setOptionsBarState((prev) => ({ ...prev, visible: !prev.visible })),
+    },
+    {
+      id: 'ui.options_bar_ai',
+      title: 'Barra Contextual: Modo Rápido de IA',
+      subtitle: 'Prompt, estilo, intensidad y variaciones directamente arriba del lienzo',
+      category: 'IA',
+      keywords: 'ia rapida barra opciones prompt generar variaciones',
+      onExecute: () => {
+        setOptionsBarState((prev) => ({ ...prev, visible: true, collapsed: false }));
+        setAiBarActive(true);
+        setSymmetryBarActive(false);
+      },
+    },
+    // 3. All Gallery Filters & Adjustments
+    ...FILTER_GALLERY_PRESETS.map((f): UniversalSearchItem => ({
+      id: `filter:${f.id}`,
+      title: `Filtro: ${f.name}`,
+      subtitle: `${f.category} · Previsualización en Barra de Opciones`,
+      category: 'Filtros y Ajustes',
+      keywords: `filtro color ajuste pixel art ${f.name} ${f.category}`,
+      onExecute: () => {
+        setOptionsBarState((prev) => ({ ...prev, visible: true, collapsed: false }));
+        startFilterQuickSession(f.id, f.name, 85);
+      },
+    })),
+    {
+      id: 'filter:panel',
+      title: 'Abrir Panel de Filtros y Ajustes Color',
+      subtitle: 'Tono, saturación, brillo, contraste, posterizar, curva',
+      category: 'Filtros y Ajustes',
+      keywords: 'filtros tono saturacion brillo contraste',
+      onExecute: () => handleFocusPanel('filters'),
+    },
+    // 4. Universal Dithering Presets
+    ...(
+      [
+        ['checkered', 'Dithering Universal: Tablero Clásico 2×2'],
+        ['bayer4', 'Dithering Universal: Matriz Bayer 4×4'],
+        ['sparse', 'Dithering Universal: Trama Suave'],
+        ['dense', 'Dithering Universal: Trama Densa'],
+        ['horizontal', 'Dithering Universal: Líneas Horizontales'],
+        ['diagonal', 'Dithering Universal: Trama Diagonal'],
+      ] as const
+    ).map(([pat, label]): UniversalSearchItem => ({
+      id: `dither:${pat}`,
+      title: label,
+      subtitle: 'Activa el modificador Dithering Universal en Lápiz / Pinceles',
+      category: 'Dithering',
+      keywords: `dither trama patron degradado pixel art modificador pincel ${pat}`,
+      onExecute: () => {
+        setActiveTool('pencil');
+        setDitherConfig((d) => ({ ...d, enabled: true, pattern: pat }));
+        if (pat === 'checkered' || pat === 'sparse' || pat === 'dense' || pat === 'horizontal') {
+          setDitherPattern(pat);
+        }
+      },
+    })),
+    // 5. Symmetry Modes
+    ...(
+      [
+        ['none', 'Simetría: Desactivar'],
+        ['vertical', 'Simetría: Espejo Vertical'],
+        ['horizontal', 'Simetría: Espejo Horizontal'],
+        ['quad', 'Simetría: Cuádruple (4 ejes)'],
+        ['octal', 'Simetría: Octal (8 ejes)'],
+        ['radial', 'Simetría: Radial / Mandala'],
+        ['double_mirror', 'Simetría: Doble Espejo'],
+        ['custom_angle', 'Simetría: Ángulo Personalizado'],
+        ['point', 'Simetría: Punto Central'],
+        ['custom_line', 'Simetría: Línea Libre Arrastrable'],
+      ] as const
+    ).map(([mode, title]): UniversalSearchItem => ({
+      id: `sym:${mode}`,
+      title,
+      subtitle: 'Cambiar modo de simetría del lienzo',
+      category: 'Simetría',
+      keywords: `simetria espejo radial mandala eje ${mode}`,
+      onExecute: () => {
+        const next: SymmetryConfig = {
+          ...symmetryConfig,
+          enabled: mode !== 'none',
+          mode,
+        };
+        handleChangeSymmetryConfig(next);
+      },
+    })),
+    // 6. UI Style Presets & Layout Actions
+    ...UI_STYLE_PRESETS.map((st): UniversalSearchItem => ({
+      id: `style:${st.id}`,
+      title: `Apariencia UI: ${st.name}`,
+      subtitle: st.description,
+      category: 'Interfaz',
+      keywords: `tema estilo apariencia colores ui ${st.name}`,
+      onExecute: () => setStudioStyle((prev) => ({ ...prev, ...st.patch })),
+    })),
+    {
+      id: 'ui:appearance_modal',
+      title: 'Abrir Personalización de Apariencia y Temas',
+      subtitle: 'Interfaz > Personalizar apariencia...',
+      category: 'Interfaz',
+      keywords: 'temas colores bordes fuente degradados apariencia',
+      onExecute: () => openLayoutModal('style'),
+    },
+    {
+      id: 'ui:reset_layout',
+      title: 'Restaurar Disposición Predeterminada de Paneles',
+      subtitle: 'Interfaz > Restaurar disposición predeterminada',
+      category: 'Interfaz',
+      keywords: 'resetear layout paneles orden restaurar',
+      onExecute: handleResetDefaultLayout,
+    },
+    // 7. Transform Modes & Project / Settings Features
+    ...(
+      [
+        ['free', 'Transformar: Libre (Ctrl+T)'],
+        ['scale', 'Transformar: Escala'],
+        ['rotate', 'Transformar: Rotación'],
+        ['skew', 'Transformar: Inclinar (Skew)'],
+        ['distort', 'Transformar: Distorsionar'],
+        ['perspective', 'Transformar: Perspectiva'],
+        ['warp', 'Transformar: Deformación (Warp)'],
+        ['rot_180', 'Transformar: Rotar 180°'],
+      ] as const
+    ).map(([act, title]): UniversalSearchItem => ({
+      id: `xf:${act}`,
+      title,
+      subtitle: 'Edición > Transformar',
+      category: 'Herramientas',
+      keywords: `transformar escala rotar skew warp perspectiva ${act}`,
+      onExecute: () => handleTransformAction(act),
+    })),
+    {
+      id: 'set:canvas_size',
+      title: 'Tamaño del Lienzo (Canvas Size)',
+      subtitle: 'Imagen > Tamaño del lienzo...',
+      category: 'Ajustes',
+      keywords: 'tamano lienzo canvas resize ancla',
+      onExecute: () => setCanvasSizeModalOpen(true),
+    },
+    {
+      id: 'set:image_size',
+      title: 'Escalar Imagen / Pixel Art (Image Size)',
+      subtitle: 'Imagen > Escalar imagen...',
+      category: 'Ajustes',
+      keywords: 'escalar imagen pixel art resolucion',
+      onExecute: () => setImageSizeModalOpen(true),
+    },
+    {
+      id: 'set:lospec',
+      title: 'Importar Paleta Comunitaria Lospec',
+      subtitle: 'Paletas > Importar desde Lospec',
+      category: 'Ajustes',
+      keywords: 'lospec paleta retro colores importar',
+      onExecute: () => setLospecModalOpen(true),
+    },
+    {
+      id: 'set:spritesheet_tpl',
+      title: 'Planificador / Plantilla Sprite Sheet Lucha',
+      subtitle: 'Fighting Studio > Plantilla de Movimiento',
+      category: 'Ajustes',
+      keywords: 'spritesheet plantilla idle walk attack fighter',
+      onExecute: () => setSpriteSheetModalOpen(true),
+    },
+    {
+      id: 'file:open_document',
+      title: 'Abrir Documento Independiente (Ctrl+O)',
+      subtitle: 'Archivo > Abrir Documento... (PNG, JPG, WEBP, GIF, BMP, TIFF, TGA, ICO, ASE, PSD, PCS, JSON)',
+      category: 'Ajustes',
+      shortcut: 'Ctrl+O',
+      keywords: 'abrir documento archivo nuevo proyecto pestana png jpg webp gif bmp tiff tga ico psd ase pcs spritesheet',
+      onExecute: () => void handleOpenFilePicker(),
+    },
+    {
+      id: 'file:smart_import',
+      title: 'Importación Inteligente al Proyecto Actual',
+      subtitle: 'Archivo > Importar al Proyecto > Importación Inteligente...',
+      category: 'Ajustes',
+      shortcut: 'Ctrl+Shift+I',
+      keywords: 'importar imagen capa grupo referencia asset pincel frame',
+      onExecute: () => handleTriggerImport('smart'),
+    },
+    {
+      id: 'file:import_external_project',
+      title: 'Importar Proyecto Externo en el Actual',
+      subtitle: 'Archivo > Importar al Proyecto > Importar Proyecto Externo...',
+      category: 'Ajustes',
+      keywords: 'importar proyecto fusionar capas frames pcs psd ase',
+      onExecute: () => handleTriggerImport('external_project'),
+    },
+    {
+      id: 'view:toggle_rulers',
+      title: guidesConfig.showRulers ? 'Ocultar Reglas (Ctrl+R)' : 'Mostrar Reglas (Ctrl+R)',
+      subtitle: 'Ver > Reglas · Unidades en px, % o personalizadas',
+      category: 'Interfaz',
+      shortcut: 'Ctrl+R',
+      keywords: 'reglas ruler medidas pixeles porcentaje unidades',
+      onExecute: () =>
+        handleChangeGuidesConfig({ ...guidesConfig, showRulers: !guidesConfig.showRulers }),
+    },
+    {
+      id: 'view:toggle_guides',
+      title: guidesConfig.showGuides ? 'Ocultar Guías (Ctrl+;)' : 'Mostrar Guías (Ctrl+;)',
+      subtitle: 'Ver > Guías y Reglas > Mostrar Guías',
+      category: 'Interfaz',
+      shortcut: 'Ctrl+;',
+      keywords: 'guias mostrar ocultar composicion snap',
+      onExecute: () =>
+        handleChangeGuidesConfig({ ...guidesConfig, showGuides: !guidesConfig.showGuides }),
+    },
+    {
+      id: 'view:guides_exact_modal',
+      title: 'Crear Guía en Posición Exacta / Administrar Guías...',
+      subtitle: 'Ver > Guías y Reglas · Coordenadas exactas, snap y presets',
+      category: 'Interfaz',
+      keywords: 'guia exacta x y px reglas snap bloquear duplicar',
+      onExecute: () => {
+        setGuidesModalTab('exact');
+        setGuidesModalOpen(true);
+      },
+    },
+    {
+      id: 'view:guides_presets',
+      title: 'Guías de Animación y Lucha (Horizonte, HUD, Personajes, Escenarios)',
+      subtitle: 'Ver > Guías y Reglas > Guías de Animación / Lucha',
+      category: 'Animación',
+      keywords: 'guias horizonte hud personajes escenarios composicion lucha',
+      onExecute: () => {
+        setGuidesModalTab('presets');
+        setGuidesModalOpen(true);
+      },
+    },
+    {
+      id: 'view:wheel_nav_mode',
+      title: `Navegación con Rueda: ${wheelNavMode === 'pan' ? 'Cambiar a Zoom' : 'Cambiar a Desplazamiento'}`,
+      subtitle: 'Rueda=Vertical · Shift+Rueda=Horizontal · Ctrl+Rueda=Zoom',
+      category: 'Interfaz',
+      keywords: 'rueda raton scroll zoom paneo mano navegacion',
+      onExecute: () => setWheelNavMode((m) => (m === 'pan' ? 'zoom' : 'pan')),
+    },
+    {
+      id: 'set:installer',
+      title: 'Instalador Windows (.exe) — Paquete de Escritorio',
+      subtitle: 'Archivo > Instalador Windows (.exe)',
+      category: 'Ajustes',
+      keywords: 'instalador windows exe nsis inno rust tauri escritorio descargar',
+      onExecute: () => setLocalInstallerModalOpen(true),
+    },
+    {
+      id: 'help:what_is_this',
+      title: 'Modo "¿Dónde está?" (Inspector Visual con Cursor)',
+      subtitle: 'Ayuda > Modo "¿Dónde está?" (Shift+F1)',
+      category: 'Ajustes',
+      shortcut: 'Shift+F1',
+      keywords: 'ayuda donde esta inspector cursor tooltip',
+      onExecute: () => setWhatIsThisActive(true),
+    },
+    {
+      id: 'help:tool_guide',
+      title: 'Manual Interactivo y Guía de Herramientas',
+      subtitle: 'Ayuda > Manual Interactivo',
+      category: 'Ajustes',
+      keywords: 'manual guia tutorial ayuda',
+      onExecute: () => setToolGuideModalOpen(true),
+    },
+    {
+      id: 'help:where_is_tool',
+      title: '¿Dónde está esta herramienta? (Localizador jerárquico)',
+      subtitle: 'Ayuda > ¿Dónde está esta herramienta? (Ctrl+Alt+H)',
+      category: 'Ajustes',
+      shortcut: 'Ctrl+Alt+H',
+      keywords: 'donde esta herramienta buscar localizar panel menu controles shake curvas',
+      onExecute: () => {
+        setToolGuideFocusSearchNonce((n) => n + 1);
+        setToolGuideModalOpen(true);
+      },
+    },
+    {
+      id: 'edit:smart_delete',
+      title: 'Eliminación Inteligente Contextual (Suprimir)',
+      subtitle: 'Detecta capa, grupo, vector, hitbox, keyframe o referencia activa',
+      category: 'Herramientas',
+      shortcut: 'Delete',
+      keywords: 'suprimir delete eliminar borrar capa vector hitbox referencia keyframe',
+      onExecute: handleSmartDelete,
+    },
+    {
+      id: 'anim:onion_skin_pro',
+      title: 'Papel Cebolla Pro (Fotograma Fantasma, Preset Animador, Trail FX y hasta 20 Frames)',
+      subtitle: 'Panel Animación > Papel Cebolla Pro & Línea de Tiempo',
+      category: 'Animación',
+      shortcut: 'O',
+      keywords: 'papel cebolla onion skin fantasma fantasma coloreado animador trail estela kof guilty gear silueta contorno volumen mezcla multiplicar superponer pantalla trama luz suave frames',
+      onExecute: () => handleFocusPanel('animation'),
+    },
+    {
+      id: 'anim:animator_preset',
+      title: 'Papel Cebolla: Preset Animador (Fantasma Rojo Ant. / Verde Post.)',
+      subtitle: 'Modo tradicional 2D con colores, sombras y FX intactos',
+      category: 'Animación',
+      keywords: 'animador fantasma rojo verde papel cebolla onion skin tradicional',
+      onExecute: () => {
+        handleChangeOnionSkinConfig(applyOnionSkinPreset(onionSkinConfig, 'animator'));
+        handleFocusPanel('animation');
+      },
+    },
+    {
+      id: 'anim:trail_mode',
+      title: onionSkinConfig.trail?.enabled
+        ? 'Modo Trail (Estela FX / KOF): Desactivar'
+        : 'Modo Trail (Estela FX / Dash KOF / Guilty Gear): Activar',
+      subtitle: 'Estela acumulativa progresiva de últimos N frames y FX',
+      category: 'Animación',
+      keywords: 'modo trail estela dash kof guilty gear fx smear afterimage papel cebolla',
+      onExecute: () => {
+        const baseTrail = onionSkinConfig.trail || DEFAULT_ONION_SKIN_TRAIL_CONFIG;
+        handleChangeOnionSkinConfig({
+          ...onionSkinConfig,
+          enabled: true,
+          trail: { ...baseTrail, enabled: !baseTrail.enabled },
+        });
+        handleFocusPanel('animation');
+      },
+    },
+    {
+      id: 'anim:motion_path_toggle',
+      title: onionSkinConfig.motionPath.enabled
+        ? 'Trazo de Movimiento (Motion Path): Desactivar'
+        : 'Trazo de Movimiento (Motion Path): Activar (Cabeza, Manos, Pies, CoG)',
+      subtitle: 'Panel Animación / Timeline > Papel Cebolla Pro > Trazo de Movimiento',
+      category: 'Animación',
+      keywords: 'trazo movimiento motion path trayectoria arco animacion cabeza manos pies centro gravedad',
+      onExecute: () => {
+        handleChangeOnionSkinConfig({
+          ...onionSkinConfig,
+          motionPath: {
+            ...onionSkinConfig.motionPath,
+            enabled: !onionSkinConfig.motionPath.enabled,
+          },
+        });
+        handleFocusPanel('animation');
+      },
+    },
+    {
+      id: 'anim:camera_shake',
+      title: 'Temblor de Cámara (Camera Shake) y Keyframes de Cámara',
+      subtitle: 'Panel Animación > Controladores de Cámara',
+      category: 'Animación',
+      shortcut: 'Ctrl+Alt+T',
+      keywords: 'temblor camara screen shake camera keyframes zoom paneo hitstop',
+      onExecute: () => handleFocusPanel('animation'),
+    },
+    {
+      id: 'anim:camera_shake_test',
+      title: 'Probar Temblor de Cámara en Lienzo (Preview)',
+      subtitle: 'Ejecuta una prueba instantánea del temblor configurado',
+      category: 'Animación',
+      shortcut: 'Ctrl+Alt+T',
+      keywords: 'probar test temblor shake camara',
+      onExecute: () => setCameraShakeTestNonce((n) => n + 1),
+    },
+    {
+      id: 'anim:timeline_curves',
+      title: 'Timeline: Curvas de Animación, Interpolación y Eventos',
+      subtitle: 'Línea de Tiempo > Barra Curvas / Interpolación / Eventos',
+      category: 'Animación',
+      keywords: 'timeline curvas animacion interpolacion easing eventos keyframes camara',
+      onExecute: () => setForceOpenCurvesNonce((n) => n + 1),
+    },
+    {
+      id: 'vec:pixel_preview',
+      title: showPixelPerfectVectorPreview
+        ? 'Vista Pixel-Perfect Vectorial: Desactivar'
+        : 'Vista Pixel-Perfect Vectorial: Activar (Simultánea)',
+      subtitle: 'Inspector Vectorial > Vista Pixel-Perfect (Shift+P)',
+      category: 'Herramientas',
+      shortcut: 'Shift+P',
+      keywords: 'linea vectorial vista previa pixel perfect tiempo real confirmar cancelar',
+      onExecute: () => setShowPixelPerfectVectorPreview((v) => !v),
+    },
+  ], [
+    handleOpenFxStudio,
+    handleChangeWorkMode,
+    handleSelectTool,
+    triggerZoomAction,
+    isWindowMaximized,
+    handleToggleMaximizeWindow,
+    openLayoutModal,
+    pureRefConfig.enabled,
+    pureRefConfig.alwaysOnTop,
+    handleCenterAllReferences,
+    handleFocusPanel,
+    shapeConfig,
+    handleChangeShapeConfig,
+    optionsBarState.visible,
+    startFilterQuickSession,
+    symmetryConfig,
+    handleChangeSymmetryConfig,
+    handleResetDefaultLayout,
+    handleTransformAction,
+    handleOpenFilePicker,
+    handleTriggerImport,
+    guidesConfig,
+    handleChangeGuidesConfig,
+    wheelNavMode,
+    handleSmartDelete,
+    onionSkinConfig,
+    handleChangeOnionSkinConfig,
+    showPixelPerfectVectorPreview,
+  ]);
+
+  const handleCloseCommandPalette = useCallback(() => setCommandPaletteOpen(false), []);
+  const handleExecuteCommandFromPalette = useCallback(
+    (id: string) => executeCommandById(id),
+    [executeCommandById]
+  );
+  const handleActivateWhatIsThis = useCallback(() => setWhatIsThisActive(true), []);
+  const handleCloseToolGuideModal = useCallback(() => {
+    setToolGuideModalOpen(false);
+    setHelpInitialFocusId(null);
+  }, []);
+  const handleActivateWhatIsThisFromGuide = useCallback(() => {
+    setToolGuideModalOpen(false);
+    setWhatIsThisActive(true);
+  }, []);
+  const handleCloseWhatIsThisOverlay = useCallback(() => setWhatIsThisActive(false), []);
+  const handleOpenHelpItemFromOverlay = useCallback((item: HelpCatalogItem) => {
+    setWhatIsThisActive(false);
+    setHelpInitialFocusId(item.id);
+    setToolGuideModalOpen(true);
+  }, []);
+  const handleClearSpotlight = useCallback(() => setSpotlightTarget(null), []);
 
   const renderToolbarInstance = (orientation: 'vertical' | 'horizontal', embedded: boolean) => (
     <Toolbar
@@ -11735,14 +12754,16 @@ export default function App() {
       canvasWidth={canvasWidth}
       canvasHeight={canvasHeight}
       onionSkinEnabled={onionSkinEnabled}
-      onToggleOnionSkin={() => setOnionSkinEnabled((v) => !v)}
-      onSetOnionSkinEnabled={setOnionSkinEnabled}
+      onToggleOnionSkin={handleToggleOnionSkinSynced}
+      onSetOnionSkinEnabled={handleSetOnionSkinEnabledSynced}
       onionSkinOpacity={onionSkinOpacity}
-      onChangeOnionSkinOpacity={setOnionSkinOpacity}
+      onChangeOnionSkinOpacity={handleChangeOnionSkinOpacitySynced}
       onionSkinPrev={onionSkinPrev}
-      onChangeOnionSkinPrev={setOnionSkinPrev}
+      onChangeOnionSkinPrev={handleChangeOnionSkinPrevSynced}
       onionSkinNext={onionSkinNext}
-      onChangeOnionSkinNext={setOnionSkinNext}
+      onChangeOnionSkinNext={handleChangeOnionSkinNextSynced}
+      onionSkinConfig={onionSkinConfig}
+      onChangeOnionSkinConfig={handleChangeOnionSkinConfig}
       fps={animationFps}
       onChangeFps={setAnimationFps}
       showGrid={showGrid}
@@ -12025,7 +13046,9 @@ export default function App() {
         showPivot={showPivot}
         onTogglePivot={() => setShowPivot((v) => !v)}
         onionSkinEnabled={onionSkinEnabled}
-        onToggleOnionSkin={() => setOnionSkinEnabled((v) => !v)}
+        onToggleOnionSkin={handleToggleOnionSkinSynced}
+        onionSkinConfig={onionSkinConfig}
+        onChangeOnionSkinConfig={handleChangeOnionSkinConfig}
         clipOutsideCanvas={clipOutsideCanvas}
         onToggleClipOutsideCanvas={() => setClipOutsideCanvas((v) => !v)}
         onOpenShortcuts={() => setShortcutsModalOpen(true)}
@@ -12794,13 +13817,15 @@ export default function App() {
         playbackMode={playbackMode}
         onChangePlaybackMode={setPlaybackMode}
         onionSkinEnabled={onionSkinEnabled}
-        onToggleOnionSkin={() => setOnionSkinEnabled((v) => !v)}
+        onToggleOnionSkin={handleToggleOnionSkinSynced}
         onionSkinPrev={onionSkinPrev}
-        onChangeOnionSkinPrev={setOnionSkinPrev}
+        onChangeOnionSkinPrev={handleChangeOnionSkinPrevSynced}
         onionSkinNext={onionSkinNext}
-        onChangeOnionSkinNext={setOnionSkinNext}
+        onChangeOnionSkinNext={handleChangeOnionSkinNextSynced}
         onionSkinOpacity={onionSkinOpacity}
-        onChangeOnionSkinOpacity={setOnionSkinOpacity}
+        onChangeOnionSkinOpacity={handleChangeOnionSkinOpacitySynced}
+        onionSkinConfig={onionSkinConfig}
+        onChangeOnionSkinConfig={handleChangeOnionSkinConfig}
         showGrid={showGrid}
         onToggleGrid={() => setShowGrid((v) => !v)}
         showHitboxes={showHitboxes}
@@ -12863,6 +13888,7 @@ export default function App() {
             onionSkinOpacity={onionSkinOpacity}
             onionSkinPrev={onionSkinPrev}
             onionSkinNext={onionSkinNext}
+            onionSkinConfig={onionSkinConfig}
             showGrid={showGrid}
             showHitboxes={showHitboxes}
             showPivot={showPivot}
@@ -13654,581 +14680,15 @@ export default function App() {
       <StudioTopLayerPortal isOpen={commandPaletteOpen} tier="command" autoFocus ariaRole="dialog">
         <CommandPaletteModal
           isOpen={commandPaletteOpen}
-          onClose={() => setCommandPaletteOpen(false)}
+          onClose={handleCloseCommandPalette}
           bindings={shortcutBindings}
           macros={recordedMacros}
-        universalItems={[
-          // 0. Project Work Modes & FX Studio / FX Lab
-          {
-            id: 'fx.studio_generator',
-            title: 'Generar Efecto (Estudio FX Avanzado)',
-            subtitle: '17 tipos · 12 estilos · 9 sliders · preview en tiempo real y multi-capa',
-            category: 'IA',
-            keywords: 'fx efecto fuego rayo energia explosion particulas slash aura ia',
-            onExecute: () => handleOpenFxStudio('generator'),
-          },
-          {
-            id: 'fx.lab_modular',
-            title: 'FX Lab (Editor Visual Modular de Efectos)',
-            subtitle: 'Combina Partículas, Brillos, Rayos, Humo, Chispas y Ondas por capas',
-            category: 'IA',
-            keywords: 'fx lab modular particulas brillos rayos humo chispas ondas',
-            onExecute: () => handleOpenFxStudio('lab'),
-          },
-          ...WORK_MODE_ORDER.map((modeId): UniversalSearchItem => {
-            const def = WORK_MODES_REGISTRY[modeId];
-            return {
-              id: `workmode.${modeId}`,
-              title: `Modo de Trabajo: ${def.label}`,
-              subtitle: def.description,
-              category: 'Interfaz',
-              keywords: `modo trabajo proyecto ${def.label} ${def.shortLabel} ${def.badge} ${def.description}`,
-              onExecute: () => handleChangeWorkMode(modeId),
-            };
-          }),
-          // 1. Move Subtools & Reference Actions
-          {
-            id: 'sub.move_object',
-            title: 'Mover Objeto (Capas / Hitboxes / Vectores / Pivote)',
-            subtitle: 'Subherramienta de Mover · Predeterminada',
-            category: 'Herramientas',
-            shortcut: 'V',
-            keywords: 'mover objeto seleccionar capas vector hitbox pivote',
-            onExecute: () => {
-              setActiveTool('move');
-              setMoveSubTool('move_object');
-            },
-          },
-          {
-            id: 'sub.move_layer',
-            title: 'Mover Capa (Solo píxeles de capa activa)',
-            subtitle: 'Subherramienta de Mover',
-            category: 'Herramientas',
-            keywords: 'mover capa layer pixeles desplazar',
-            onExecute: () => {
-              setActiveTool('move');
-              setMoveSubTool('move_layer');
-            },
-          },
-          {
-            id: 'sub.move_selection',
-            title: 'Mover Selección (Contenido y marco de selección)',
-            subtitle: 'Subherramienta de Mover',
-            category: 'Herramientas',
-            keywords: 'mover seleccion marquee lazo varita',
-            onExecute: () => {
-              setActiveTool('move');
-              setMoveSubTool('move_selection');
-            },
-          },
-          {
-            id: 'sub.move_reference',
-            title: 'Mover Referencia (Solo referencias, no afecta capas)',
-            subtitle: 'Subherramienta de Mover · PureRef / Lienzo',
-            category: 'Referencias',
-            shortcut: 'Shift+R',
-            keywords: 'mover referencia pureref camara escalar rotar',
-            onExecute: () => {
-              setActiveTool('move');
-              setMoveSubTool('move_reference');
-            },
-          },
-          {
-            id: 'sub.direct_select',
-            title: 'Selección Directa (Flecha Blanca · Nodos y Tangentes)',
-            subtitle: 'Subherramienta de Mover · También Ctrl temporal en Línea',
-            category: 'Herramientas',
-            shortcut: 'A',
-            keywords: 'seleccion directa flecha blanca nodos bezier tangentes curva vector',
-            onExecute: () => {
-              setActiveTool('move');
-              setMoveSubTool('direct_select');
-            },
-          },
-          {
-            id: 'sub.lasso_magnetic',
-            title: 'Lazo Magnético (Ajuste inteligente a contornos)',
-            subtitle: 'Subherramienta de Lazo · Detección de bordes',
-            category: 'Herramientas',
-            shortcut: 'Shift+Q',
-            keywords: 'lazo magnetico contorno bordes seleccion inteligente',
-            onExecute: () => {
-              setLassoMode('magnetic');
-              setActiveTool('lasso');
-            },
-          },
-          {
-            id: 'sub.bucket_gradient',
-            title: 'Degradado (Lineal, Radial, Angular, Reflejado, Diamante)',
-            subtitle: 'Subherramienta de Bote de Pintura',
-            category: 'Herramientas',
-            keywords: 'degradado gradient bote pintura lineal radial diamante',
-            onExecute: () => {
-              setBucketSubTool('gradient');
-              setActiveTool('bucket');
-            },
-          },
-          {
-            id: 'sub.bucket_dither_gradient',
-            title: 'Degradado con Dithering (Bayer / Ordenado / Ruido / Matriz)',
-            subtitle: 'Subherramienta de Bote de Pintura · Pixel Art',
-            category: 'Herramientas',
-            keywords: 'degradado dithering bayer tramado pixel art bote',
-            onExecute: () => {
-              setBucketSubTool('dither_gradient');
-              setActiveTool('bucket');
-            },
-          },
-          {
-            id: 'tool.lupa_zoom',
-            title: 'Herramienta Lupa (Zoom por Clic y Zoom por Región)',
-            subtitle: 'Clic acerca, Alt+Clic aleja, Arrastrar encuadra zona',
-            category: 'Herramientas',
-            shortcut: 'Z',
-            keywords: 'lupa zoom acercar alejar region vista 100 200 400 800',
-            onExecute: () => handleSelectTool('zoom'),
-          },
-          {
-            id: 'view.zoom_fit_action',
-            title: 'Zoom: Ajustar Lienzo a la Ventana',
-            subtitle: 'Ver > Ajustar a pantalla',
-            category: 'Interfaz',
-            shortcut: 'Ctrl+0',
-            keywords: 'zoom ajustar ventana pantalla fit encuadrar',
-            onExecute: () => triggerZoomAction('fit'),
-          },
-          {
-            id: 'view.zoom_100_action',
-            title: 'Zoom: 100% Real',
-            subtitle: 'Ver > Zoom 100%',
-            category: 'Interfaz',
-            shortcut: 'Ctrl+1',
-            keywords: 'zoom 100 real escala',
-            onExecute: () => triggerZoomAction('percent', 100),
-          },
-          {
-            id: 'view.toggle_fullscreen_action',
-            title: isWindowMaximized
-              ? 'Ventana: Restaurar Tamaño Normal'
-              : 'Ventana: Maximizar / Pantalla Completa',
-            subtitle: 'Inicio / Barra Superior / Ver > Maximizar',
-            category: 'Interfaz',
-            shortcut: 'F11',
-            keywords: 'maximizar pantalla completa fullscreen restaurar ventana',
-            onExecute: handleToggleMaximizeWindow,
-          },
-          {
-            id: 'prefs.selection_display_open',
-            title: 'Preferencias de Visualización de Selecciones',
-            subtitle: 'Interfaz > Selecciones (Hormigas, Relleno, Velocidad, Color)',
-            category: 'Interfaz',
-            keywords: 'preferencias seleccion hormigas relleno contorno grosor velocidad opacidad',
-            onExecute: () => openLayoutModal('selections'),
-          },
-          {
-            id: 'prefs.mini_preview_open',
-            title: 'Preferencias → Interfaz → Mini Preview',
-            subtitle: 'Recordar último estado, Iniciar contraída, No abrir automáticamente, Solo bajo demanda',
-            category: 'Interfaz',
-            keywords: 'preferencias mini preview reproductor flotante contraida tamaño automatico',
-            onExecute: () => openLayoutModal('minipreview'),
-          },
-          {
-            id: 'ref.pureref_toggle',
-            title: pureRefConfig.enabled
-              ? 'Desactivar Modo PureRef (Volver a dibujar en lienzo)'
-              : 'Activar Modo PureRef (Organizar referencias sin dibujar por error)',
-            subtitle: 'Referencias en Cámara y Mesa',
-            category: 'Referencias',
-            shortcut: 'Ctrl+Alt+R',
-            keywords: 'pureref referencias camara bloquear lienzo opacidad',
-            onExecute: () => setPureRefConfig((p) => ({ ...p, enabled: !p.enabled })),
-          },
-          {
-            id: 'ref.always_on_top',
-            title: pureRefConfig.alwaysOnTop
-              ? 'Referencias: Desactivar "Siempre visible"'
-              : 'Referencias: Activar "Siempre visible" (Por encima de guías)',
-            subtitle: 'Referencias en Modo Cámara',
-            category: 'Referencias',
-            keywords: 'siempre visible pin fija pureref camara',
-            onExecute: () => setPureRefConfig((p) => ({ ...p, alwaysOnTop: !p.alwaysOnTop })),
-          },
-          {
-            id: 'ref.center_all',
-            title: 'Centrar Todas las Referencias en Pantalla',
-            subtitle: 'Recuperar referencias perdidas o fuera de vista',
-            category: 'Referencias',
-            shortcut: 'Ctrl+Alt+0',
-            keywords: 'centrar referencias encuadrar mesa pureref camara',
-            onExecute: handleCenterAllReferences,
-          },
-          // 2. All 29 Modular Panels
-          ...PANEL_REGISTRY.map((p): UniversalSearchItem => ({
-            id: `panel:${p.id}`,
-            title: `Panel: ${p.title}`,
-            subtitle: `Abrir / Enfocar panel (${p.description})`,
-            category: 'Paneles',
-            keywords: `panel ventana dock ${p.shortLabel} ${p.title} ${p.id}`,
-            onExecute: () => handleFocusPanel(p.id),
-          })),
-          // 2.5. Parametric Shapes & Contextual Options Bar Shortcuts
-          ...(
-            [
-              ['rectangle', 'Forma Paramétrica: Rectángulo', 'Esquinas redondeadas independientes y transformación directa'],
-              ['ellipse', 'Forma Paramétrica: Elipse / Arco', 'Elipse interactiva con apertura de arco en vivo'],
-              ['polygon', 'Forma Paramétrica: Polígono', '3–24 lados, radio interno y redondeado de vértices'],
-              ['star', 'Forma Paramétrica: Estrella', 'Puntas, profundidad y simetría ajustables en lienzo'],
-              ['arrow', 'Forma Paramétrica: Flecha', 'Punta personalizable, grosor de cuerpo y curvatura'],
-              ['custom', 'Forma Paramétrica: Personalizada', 'Presets (corazón, escudo, rayo, nube, bocadillo, cruz)'],
-            ] as const
-          ).map(([kind, title, subtitle]): UniversalSearchItem => ({
-            id: `shape:${kind}`,
-            title,
-            subtitle,
-            category: 'Herramientas',
-            keywords: `forma parametrica ${kind} ${title} ${subtitle}`,
-            onExecute: () => {
-              handleChangeShapeConfig({ ...shapeConfig, shapeKind: kind });
-              setActiveTool(kind === 'ellipse' ? 'circle' : 'rectangle');
-            },
-          })),
-          {
-            id: 'ui.toggle_options_bar',
-            title: optionsBarState.visible
-              ? 'Ocultar Barra de Opciones Contextual'
-              : 'Mostrar Barra de Opciones Contextual',
-            subtitle: 'Interfaz > Barra de Opciones bajo el menú principal',
-            category: 'Interfaz',
-            keywords: 'barra opciones contextual herramientas flotar acoplar',
-            onExecute: () => setOptionsBarState((prev) => ({ ...prev, visible: !prev.visible })),
-          },
-          {
-            id: 'ui.options_bar_ai',
-            title: 'Barra Contextual: Modo Rápido de IA',
-            subtitle: 'Prompt, estilo, intensidad y variaciones directamente arriba del lienzo',
-            category: 'IA',
-            keywords: 'ia rapida barra opciones prompt generar variaciones',
-            onExecute: () => {
-              setOptionsBarState((prev) => ({ ...prev, visible: true, collapsed: false }));
-              setAiBarActive(true);
-              setSymmetryBarActive(false);
-            },
-          },
-          // 3. All Gallery Filters & Adjustments (Opens live preview bar with Antes/Después & Intensidad)
-          ...FILTER_GALLERY_PRESETS.map((f): UniversalSearchItem => ({
-            id: `filter:${f.id}`,
-            title: `Filtro: ${f.name}`,
-            subtitle: `${f.category} · Previsualización en Barra de Opciones`,
-            category: 'Filtros y Ajustes',
-            keywords: `filtro color ajuste pixel art ${f.name} ${f.category}`,
-            onExecute: () => {
-              setOptionsBarState((prev) => ({ ...prev, visible: true, collapsed: false }));
-              startFilterQuickSession(f.id, f.name, 85);
-            },
-          })),
-          {
-            id: 'filter:panel',
-            title: 'Abrir Panel de Filtros y Ajustes Color',
-            subtitle: 'Tono, saturación, brillo, contraste, posterizar, curva',
-            category: 'Filtros y Ajustes',
-            keywords: 'filtros tono saturacion brillo contraste',
-            onExecute: () => handleFocusPanel('filters'),
-          },
-          // 4. Universal Dithering Presets (applies as modifier on Lápiz/Pincel)
-          ...(
-            [
-              ['checkered', 'Dithering Universal: Tablero Clásico 2×2'],
-              ['bayer4', 'Dithering Universal: Matriz Bayer 4×4'],
-              ['sparse', 'Dithering Universal: Trama Suave'],
-              ['dense', 'Dithering Universal: Trama Densa'],
-              ['horizontal', 'Dithering Universal: Líneas Horizontales'],
-              ['diagonal', 'Dithering Universal: Trama Diagonal'],
-            ] as const
-          ).map(([pat, label]): UniversalSearchItem => ({
-            id: `dither:${pat}`,
-            title: label,
-            subtitle: 'Activa el modificador Dithering Universal en Lápiz / Pinceles',
-            category: 'Dithering',
-            keywords: `dither trama patron degradado pixel art modificador pincel ${pat}`,
-            onExecute: () => {
-              setActiveTool('pencil');
-              setDitherConfig((d) => ({ ...d, enabled: true, pattern: pat }));
-              if (pat === 'checkered' || pat === 'sparse' || pat === 'dense' || pat === 'horizontal') {
-                setDitherPattern(pat);
-              }
-            },
-          })),
-          // 5. Symmetry Modes (10 modes)
-          ...(
-            [
-              ['none', 'Simetría: Desactivar'],
-              ['vertical', 'Simetría: Espejo Vertical'],
-              ['horizontal', 'Simetría: Espejo Horizontal'],
-              ['quad', 'Simetría: Cuádruple (4 ejes)'],
-              ['octal', 'Simetría: Octal (8 ejes)'],
-              ['radial', 'Simetría: Radial / Mandala'],
-              ['double_mirror', 'Simetría: Doble Espejo'],
-              ['custom_angle', 'Simetría: Ángulo Personalizado'],
-              ['point', 'Simetría: Punto Central'],
-              ['custom_line', 'Simetría: Línea Libre Arrastrable'],
-            ] as const
-          ).map(([mode, title]): UniversalSearchItem => ({
-            id: `sym:${mode}`,
-            title,
-            subtitle: 'Cambiar modo de simetría del lienzo',
-            category: 'Simetría',
-            keywords: `simetria espejo radial mandala eje ${mode}`,
-            onExecute: () => {
-              const next: SymmetryConfig = {
-                ...symmetryConfig,
-                enabled: mode !== 'none',
-                mode,
-              };
-              handleChangeSymmetryConfig(next);
-            },
-          })),
-          // 6. UI Style Presets & Layout Actions
-          ...UI_STYLE_PRESETS.map((st): UniversalSearchItem => ({
-            id: `style:${st.id}`,
-            title: `Apariencia UI: ${st.name}`,
-            subtitle: st.description,
-            category: 'Interfaz',
-            keywords: `tema estilo apariencia colores ui ${st.name}`,
-            onExecute: () => setStudioStyle((prev) => ({ ...prev, ...st.patch })),
-          })),
-          {
-            id: 'ui:appearance_modal',
-            title: 'Abrir Personalización de Apariencia y Temas',
-            subtitle: 'Interfaz > Personalizar apariencia...',
-            category: 'Interfaz',
-            keywords: 'temas colores bordes fuente degradados apariencia',
-            onExecute: () => openLayoutModal('style'),
-          },
-          {
-            id: 'ui:reset_layout',
-            title: 'Restaurar Disposición Predeterminada de Paneles',
-            subtitle: 'Interfaz > Restaurar disposición predeterminada',
-            category: 'Interfaz',
-            keywords: 'resetear layout paneles orden restaurar',
-            onExecute: handleResetDefaultLayout,
-          },
-          // 7. Transform Modes & Project / Settings Features
-          ...(
-            [
-              ['free', 'Transformar: Libre (Ctrl+T)'],
-              ['scale', 'Transformar: Escala'],
-              ['rotate', 'Transformar: Rotación'],
-              ['skew', 'Transformar: Inclinar (Skew)'],
-              ['distort', 'Transformar: Distorsionar'],
-              ['perspective', 'Transformar: Perspectiva'],
-              ['warp', 'Transformar: Deformación (Warp)'],
-              ['rot_180', 'Transformar: Rotar 180°'],
-            ] as const
-          ).map(([act, title]): UniversalSearchItem => ({
-            id: `xf:${act}`,
-            title,
-            subtitle: 'Edición > Transformar',
-            category: 'Herramientas',
-            keywords: `transformar escala rotar skew warp perspectiva ${act}`,
-            onExecute: () => handleTransformAction(act),
-          })),
-          {
-            id: 'set:canvas_size',
-            title: 'Tamaño del Lienzo (Canvas Size)',
-            subtitle: 'Imagen > Tamaño del lienzo...',
-            category: 'Ajustes',
-            keywords: 'tamano lienzo canvas resize ancla',
-            onExecute: () => setCanvasSizeModalOpen(true),
-          },
-          {
-            id: 'set:image_size',
-            title: 'Escalar Imagen / Pixel Art (Image Size)',
-            subtitle: 'Imagen > Escalar imagen...',
-            category: 'Ajustes',
-            keywords: 'escalar imagen pixel art resolucion',
-            onExecute: () => setImageSizeModalOpen(true),
-          },
-          {
-            id: 'set:lospec',
-            title: 'Importar Paleta Comunitaria Lospec',
-            subtitle: 'Paletas > Importar desde Lospec',
-            category: 'Ajustes',
-            keywords: 'lospec paleta retro colores importar',
-            onExecute: () => setLospecModalOpen(true),
-          },
-          {
-            id: 'set:spritesheet_tpl',
-            title: 'Planificador / Plantilla Sprite Sheet Lucha',
-            subtitle: 'Fighting Studio > Plantilla de Movimiento',
-            category: 'Ajustes',
-            keywords: 'spritesheet plantilla idle walk attack fighter',
-            onExecute: () => setSpriteSheetModalOpen(true),
-          },
-          {
-            id: 'file:open_document',
-            title: 'Abrir Documento Independiente (Ctrl+O)',
-            subtitle: 'Archivo > Abrir Documento... (PNG, JPG, WEBP, GIF, BMP, TIFF, TGA, ICO, ASE, PSD, PCS, JSON)',
-            category: 'Ajustes',
-            shortcut: 'Ctrl+O',
-            keywords: 'abrir documento archivo nuevo proyecto pestana png jpg webp gif bmp tiff tga ico psd ase pcs spritesheet',
-            onExecute: () => void handleOpenFilePicker(),
-          },
-          {
-            id: 'file:smart_import',
-            title: 'Importación Inteligente al Proyecto Actual',
-            subtitle: 'Archivo > Importar al Proyecto > Importación Inteligente...',
-            category: 'Ajustes',
-            shortcut: 'Ctrl+Shift+I',
-            keywords: 'importar imagen capa grupo referencia asset pincel frame',
-            onExecute: () => handleTriggerImport('smart'),
-          },
-          {
-            id: 'file:import_external_project',
-            title: 'Importar Proyecto Externo en el Actual',
-            subtitle: 'Archivo > Importar al Proyecto > Importar Proyecto Externo...',
-            category: 'Ajustes',
-            keywords: 'importar proyecto fusionar capas frames pcs psd ase',
-            onExecute: () => handleTriggerImport('external_project'),
-          },
-          {
-            id: 'view:toggle_rulers',
-            title: guidesConfig.showRulers ? 'Ocultar Reglas (Ctrl+R)' : 'Mostrar Reglas (Ctrl+R)',
-            subtitle: 'Ver > Reglas · Unidades en px, % o personalizadas',
-            category: 'Interfaz',
-            shortcut: 'Ctrl+R',
-            keywords: 'reglas ruler medidas pixeles porcentaje unidades',
-            onExecute: () =>
-              handleChangeGuidesConfig({ ...guidesConfig, showRulers: !guidesConfig.showRulers }),
-          },
-          {
-            id: 'view:toggle_guides',
-            title: guidesConfig.showGuides ? 'Ocultar Guías (Ctrl+;)' : 'Mostrar Guías (Ctrl+;)',
-            subtitle: 'Ver > Guías y Reglas > Mostrar Guías',
-            category: 'Interfaz',
-            shortcut: 'Ctrl+;',
-            keywords: 'guias mostrar ocultar composicion snap',
-            onExecute: () =>
-              handleChangeGuidesConfig({ ...guidesConfig, showGuides: !guidesConfig.showGuides }),
-          },
-          {
-            id: 'view:guides_exact_modal',
-            title: 'Crear Guía en Posición Exacta / Administrar Guías...',
-            subtitle: 'Ver > Guías y Reglas · Coordenadas exactas, snap y presets',
-            category: 'Interfaz',
-            keywords: 'guia exacta x y px reglas snap bloquear duplicar',
-            onExecute: () => {
-              setGuidesModalTab('exact');
-              setGuidesModalOpen(true);
-            },
-          },
-          {
-            id: 'view:guides_presets',
-            title: 'Guías de Animación y Lucha (Horizonte, HUD, Personajes, Escenarios)',
-            subtitle: 'Ver > Guías y Reglas > Guías de Animación / Lucha',
-            category: 'Animación',
-            keywords: 'guias horizonte hud personajes escenarios composicion lucha',
-            onExecute: () => {
-              setGuidesModalTab('presets');
-              setGuidesModalOpen(true);
-            },
-          },
-          {
-            id: 'view:wheel_nav_mode',
-            title: `Navegación con Rueda: ${wheelNavMode === 'pan' ? 'Cambiar a Zoom' : 'Cambiar a Desplazamiento'}`,
-            subtitle: 'Rueda=Vertical · Shift+Rueda=Horizontal · Ctrl+Rueda=Zoom',
-            category: 'Interfaz',
-            keywords: 'rueda raton scroll zoom paneo mano navegacion',
-            onExecute: () => setWheelNavMode((m) => (m === 'pan' ? 'zoom' : 'pan')),
-          },
-          {
-            id: 'set:installer',
-            title: 'Instalador Windows (.exe) — Paquete de Escritorio',
-            subtitle: 'Archivo > Instalador Windows (.exe)',
-            category: 'Ajustes',
-            keywords: 'instalador windows exe nsis inno rust tauri escritorio descargar',
-            onExecute: () => setLocalInstallerModalOpen(true),
-          },
-          {
-            id: 'help:what_is_this',
-            title: 'Modo "¿Dónde está?" (Inspector Visual con Cursor)',
-            subtitle: 'Ayuda > Modo "¿Dónde está?" (Shift+F1)',
-            category: 'Ajustes',
-            shortcut: 'Shift+F1',
-            keywords: 'ayuda donde esta inspector cursor tooltip',
-            onExecute: () => setWhatIsThisActive(true),
-          },
-          {
-            id: 'help:tool_guide',
-            title: 'Manual Interactivo y Guía de Herramientas',
-            subtitle: 'Ayuda > Manual Interactivo',
-            category: 'Ajustes',
-            keywords: 'manual guia tutorial ayuda',
-            onExecute: () => setToolGuideModalOpen(true),
-          },
-          {
-            id: 'help:where_is_tool',
-            title: '¿Dónde está esta herramienta? (Localizador jerárquico)',
-            subtitle: 'Ayuda > ¿Dónde está esta herramienta? (Ctrl+Alt+H)',
-            category: 'Ajustes',
-            shortcut: 'Ctrl+Alt+H',
-            keywords: 'donde esta herramienta buscar localizar panel menu controles shake curvas',
-            onExecute: () => {
-              setToolGuideFocusSearchNonce((n) => n + 1);
-              setToolGuideModalOpen(true);
-            },
-          },
-          {
-            id: 'edit:smart_delete',
-            title: 'Eliminación Inteligente Contextual (Suprimir)',
-            subtitle: 'Detecta capa, grupo, vector, hitbox, keyframe o referencia activa',
-            category: 'Herramientas',
-            shortcut: 'Delete',
-            keywords: 'suprimir delete eliminar borrar capa vector hitbox referencia keyframe',
-            onExecute: handleSmartDelete,
-          },
-          {
-            id: 'anim:camera_shake',
-            title: 'Temblor de Cámara (Camera Shake) y Keyframes de Cámara',
-            subtitle: 'Panel Animación > Controladores de Cámara',
-            category: 'Animación',
-            shortcut: 'Ctrl+Alt+T',
-            keywords: 'temblor camara screen shake camera keyframes zoom paneo hitstop',
-            onExecute: () => handleFocusPanel('animation'),
-          },
-          {
-            id: 'anim:camera_shake_test',
-            title: 'Probar Temblor de Cámara en Lienzo (Preview)',
-            subtitle: 'Ejecuta una prueba instantánea del temblor configurado',
-            category: 'Animación',
-            shortcut: 'Ctrl+Alt+T',
-            keywords: 'probar test temblor shake camara',
-            onExecute: () => setCameraShakeTestNonce((n) => n + 1),
-          },
-          {
-            id: 'anim:timeline_curves',
-            title: 'Timeline: Curvas de Animación, Interpolación y Eventos',
-            subtitle: 'Línea de Tiempo > Barra Curvas / Interpolación / Eventos',
-            category: 'Animación',
-            keywords: 'timeline curvas animacion interpolacion easing eventos keyframes camara',
-            onExecute: () => setForceOpenCurvesNonce((n) => n + 1),
-          },
-          {
-            id: 'vec:pixel_preview',
-            title: showPixelPerfectVectorPreview
-              ? 'Vista Pixel-Perfect Vectorial: Desactivar'
-              : 'Vista Pixel-Perfect Vectorial: Activar (Simultánea)',
-            subtitle: 'Inspector Vectorial > Vista Pixel-Perfect (Shift+P)',
-            category: 'Herramientas',
-            shortcut: 'Shift+P',
-            keywords: 'linea vectorial vista previa pixel perfect tiempo real confirmar cancelar',
-            onExecute: () => setShowPixelPerfectVectorPreview((v) => !v),
-          },
-        ]}
-        onExecuteCommand={(id) => executeCommandById(id)}
-        onRunMacro={handleRunMacro}
-        onActivateWhatIsThis={() => setWhatIsThisActive(true)}
-      />
+          universalItems={memoizedUniversalItems}
+          onExecuteCommand={handleExecuteCommandFromPalette}
+          onRunMacro={handleRunMacro}
+          onActivateWhatIsThis={handleActivateWhatIsThis}
+          onExecutionError={reportHelpOrSearchError}
+        />
       </StudioTopLayerPortal>
 
       {/* Hold-Alt Shortcuts Cheat Sheet Overlay — Top Overlay Tier */}
@@ -14334,17 +14794,11 @@ export default function App() {
       <StudioTopLayerPortal isOpen={toolGuideModalOpen} tier="modal" autoFocus ariaRole="dialog">
         <ToolGuideModal
           isOpen={toolGuideModalOpen}
-          onClose={() => {
-            setToolGuideModalOpen(false);
-            setHelpInitialFocusId(null);
-          }}
+          onClose={handleCloseToolGuideModal}
           initialFocusHelpId={helpInitialFocusId}
           focusSearchNonce={toolGuideFocusSearchNonce}
           onLocateEntry={handleLocateHelpItem}
-          onActivateWhatIsThis={() => {
-            setToolGuideModalOpen(false);
-            setWhatIsThisActive(true);
-          }}
+          onActivateWhatIsThis={handleActivateWhatIsThisFromGuide}
         />
       </StudioTopLayerPortal>
 
@@ -14371,14 +14825,11 @@ export default function App() {
       >
         <WhatIsThisOverlay
           active={whatIsThisActive}
-          onClose={() => setWhatIsThisActive(false)}
-          onOpenHelpItem={(item) => {
-            setWhatIsThisActive(false);
-            setHelpInitialFocusId(item.id);
-            setToolGuideModalOpen(true);
-          }}
+          onClose={handleCloseWhatIsThisOverlay}
+          onOpenHelpItem={handleOpenHelpItemFromOverlay}
           spotlightTarget={spotlightTarget}
-          onClearSpotlight={() => setSpotlightTarget(null)}
+          onClearSpotlight={handleClearSpotlight}
+          onReportError={reportHelpOrSearchError}
         />
       </StudioTopLayerPortal>
 

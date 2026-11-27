@@ -37,17 +37,27 @@ import {
   Camera,
   Scan,
   Maximize,
+  Sparkles,
 } from 'lucide-react';
 import {
   ActionTag,
   AnimationClip,
   CameraKeyframe,
+  DEFAULT_ONION_SKIN_CONFIG,
+  DEFAULT_ONION_SKIN_TRAIL_CONFIG,
   Frame,
   FramePhase,
   KeyframeEasing,
   Layer,
   LayerGroup,
   LayerKeyframe,
+  OnionSkinBlendMode,
+  OnionSkinColorMode,
+  OnionSkinConfig,
+  OnionSkinDetailLevel,
+  OnionSkinDirectionConfig,
+  OnionSkinDisplayMode,
+  OnionSkinPresetId,
   PerformanceMode,
   TimelineEvent,
   TimelineMarker,
@@ -61,6 +71,15 @@ import {
   ThumbnailBoundsMode,
 } from '../utils/pixelMath';
 import { scheduleIdleTask } from '../utils/renderCache';
+import {
+  ONION_BLEND_MODE_OPTIONS,
+  ONION_COLOR_MODE_OPTIONS,
+  ONION_DETAIL_LEVEL_OPTIONS,
+  ONION_DISPLAY_MODE_OPTIONS,
+  ONION_OPACITY_PRESETS,
+  applyOnionSkinPreset,
+  resolveOnionColorModeHex,
+} from '../utils/onionSkinEngine';
 import {
   buildProjectLayerTracks,
   isTimelineMovementOnlyGroup,
@@ -99,6 +118,8 @@ interface TimelineProps {
   onChangeOnionSkinPrev?: (count: number) => void;
   onionSkinNext?: number;
   onChangeOnionSkinNext?: (count: number) => void;
+  onionSkinConfig?: OnionSkinConfig;
+  onChangeOnionSkinConfig?: (next: OnionSkinConfig) => void;
   showGrid: boolean;
   onToggleGrid: () => void;
   showHitboxes: boolean;
@@ -242,6 +263,8 @@ export const Timeline: React.FC<TimelineProps> = ({
   linkMoveAllFrames = false,
   onToggleLinkMoveAllFrames,
   onSetOnionSkinEnabled,
+  onionSkinConfig,
+  onChangeOnionSkinConfig,
   timelineMarkers = [],
   onAddMarker,
   onDeleteMarker,
@@ -2336,150 +2359,674 @@ export const Timeline: React.FC<TimelineProps> = ({
       {/* Unclipped Fixed-Position Onion Skin Configuration Popover */}
       {showOnionMenu &&
         typeof document !== 'undefined' &&
-        createPortal(
-          <div
-            ref={onionPopoverRef}
-            onClick={(e) => e.stopPropagation()}
-            className="fixed w-72 border rounded-xl shadow-2xl p-3.5 flex flex-col gap-2.5 text-xs font-mono"
-            style={{
-              zIndex: STUDIO_Z.CONTEXT_MENU,
-              left: onionMenuPos.left,
-              top: onionMenuPos.top,
-              transform: onionMenuPos.openDown ? 'translateY(0)' : 'translateY(-100%)',
-              backgroundColor: 'var(--studio-bg-panel)',
-              borderColor: 'var(--studio-border-strong)',
-              color: 'var(--studio-text)',
-            }}
-          >
-            <div className="flex items-center justify-between border-b pb-2" style={{ borderColor: 'var(--studio-border)' }}>
-              <span className="font-bold flex items-center gap-1.5">
-                <Layers className="w-3.5 h-3.5 text-emerald-400" />
-                <span>Control Papel Cebolla</span>
-              </span>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={onToggleOnionSkin}
-                  className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
-                    onionSkinEnabled
-                      ? 'bg-emerald-500/25 border-emerald-400 text-emerald-300'
-                      : 'bg-slate-700/40 border-slate-600 text-slate-400'
-                  }`}
-                >
-                  {onionSkinEnabled ? 'ACTIVO' : 'APAGADO'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowOnionMenu(false)}
-                  className="hover:opacity-75"
-                  style={{ color: 'var(--studio-text-muted)' }}
-                >
-                  ✕
-                </button>
-              </div>
-            </div>
+        (() => {
+          const onionCfg: OnionSkinConfig = onionSkinConfig
+            ? {
+                ...onionSkinConfig,
+                enabled: onionSkinEnabled,
+                globalOpacity: onionSkinOpacity,
+                prev: { ...onionSkinConfig.prev, count: onionSkinPrev },
+                next: { ...onionSkinConfig.next, count: onionSkinNext },
+              }
+            : {
+                ...DEFAULT_ONION_SKIN_CONFIG,
+                enabled: onionSkinEnabled,
+                globalOpacity: onionSkinOpacity,
+                prev: { ...DEFAULT_ONION_SKIN_CONFIG.prev, count: onionSkinPrev },
+                next: { ...DEFAULT_ONION_SKIN_CONFIG.next, count: onionSkinNext },
+              };
+          const updateOnion = (updater: (prev: OnionSkinConfig) => OnionSkinConfig) => {
+            const next = updater(onionCfg);
+            if (onChangeOnionSkinConfig) {
+              onChangeOnionSkinConfig(next);
+            } else {
+              onChangeOnionSkinPrev?.(next.prev.count);
+              onChangeOnionSkinNext?.(next.next.count);
+              onChangeOnionSkinOpacity(next.globalOpacity);
+              if (next.enabled !== onionSkinEnabled) onSetOnionSkinEnabled?.(next.enabled);
+            }
+          };
 
-            <div className="flex flex-col gap-1">
-              <div className="flex items-center justify-between text-[11px]">
-                <span className="text-cyan-400 font-medium flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-cyan-400 inline-block" />
-                  <span>Fotogramas Anteriores:</span>
+          return createPortal(
+            <div
+              ref={onionPopoverRef}
+              onClick={(e) => e.stopPropagation()}
+              className="fixed w-[360px] max-w-[92vw] max-h-[78vh] overflow-y-auto border rounded-xl shadow-2xl p-3 flex flex-col gap-2.5 text-xs font-mono"
+              style={{
+                zIndex: STUDIO_Z.CONTEXT_MENU,
+                left: onionMenuPos.left,
+                top: onionMenuPos.top,
+                transform: onionMenuPos.openDown ? 'translateY(0)' : 'translateY(-100%)',
+                backgroundColor: 'var(--studio-bg-panel)',
+                borderColor: 'var(--studio-border-strong)',
+                color: 'var(--studio-text)',
+              }}
+            >
+              <div className="flex items-center justify-between border-b pb-2" style={{ borderColor: 'var(--studio-border)' }}>
+                <span className="font-bold flex items-center gap-1.5">
+                  <Layers className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Papel Cebolla Pro</span>
                 </span>
-                <span className="text-cyan-300 font-bold tabular-nums">{onionSkinPrev} F</span>
-              </div>
-              <div className="grid grid-cols-4 gap-1">
-                {[0, 1, 2, 3].map((val) => (
+                <div className="flex items-center gap-2">
                   <button
-                    key={`prev-${val}`}
                     type="button"
-                    onClick={() => {
-                      onChangeOnionSkinPrev?.(val);
-                      if (val > 0 && !onionSkinEnabled) onSetOnionSkinEnabled?.(true);
-                    }}
-                    className={`py-1 rounded text-[10px] font-bold border transition-colors ${
-                      onionSkinPrev === val
-                        ? 'bg-cyan-500/25 border-cyan-400 text-cyan-200'
-                        : 'hover:border-cyan-400/50'
+                    onClick={onToggleOnionSkin}
+                    className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                      onionSkinEnabled
+                        ? 'bg-emerald-500/25 border-emerald-400 text-emerald-300'
+                        : 'bg-slate-700/40 border-slate-600 text-slate-400'
                     }`}
-                    style={
-                      onionSkinPrev !== val
-                        ? {
-                            backgroundColor: 'var(--studio-bg-elevated)',
-                            borderColor: 'var(--studio-border)',
-                            color: 'var(--studio-text-muted)',
-                          }
-                        : undefined
-                    }
                   >
-                    {val === 0 ? '0 (Off)' : `-${val}`}
+                    {onionSkinEnabled ? 'ACTIVO' : 'APAGADO'}
                   </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="flex flex-col gap-1">
-              <div className="flex items-center justify-between text-[11px]">
-                <span className="text-amber-400 font-medium flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-amber-400 inline-block" />
-                  <span>Fotogramas Posteriores:</span>
-                </span>
-                <span className="text-amber-300 font-bold tabular-nums">{onionSkinNext} F</span>
-              </div>
-              <div className="grid grid-cols-4 gap-1">
-                {[0, 1, 2, 3].map((val) => (
                   <button
-                    key={`next-${val}`}
                     type="button"
-                    onClick={() => {
-                      onChangeOnionSkinNext?.(val);
-                      if (val > 0 && !onionSkinEnabled) onSetOnionSkinEnabled?.(true);
-                    }}
-                    className={`py-1 rounded text-[10px] font-bold border transition-colors ${
-                      onionSkinNext === val
-                        ? 'bg-amber-500/25 border-amber-400 text-amber-200'
-                        : 'hover:border-amber-400/50'
-                    }`}
-                    style={
-                      onionSkinNext !== val
-                        ? {
-                            backgroundColor: 'var(--studio-bg-elevated)',
-                            borderColor: 'var(--studio-border)',
-                            color: 'var(--studio-text-muted)',
-                          }
-                        : undefined
-                    }
+                    onClick={() => setShowOnionMenu(false)}
+                    className="hover:opacity-75"
+                    style={{ color: 'var(--studio-text-muted)' }}
                   >
-                    {val === 0 ? '0 (Off)' : `+${val}`}
+                    ✕
                   </button>
-                ))}
+                </div>
               </div>
-              {currentFrameIndex === 0 && onionSkinNext === 0 && (
-                <span className="text-[10px] text-amber-300/90 leading-snug pt-0.5">
-                  Estás en el fotograma #1 (sin anteriores). Selecciona el #2 o activa +1 posterior para verlo.
-                </span>
-              )}
-            </div>
 
-            <div className="flex flex-col gap-1 border-t pt-2" style={{ borderColor: 'var(--studio-border)' }}>
-              <StudioSlider
-                variant="panel"
-                label="Opacidad global"
-                value={Math.round(onionSkinOpacity * 100)}
-                min={10}
-                max={90}
-                step={5}
-                unit="%"
-                defaultValue={40}
-                accentColor="#34d399"
-                onChange={(v) => {
-                  onChangeOnionSkinOpacity(v / 100);
-                  if (!onionSkinEnabled) onSetOnionSkinEnabled?.(true);
-                }}
-              />
-            </div>
-          </div>,
-          document.body
-        )}
+              {/* Presets rápidos */}
+              <div className="flex flex-col gap-1">
+                <span className="text-[9px] uppercase tracking-wider" style={{ color: 'var(--studio-text-muted)' }}>
+                  Presets rápidos
+                </span>
+                <div className="grid grid-cols-4 gap-1">
+                  {(
+                    [
+                      ['animator', 'Animador', 'Anterior: Fantasma rojo · Posterior: Fantasma verde'],
+                      ['ghost_clean', 'Fantasma', 'Fotograma completo con colores originales y FX'],
+                      ['kof_trail', 'Trail FX', 'Estela acumulativa tipo KOF / Guilty Gear'],
+                      ['silhouette_classic', 'Silueta', 'Siluetas clásicas roja/azul'],
+                    ] as [OnionSkinPresetId, string, string][]
+                  ).map(([presetId, label, title]) => {
+                    const isAnimatorActive =
+                      presetId === 'animator' &&
+                      onionCfg.prev.displayMode === 'tinted_ghost' &&
+                      onionCfg.prev.colorMode === 'red' &&
+                      onionCfg.next.displayMode === 'tinted_ghost' &&
+                      onionCfg.next.colorMode === 'green';
+                    const isGhostActive =
+                      presetId === 'ghost_clean' &&
+                      onionCfg.prev.displayMode === 'ghost' &&
+                      (onionCfg.prev.colorMode || 'original') === 'original';
+                    const isTrailActive = presetId === 'kof_trail' && Boolean(onionCfg.trail?.enabled);
+                    const isActive = isAnimatorActive || isGhostActive || isTrailActive;
+                    return (
+                      <button
+                        key={presetId}
+                        type="button"
+                        title={title}
+                        onClick={() => updateOnion((c) => applyOnionSkinPreset(c, presetId))}
+                        className="px-1.5 py-1 rounded border text-[9px] font-bold cursor-pointer truncate"
+                        style={{
+                          backgroundColor: isActive ? 'var(--studio-accent)' : 'var(--studio-bg-elevated)',
+                          borderColor: isActive ? 'var(--studio-accent)' : 'var(--studio-border)',
+                          color: isActive ? 'var(--studio-accent-text)' : 'var(--studio-text)',
+                        }}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Blend + Detail */}
+              <div className="grid grid-cols-2 gap-2">
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-[9px] uppercase tracking-wider" style={{ color: 'var(--studio-text-muted)' }}>
+                    Mezcla
+                  </span>
+                  <select
+                    value={onionCfg.blendMode}
+                    onChange={(e) =>
+                      updateOnion((c) => ({ ...c, blendMode: e.target.value as OnionSkinBlendMode }))
+                    }
+                    className="px-1.5 py-1 rounded border text-[10px]"
+                    style={{
+                      backgroundColor: 'var(--studio-bg-elevated)',
+                      borderColor: 'var(--studio-border)',
+                      color: 'var(--studio-text)',
+                    }}
+                  >
+                    {ONION_BLEND_MODE_OPTIONS.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-[9px] uppercase tracking-wider" style={{ color: 'var(--studio-text-muted)' }}>
+                    Nivel Detalle
+                  </span>
+                  <select
+                    value={onionCfg.detailLevel}
+                    onChange={(e) =>
+                      updateOnion((c) => ({ ...c, detailLevel: e.target.value as OnionSkinDetailLevel }))
+                    }
+                    className="px-1.5 py-1 rounded border text-[10px]"
+                    style={{
+                      backgroundColor: 'var(--studio-bg-elevated)',
+                      borderColor: 'var(--studio-border)',
+                      color: 'var(--studio-text)',
+                    }}
+                  >
+                    {ONION_DETAIL_LEVEL_OPTIONS.map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Previous & Next Frames */}
+              {(['prev', 'next'] as const).map((dirKey) => {
+                const dir: OnionSkinDirectionConfig = onionCfg[dirKey];
+                const isPrev = dirKey === 'prev';
+                const effectiveColorMode: OnionSkinColorMode =
+                  dir.colorMode ?? (dir.displayMode === 'ghost' ? 'original' : 'custom');
+                const resolvedSwatch =
+                  resolveOnionColorModeHex(effectiveColorMode, dir.color) || dir.color;
+                const isCustomMode =
+                  dir.displayMode === 'volume' ||
+                  dir.displayMode === 'base_color' ||
+                  dir.displayMode === 'full';
+                const patchDir = (patch: Partial<OnionSkinDirectionConfig>) =>
+                  updateOnion((c) => ({
+                    ...c,
+                    [dirKey]: { ...c[dirKey], ...patch },
+                  }));
+
+                return (
+                  <div
+                    key={dirKey}
+                    className="flex flex-col gap-1.5 rounded-lg border p-2"
+                    style={{
+                      backgroundColor: 'var(--studio-bg-card)',
+                      borderColor: dir.count > 0 ? `${resolvedSwatch}66` : 'var(--studio-border)',
+                    }}
+                  >
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="font-bold flex items-center gap-1.5">
+                        <span
+                          className="w-2.5 h-2.5 rounded-full inline-block border border-white/30"
+                          style={{
+                            background:
+                              effectiveColorMode === 'original'
+                                ? 'linear-gradient(135deg, #f8fafc 0%, #38bdf8 50%, #f59e0b 100%)'
+                                : resolvedSwatch,
+                          }}
+                        />
+                        <span>{isPrev ? `Anteriores (${dir.count} F)` : `Siguientes (${dir.count} F)`}</span>
+                      </span>
+                      <span className="text-[10px] tabular-nums" style={{ color: 'var(--studio-text-muted)' }}>
+                        {Math.round(dir.opacity * 100)}%
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-7 gap-1">
+                      {[0, 1, 2, 3, 5, 10, 20].map((val) => (
+                        <button
+                          key={`${dirKey}-${val}`}
+                          type="button"
+                          onClick={() =>
+                            updateOnion((c) => ({
+                              ...c,
+                              enabled: val > 0 ? true : c.enabled,
+                              [dirKey]: { ...c[dirKey], count: val },
+                            }))
+                          }
+                          className="py-0.5 rounded text-[10px] font-bold border transition-colors"
+                          style={
+                            dir.count === val
+                              ? {
+                                  backgroundColor: `${resolvedSwatch}33`,
+                                  borderColor: resolvedSwatch,
+                                  color: '#ffffff',
+                                }
+                              : {
+                                  backgroundColor: 'var(--studio-bg-elevated)',
+                                  borderColor: 'var(--studio-border)',
+                                  color: 'var(--studio-text-muted)',
+                                }
+                          }
+                        >
+                          {val === 0 ? '0' : isPrev ? `-${val}` : `+${val}`}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Visualización */}
+                    <div className="grid grid-cols-2 gap-1">
+                      {(
+                        [
+                          ['silhouette', 'Silueta'],
+                          ['outline', 'Contorno'],
+                          ['ghost', 'Fantasma'],
+                          ['tinted_ghost', 'Fantasma Color'],
+                        ] as [OnionSkinDisplayMode, string][]
+                      ).map(([modeId, lbl]) => {
+                        const active = dir.displayMode === modeId;
+                        return (
+                          <button
+                            key={`${dirKey}-${modeId}`}
+                            type="button"
+                            onClick={() => {
+                              if (modeId === 'ghost') {
+                                patchDir({ displayMode: 'ghost', colorMode: 'original' });
+                              } else if (modeId === 'tinted_ghost') {
+                                const nextColorMode: OnionSkinColorMode =
+                                  effectiveColorMode === 'original'
+                                    ? isPrev
+                                      ? 'red'
+                                      : 'green'
+                                    : effectiveColorMode;
+                                patchDir({
+                                  displayMode: 'tinted_ghost',
+                                  colorMode: nextColorMode,
+                                  color: resolveOnionColorModeHex(nextColorMode, dir.color) || dir.color,
+                                });
+                              } else {
+                                const nextColorMode: OnionSkinColorMode =
+                                  effectiveColorMode === 'original' ? 'custom' : effectiveColorMode;
+                                patchDir({ displayMode: modeId, colorMode: nextColorMode });
+                              }
+                            }}
+                            className="px-1.5 py-1 rounded border text-[9px] font-semibold text-left cursor-pointer truncate"
+                            style={{
+                              backgroundColor: active ? `${resolvedSwatch}33` : 'var(--studio-bg-elevated)',
+                              borderColor: active ? resolvedSwatch : 'var(--studio-border)',
+                              color: active ? '#ffffff' : 'var(--studio-text-muted)',
+                            }}
+                          >
+                            {active ? '● ' : '○ '}
+                            {lbl}
+                          </button>
+                        );
+                      })}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!isCustomMode) patchDir({ displayMode: 'volume' });
+                        }}
+                        className="col-span-2 px-1.5 py-1 rounded border text-[9px] font-semibold text-left cursor-pointer"
+                        style={{
+                          backgroundColor: isCustomMode ? `${resolvedSwatch}33` : 'var(--studio-bg-elevated)',
+                          borderColor: isCustomMode ? resolvedSwatch : 'var(--studio-border)',
+                          color: isCustomMode ? '#ffffff' : 'var(--studio-text-muted)',
+                        }}
+                      >
+                        {isCustomMode ? '● ' : '○ '}Personalizado (Volumen / Color Base / Detalle)
+                      </button>
+                    </div>
+
+                    {isCustomMode && (
+                      <div className="grid grid-cols-3 gap-1">
+                        {(
+                          [
+                            ['volume', 'Volumen'],
+                            ['base_color', 'Color Base'],
+                            ['full', 'Detalle'],
+                          ] as [OnionSkinDisplayMode, string][]
+                        ).map(([subId, subLbl]) => (
+                          <button
+                            key={`${dirKey}-${subId}`}
+                            type="button"
+                            onClick={() => patchDir({ displayMode: subId })}
+                            className="px-1 py-0.5 rounded border text-[9px] font-semibold cursor-pointer"
+                            style={{
+                              backgroundColor:
+                                dir.displayMode === subId ? 'var(--studio-accent)' : 'var(--studio-bg-elevated)',
+                              borderColor: 'var(--studio-border-strong)',
+                              color: dir.displayMode === subId ? 'var(--studio-accent-text)' : 'var(--studio-text-muted)',
+                            }}
+                          >
+                            {subLbl}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Opacidad 0% - 100% + Quick Presets */}
+                    <StudioSlider
+                      variant="panel"
+                      label="Opac."
+                      value={Math.round(dir.opacity * 100)}
+                      min={0}
+                      max={100}
+                      step={1}
+                      unit="%"
+                      defaultValue={50}
+                      accentColor={resolvedSwatch}
+                      onChange={(v) => patchDir({ opacity: v / 100 })}
+                    />
+                    <div className="grid grid-cols-4 gap-1">
+                      {ONION_OPACITY_PRESETS.map((pct) => {
+                        const active = Math.round(dir.opacity * 100) === pct;
+                        return (
+                          <button
+                            key={`${dirKey}-pct-${pct}`}
+                            type="button"
+                            onClick={() => patchDir({ opacity: pct / 100 })}
+                            className="py-0.5 rounded border text-[9px] font-mono tabular-nums cursor-pointer"
+                            style={{
+                              backgroundColor: active ? `${resolvedSwatch}33` : 'var(--studio-bg-elevated)',
+                              borderColor: active ? resolvedSwatch : 'var(--studio-border)',
+                              color: active ? '#ffffff' : 'var(--studio-text-muted)',
+                            }}
+                          >
+                            {pct}%
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {/* Coloración opcional */}
+                    <div className="flex items-center gap-1 flex-wrap pt-0.5">
+                      {ONION_COLOR_MODE_OPTIONS.map((cm) => {
+                        const active = effectiveColorMode === cm.id;
+                        return (
+                          <button
+                            key={`${dirKey}-cm-${cm.id}`}
+                            type="button"
+                            title={cm.label}
+                            onClick={() => {
+                              const nextHex = cm.hex || dir.color;
+                              const nextDisplayMode =
+                                cm.id === 'original' && dir.displayMode === 'tinted_ghost'
+                                  ? 'ghost'
+                                  : cm.id !== 'original' && dir.displayMode === 'ghost'
+                                  ? 'tinted_ghost'
+                                  : dir.displayMode;
+                              patchDir({
+                                colorMode: cm.id,
+                                color: nextHex,
+                                displayMode: nextDisplayMode,
+                              });
+                            }}
+                            className="px-1.5 py-0.5 rounded border text-[9px] font-semibold flex items-center gap-1 cursor-pointer"
+                            style={{
+                              backgroundColor: active ? 'var(--studio-bg-elevated)' : 'transparent',
+                              borderColor: active
+                                ? cm.hex || 'var(--studio-accent)'
+                                : 'var(--studio-border)',
+                              color: active ? '#ffffff' : 'var(--studio-text-muted)',
+                            }}
+                          >
+                            {cm.hex && (
+                              <span
+                                className="w-2 h-2 rounded-full inline-block"
+                                style={{ backgroundColor: cm.hex }}
+                              />
+                            )}
+                            <span>{cm.shortLabel}</span>
+                          </button>
+                        );
+                      })}
+                      <input
+                        type="color"
+                        value={dir.color}
+                        onChange={(e) =>
+                          patchDir({
+                            colorMode: 'custom',
+                            color: e.target.value,
+                            displayMode: dir.displayMode === 'ghost' ? 'tinted_ghost' : dir.displayMode,
+                          })
+                        }
+                        className="w-4 h-4 bg-transparent border-0 cursor-pointer p-0"
+                      />
+                    </div>
+
+                    {!isPrev && currentFrameIndex === 0 && dir.count === 0 && (
+                      <span className="text-[10px] text-amber-300/90 leading-snug">
+                        Estás en el frame #1. Elige frame #2 o activa +1 siguiente.
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+
+              {/* Global Opacity + Auto Falloff */}
+              <div className="flex flex-col gap-1.5 border-t pt-2" style={{ borderColor: 'var(--studio-border)' }}>
+                <StudioSlider
+                  variant="panel"
+                  label="Opacidad global"
+                  value={Math.round(onionCfg.globalOpacity * 100)}
+                  min={0}
+                  max={100}
+                  step={1}
+                  unit="%"
+                  defaultValue={100}
+                  accentColor="#34d399"
+                  onChange={(v) =>
+                    updateOnion((c) => ({ ...c, enabled: v > 0 ? true : c.enabled, globalOpacity: v / 100 }))
+                  }
+                />
+                <label className="flex items-center justify-between text-[10px] cursor-pointer">
+                  <span style={{ color: 'var(--studio-text-muted)' }}>Estela progresiva (caída por distancia)</span>
+                  <input
+                    type="checkbox"
+                    checked={onionCfg.autoDistanceFalloff}
+                    onChange={(e) =>
+                      updateOnion((c) => ({ ...c, autoDistanceFalloff: e.target.checked }))
+                    }
+                    className="accent-emerald-400"
+                  />
+                </label>
+              </div>
+
+              {/* Modo Trail (Estela FX / Dash KOF / Guilty Gear) */}
+              {(() => {
+                const trailCfg = onionCfg.trail || DEFAULT_ONION_SKIN_TRAIL_CONFIG;
+                const updateTrail = (patch: Partial<typeof trailCfg>) =>
+                  updateOnion((c) => ({
+                    ...c,
+                    trail: { ...(c.trail || DEFAULT_ONION_SKIN_TRAIL_CONFIG), ...patch },
+                  }));
+                return (
+                  <div
+                    className="flex flex-col gap-1.5 rounded-lg border p-2"
+                    style={{
+                      backgroundColor: 'var(--studio-bg-card)',
+                      borderColor: trailCfg.enabled ? '#f59e0b' : 'var(--studio-border)',
+                    }}
+                  >
+                    <label className="flex items-center justify-between text-[10px] font-bold cursor-pointer">
+                      <span className="flex items-center gap-1.5 text-amber-300">
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>Modo Trail (Estela FX / Dash)</span>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={trailCfg.enabled}
+                        onChange={(e) => updateTrail({ enabled: e.target.checked })}
+                        className="accent-amber-400"
+                      />
+                    </label>
+                    {trailCfg.enabled && (
+                      <>
+                        <StudioSlider
+                          variant="panel"
+                          label="Últimos N frames"
+                          value={trailCfg.framesCount}
+                          min={1}
+                          max={20}
+                          step={1}
+                          defaultValue={5}
+                          accentColor="#f59e0b"
+                          formatValue={(v) => `${v} F`}
+                          onChange={(v) => updateTrail({ framesCount: v })}
+                        />
+                        <div className="grid grid-cols-2 gap-1.5">
+                          <StudioSlider
+                            variant="panel"
+                            label="Opac. inicial"
+                            value={Math.round(trailCfg.opacity * 100)}
+                            min={0}
+                            max={100}
+                            step={1}
+                            defaultValue={55}
+                            unit="%"
+                            accentColor="#f59e0b"
+                            onChange={(v) => updateTrail({ opacity: v / 100 })}
+                          />
+                          <StudioSlider
+                            variant="panel"
+                            label="Caída"
+                            value={Math.round(trailCfg.decay * 100)}
+                            min={0}
+                            max={95}
+                            step={1}
+                            defaultValue={45}
+                            unit="%"
+                            accentColor="#f59e0b"
+                            onChange={(v) => updateTrail({ decay: v / 100 })}
+                          />
+                        </div>
+                        <div className="flex items-center justify-between text-[10px]">
+                          <label className="flex items-center gap-1.5 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={trailCfg.preserveOriginalColors}
+                              onChange={(e) =>
+                                updateTrail({ preserveOriginalColors: e.target.checked })
+                              }
+                              className="accent-amber-400"
+                            />
+                            <span>Colores/FX originales</span>
+                          </label>
+                          {!trailCfg.preserveOriginalColors && (
+                            <input
+                              type="color"
+                              value={trailCfg.tintColor}
+                              onChange={(e) => updateTrail({ tintColor: e.target.value })}
+                              className="w-4 h-4 bg-transparent border-0 cursor-pointer p-0"
+                            />
+                          )}
+                        </div>
+                        <div className="grid grid-cols-2 gap-1.5 items-center text-[10px]">
+                          <select
+                            value={trailCfg.blendMode}
+                            onChange={(e) =>
+                              updateTrail({ blendMode: e.target.value as OnionSkinBlendMode })
+                            }
+                            className="px-1.5 py-1 rounded border text-[10px]"
+                            style={{
+                              backgroundColor: 'var(--studio-bg-elevated)',
+                              borderColor: 'var(--studio-border)',
+                              color: 'var(--studio-text)',
+                            }}
+                          >
+                            {ONION_BLEND_MODE_OPTIONS.map((b) => (
+                              <option key={`tl-trail-blend-${b.id}`} value={b.id}>
+                                Mezcla: {b.label}
+                              </option>
+                            ))}
+                          </select>
+                          <label className="flex items-center gap-1 cursor-pointer justify-end">
+                            <input
+                              type="checkbox"
+                              checked={trailCfg.showDuringPlay}
+                              onChange={(e) => updateTrail({ showDuringPlay: e.target.checked })}
+                              className="accent-amber-400"
+                            />
+                            <span style={{ color: 'var(--studio-text-muted)' }}>Al reproducir</span>
+                          </label>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {/* Motion Path Quick Controls */}
+              <div className="flex flex-col gap-1.5 border-t pt-2" style={{ borderColor: 'var(--studio-border)' }}>
+                <label className="flex items-center justify-between text-[10px] font-bold cursor-pointer">
+                  <span className="text-sky-300">Modo Trazo de Movimiento</span>
+                  <input
+                    type="checkbox"
+                    checked={onionCfg.motionPath.enabled}
+                    onChange={(e) =>
+                      updateOnion((c) => ({
+                        ...c,
+                        motionPath: { ...c.motionPath, enabled: e.target.checked },
+                      }))
+                    }
+                    className="accent-sky-400"
+                  />
+                </label>
+                {onionCfg.motionPath.enabled && (
+                  <div className="grid grid-cols-2 gap-1 text-[10px]">
+                    <label className="flex items-center gap-1 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={onionCfg.motionPath.trackHead}
+                        onChange={(e) =>
+                          updateOnion((c) => ({
+                            ...c,
+                            motionPath: { ...c.motionPath, trackHead: e.target.checked },
+                          }))
+                        }
+                        className="accent-sky-400"
+                      />
+                      <span className="text-sky-300">Cabeza</span>
+                    </label>
+                    <label className="flex items-center gap-1 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={onionCfg.motionPath.trackHands}
+                        onChange={(e) =>
+                          updateOnion((c) => ({
+                            ...c,
+                            motionPath: { ...c.motionPath, trackHands: e.target.checked },
+                          }))
+                        }
+                        className="accent-amber-400"
+                      />
+                      <span className="text-amber-300">Manos</span>
+                    </label>
+                    <label className="flex items-center gap-1 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={onionCfg.motionPath.trackFeet}
+                        onChange={(e) =>
+                          updateOnion((c) => ({
+                            ...c,
+                            motionPath: { ...c.motionPath, trackFeet: e.target.checked },
+                          }))
+                        }
+                        className="accent-emerald-400"
+                      />
+                      <span className="text-emerald-300">Pies</span>
+                    </label>
+                    <label className="flex items-center gap-1 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={onionCfg.motionPath.trackCenterOfGravity}
+                        onChange={(e) =>
+                          updateOnion((c) => ({
+                            ...c,
+                            motionPath: { ...c.motionPath, trackCenterOfGravity: e.target.checked },
+                          }))
+                        }
+                        className="accent-rose-400"
+                      />
+                      <span className="text-rose-300">C. Gravedad</span>
+                    </label>
+                  </div>
+                )}
+              </div>
+            </div>,
+            document.body
+          );
+        })()}
     </div>
   );
 };

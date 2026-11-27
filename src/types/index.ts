@@ -1311,6 +1311,7 @@ export interface ProjectState {
   onionSkinPrev: number;
   onionSkinNext: number;
   onionSkinOpacity: number;
+  onionSkinConfig?: OnionSkinConfig;
   playbackMode: 'loop' | 'pingpong' | 'once';
   timelineMarkers?: TimelineMarker[];
   references?: ReferenceItem[];
@@ -1318,6 +1319,129 @@ export interface ProjectState {
   guides?: CanvasGuide[];
   workMode?: ProjectWorkMode;
 }
+
+export type OnionSkinDisplayMode =
+  | 'ghost'
+  | 'tinted_ghost'
+  | 'silhouette'
+  | 'outline'
+  | 'volume'
+  | 'base_color'
+  | 'full';
+
+export type OnionSkinColorMode =
+  | 'original'
+  | 'red'
+  | 'blue'
+  | 'green'
+  | 'custom';
+
+export type OnionSkinBlendMode =
+  | 'normal'
+  | 'multiply'
+  | 'overlay'
+  | 'screen'
+  | 'difference'
+  | 'lighter'
+  | 'soft-light';
+
+export type OnionSkinDetailLevel =
+  | 'very_low'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'full';
+
+export type OnionSkinPresetId =
+  | 'animator'
+  | 'ghost_clean'
+  | 'silhouette_classic'
+  | 'kof_trail';
+
+export interface OnionSkinDirectionConfig {
+  count: number; // 0..20
+  displayMode: OnionSkinDisplayMode;
+  colorMode?: OnionSkinColorMode;
+  color: string;
+  opacity: number; // 0..1
+  tintStrength?: number; // 0..1
+}
+
+export interface OnionSkinTrailConfig {
+  enabled: boolean;
+  framesCount: number; // 1..20
+  opacity: number; // 0..1
+  decay: number; // 0..1
+  preserveOriginalColors: boolean;
+  tintColor: string;
+  blendMode: OnionSkinBlendMode;
+  showDuringPlay: boolean;
+}
+
+export interface MotionPathConfig {
+  enabled: boolean;
+  trackHead: boolean;
+  trackHands: boolean;
+  trackFeet: boolean;
+  trackCenterOfGravity: boolean;
+  scope: 'onion_range' | 'all_frames';
+}
+
+export interface OnionSkinConfig {
+  enabled: boolean;
+  globalOpacity: number; // 0..1
+  autoDistanceFalloff: boolean;
+  blendMode: OnionSkinBlendMode;
+  detailLevel: OnionSkinDetailLevel;
+  prev: OnionSkinDirectionConfig;
+  next: OnionSkinDirectionConfig;
+  trail?: OnionSkinTrailConfig;
+  motionPath: MotionPathConfig;
+}
+
+export const DEFAULT_ONION_SKIN_TRAIL_CONFIG: OnionSkinTrailConfig = {
+  enabled: false,
+  framesCount: 5,
+  opacity: 0.55,
+  decay: 0.45,
+  preserveOriginalColors: true,
+  tintColor: '#00d2ff',
+  blendMode: 'normal',
+  showDuringPlay: false,
+};
+
+export const DEFAULT_ONION_SKIN_CONFIG: OnionSkinConfig = {
+  enabled: true,
+  globalOpacity: 1.0,
+  autoDistanceFalloff: true,
+  blendMode: 'normal',
+  detailLevel: 'full',
+  prev: {
+    count: 1,
+    displayMode: 'ghost',
+    colorMode: 'original',
+    color: '#ef4444',
+    opacity: 0.5,
+    tintStrength: 0.55,
+  },
+  next: {
+    count: 0,
+    displayMode: 'ghost',
+    colorMode: 'original',
+    color: '#22c55e',
+    opacity: 0.5,
+    tintStrength: 0.55,
+  },
+  trail: { ...DEFAULT_ONION_SKIN_TRAIL_CONFIG },
+  motionPath: {
+    enabled: false,
+    trackHead: true,
+    trackHands: true,
+    trackFeet: true,
+    trackCenterOfGravity: true,
+    scope: 'onion_range',
+  },
+};
 
 // =========================================================
 // SYSTEM 3: CUSTOM SHORTCUTS, PROFILES, COMMAND PALETTE & MACROS

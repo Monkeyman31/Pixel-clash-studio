@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { BookOpen, Compass, HelpCircle, Keyboard, MapPin, X } from 'lucide-react';
 import { findHelpItemById, HELP_CATALOG_ITEMS, HelpCatalogItem } from '../utils/helpCatalog';
 
@@ -8,6 +8,73 @@ interface WhatIsThisOverlayProps {
   onOpenHelpItem: (item: HelpCatalogItem) => void;
   spotlightTarget: { helpId: string; label: string; hint?: string } | null;
   onClearSpotlight: () => void;
+  onReportError?: (ctx: { action: string; selectedResult?: string; panelId?: string; error: unknown }) => void;
+}
+
+/**
+ * Safely scrolls ONLY truly scrollable (overflow: auto | scroll) ancestor containers
+ * so `overflow: hidden` application shells, `html`, or `body` are NEVER displaced off-screen.
+ */
+function scrollOnlyScrollableAncestors(el: HTMLElement): void {
+  let parent = el.parentElement;
+  while (parent && parent !== document.body && parent !== document.documentElement) {
+    const style = window.getComputedStyle(parent);
+    const overflowY = style.overflowY;
+    const overflowX = style.overflowX;
+    const canScrollY =
+      (overflowY === 'auto' || overflowY === 'scroll') &&
+      parent.scrollHeight > parent.clientHeight + 2;
+    const canScrollX =
+      (overflowX === 'auto' || overflowX === 'scroll') &&
+      parent.scrollWidth > parent.clientWidth + 2;
+
+    if (canScrollY || canScrollX) {
+      const parentRect = parent.getBoundingClientRect();
+      const elRect = el.getBoundingClientRect();
+      if (canScrollY) {
+        if (elRect.top < parentRect.top + 12 || elRect.bottom > parentRect.bottom - 12) {
+          const deltaY =
+            elRect.top - parentRect.top - (parentRect.height / 2 - elRect.height / 2);
+          parent.scrollTop = Math.max(0, parent.scrollTop + deltaY);
+        }
+      }
+      if (canScrollX) {
+        if (elRect.left < parentRect.left + 12 || elRect.right > parentRect.right - 12) {
+          const deltaX =
+            elRect.left - parentRect.left - (parentRect.width / 2 - elRect.width / 2);
+          parent.scrollLeft = Math.max(0, parent.scrollLeft + deltaX);
+        }
+      }
+    }
+    parent = parent.parentElement;
+  }
+}
+
+function findVisibleHelpElement(helpId: string): HTMLElement | null {
+  const selectors = [
+    `[data-help-id="${helpId}"]`,
+    helpId.startsWith('panel.') ? `[data-panel-id="${helpId.replace('panel.', '')}"]` : '',
+    helpId.startsWith('anim.') ? `[data-panel-id="animation"]` : '',
+    helpId === 'tool.shading' || helpId === 'tool.smear' || helpId === 'tool.dither'
+      ? `[data-panel-id="brushes"]`
+      : '',
+    helpId === 'tool.move_reference' ? `[data-help-id="tool.move"]` : '',
+    helpId === 'panel.pureref' ? `[data-panel-id="references"]` : '',
+  ].filter(Boolean);
+
+  for (const sel of selectors) {
+    try {
+      const matches = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
+      const visible = matches.find((m) => {
+        const r = m.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      });
+      if (visible) return visible;
+    } catch {
+      // Ignore malformed selector
+    }
+  }
+  return null;
 }
 
 export const WhatIsThisOverlay: React.FC<WhatIsThisOverlayProps> = ({
@@ -16,12 +83,25 @@ export const WhatIsThisOverlay: React.FC<WhatIsThisOverlayProps> = ({
   onOpenHelpItem,
   spotlightTarget,
   onClearSpotlight,
+  onReportError,
 }) => {
   const [hoveredItem, setHoveredItem] = useState<HelpCatalogItem | null>(null);
   const [cursorPos, setCursorPos] = useState<{ x: number; y: number }>({ x: 24, y: 72 });
   const [spotlightRect, setSpotlightRect] = useState<DOMRect | null>(null);
+  const [spotlightFallbackOnly, setSpotlightFallbackOnly] = useState<boolean>(false);
 
-  // F1 Inspector hover tracking
+  const onCloseRef = useRef(onClose);
+  const onOpenHelpItemRef = useRef(onOpenHelpItem);
+  const onClearSpotlightRef = useRef(onClearSpotlight);
+  const onReportErrorRef = useRef(onReportError);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+    onOpenHelpItemRef.current = onOpenHelpItem;
+    onClearSpotlightRef.current = onClearSpotlight;
+    onReportErrorRef.current = onReportError;
+  });
+
+  // Shift+F1 Inspector hover tracking
   useEffect(() => {
     if (!active) {
       setHoveredItem(null);
@@ -29,64 +109,68 @@ export const WhatIsThisOverlay: React.FC<WhatIsThisOverlayProps> = ({
     }
 
     const resolveHelpItemFromElement = (target: EventTarget | null): HelpCatalogItem | null => {
-      let el = target as HTMLElement | null;
-      while (el && el !== document.body) {
-        const helpId = el.getAttribute?.('data-help-id');
-        if (helpId) {
-          const found = findHelpItemById(helpId);
-          if (found) return found;
-          const customTitle = el.getAttribute('title') || el.getAttribute('aria-label');
-          if (customTitle) {
-            return {
-              id: helpId,
-              name: customTitle,
-              category: 'Herramientas',
-              location: el.closest('[data-dock-zone]')?.getAttribute('data-dock-zone') || 'Espacio de trabajo',
-              howToAccess: 'Haz clic directamente en este control.',
-              hotkey: '—',
-              description: customTitle,
-              useCases: ['Control interactivo del estudio.'],
-              demoType: 'workspace_ui',
-            };
-          }
-        }
-        // Fallback: check title or aria-label on interactive elements
-        if (!el.hasAttribute('data-what-is-this-ignore')) {
-          const roleMatch =
-            el.tagName === 'BUTTON' ||
-            el.getAttribute('role') === 'button' ||
-            el.hasAttribute('data-panel-id');
-          if (roleMatch) {
-            const panelId = el.getAttribute('data-panel-id');
-            if (panelId) {
-              const panelItem = findHelpItemById(`panel.${panelId}`);
-              if (panelItem) return panelItem;
-            }
-            const label = el.getAttribute('title') || el.getAttribute('aria-label');
-            if (label && label.trim().length > 2) {
-              // Fuzzy match with catalog
-              const lower = label.toLowerCase();
-              const matched = HELP_CATALOG_ITEMS.find(
-                (it) =>
-                  lower.includes(it.name.toLowerCase()) ||
-                  (it.toolId && lower.includes(it.toolId))
-              );
-              if (matched) return matched;
+      try {
+        let el = target as HTMLElement | null;
+        while (el && el !== document.body) {
+          const helpId = el.getAttribute?.('data-help-id');
+          if (helpId) {
+            const found = findHelpItemById(helpId);
+            if (found) return found;
+            const customTitle = el.getAttribute('title') || el.getAttribute('aria-label');
+            if (customTitle) {
               return {
-                id: 'ui.control',
-                name: label.split('(')[0].trim(),
-                category: 'Interfaz y Proyecto',
-                location: 'Control de interfaz',
-                howToAccess: 'Haz clic directamente en el control resaltado.',
-                hotkey: label.match(/\(([^)]+)\)/)?.[1] || '—',
-                description: label,
-                useCases: ['Acción rápida de la interfaz de PixelClash Studio.'],
+                id: helpId,
+                name: customTitle,
+                category: 'Herramientas',
+                location:
+                  el.closest('[data-dock-zone]')?.getAttribute('data-dock-zone') ||
+                  'Espacio de trabajo',
+                howToAccess: 'Haz clic directamente en este control.',
+                hotkey: '—',
+                description: customTitle,
+                useCases: ['Control interactivo del estudio.'],
                 demoType: 'workspace_ui',
               };
             }
           }
+          if (!el.hasAttribute('data-what-is-this-ignore')) {
+            const roleMatch =
+              el.tagName === 'BUTTON' ||
+              el.getAttribute('role') === 'button' ||
+              el.hasAttribute('data-panel-id');
+            if (roleMatch) {
+              const panelId = el.getAttribute('data-panel-id');
+              if (panelId) {
+                const panelItem = findHelpItemById(`panel.${panelId}`);
+                if (panelItem) return panelItem;
+              }
+              const label = el.getAttribute('title') || el.getAttribute('aria-label');
+              if (label && label.trim().length > 2) {
+                const lower = label.toLowerCase();
+                const matched = HELP_CATALOG_ITEMS.find(
+                  (it) =>
+                    lower.includes(it.name.toLowerCase()) ||
+                    (it.toolId && lower.includes(it.toolId))
+                );
+                if (matched) return matched;
+                return {
+                  id: 'ui.control',
+                  name: label.split('(')[0].trim(),
+                  category: 'Interfaz y Proyecto',
+                  location: 'Control de interfaz',
+                  howToAccess: 'Haz clic directamente en el control resaltado.',
+                  hotkey: label.match(/\(([^)]+)\)/)?.[1] || '—',
+                  description: label,
+                  useCases: ['Acción rápida de la interfaz de PixelClash Studio.'],
+                  demoType: 'workspace_ui',
+                };
+              }
+            }
+          }
+          el = el.parentElement;
         }
-        el = el.parentElement;
+      } catch (err) {
+        onReportErrorRef.current?.({ action: 'inspect_hover', error: err });
       }
       return null;
     };
@@ -94,7 +178,12 @@ export const WhatIsThisOverlay: React.FC<WhatIsThisOverlayProps> = ({
     const handleMouseMove = (e: MouseEvent) => {
       setCursorPos({ x: e.clientX, y: e.clientY });
       const elUnder = document.elementFromPoint(e.clientX, e.clientY);
-      if (elUnder && elUnder.closest('[data-what-is-this-ui]')) {
+      if (
+        elUnder &&
+        (elUnder.closest('[data-what-is-this-ui]') ||
+          elUnder.closest('[data-studio-top-layer="modal"]') ||
+          elUnder.closest('[data-studio-top-layer="command"]'))
+      ) {
         return;
       }
       const item = resolveHelpItemFromElement(elUnder);
@@ -103,78 +192,100 @@ export const WhatIsThisOverlay: React.FC<WhatIsThisOverlayProps> = ({
 
     const handleClickCapture = (e: MouseEvent) => {
       const target = e.target as HTMLElement | null;
-      if (target?.closest('[data-what-is-this-ui]')) return;
+      if (
+        !target ||
+        target.closest('[data-what-is-this-ui]') ||
+        target.closest('[data-studio-top-layer="modal"]') ||
+        target.closest('[data-studio-top-layer="command"]')
+      ) {
+        return;
+      }
       const item = resolveHelpItemFromElement(target);
       if (item) {
         e.preventDefault();
         e.stopPropagation();
-        onOpenHelpItem(item);
+        try {
+          onOpenHelpItemRef.current(item);
+        } catch (err) {
+          onReportErrorRef.current?.({
+            action: 'open_help_item',
+            selectedResult: item.id,
+            panelId: item.panelId,
+            error: err,
+          });
+          onCloseRef.current();
+        }
       }
     };
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
-        onClose();
+        e.stopPropagation();
+        onCloseRef.current();
       }
     };
 
     window.addEventListener('mousemove', handleMouseMove, true);
     window.addEventListener('click', handleClickCapture, true);
-    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keydown', handleKeyDown, true);
     return () => {
       window.removeEventListener('mousemove', handleMouseMove, true);
       window.removeEventListener('click', handleClickCapture, true);
-      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keydown', handleKeyDown, true);
     };
-  }, [active, onClose, onOpenHelpItem]);
+  }, [active]);
 
-  // "Mostrar ubicación" spotlight target tracking
+  // "Mostrar ubicación" spotlight target tracking (NEVER displaces overflow:hidden root containers)
   useEffect(() => {
     if (!spotlightTarget) {
       setSpotlightRect(null);
+      setSpotlightFallbackOnly(false);
       return;
     }
 
+    let scrolledOnce = false;
     const locate = () => {
-      const selectors = [
-        `[data-help-id="${spotlightTarget.helpId}"]`,
-        spotlightTarget.helpId.startsWith('panel.')
-          ? `[data-panel-id="${spotlightTarget.helpId.replace('panel.', '')}"]`
-          : '',
-        spotlightTarget.helpId.startsWith('anim.')
-          ? `[data-panel-id="animation"]`
-          : '',
-      ].filter(Boolean);
-
-      let el: HTMLElement | null = null;
-      for (const sel of selectors) {
-        const matches = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
-        el = matches.find((m) => {
-          const r = m.getBoundingClientRect();
-          return r.width > 0 && r.height > 0;
-        }) || matches[0] || null;
-        if (el) break;
-      }
-
-      if (el) {
-        el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
-        const rect = el.getBoundingClientRect();
-        if (rect.width > 0 && rect.height > 0) {
-          setSpotlightRect(rect);
+      try {
+        const el = findVisibleHelpElement(spotlightTarget.helpId);
+        if (el) {
+          if (!scrolledOnce) {
+            scrollOnlyScrollableAncestors(el);
+            scrolledOnce = true;
+          }
+          const rect = el.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) {
+            setSpotlightRect(rect);
+            setSpotlightFallbackOnly(false);
+            return;
+          }
         }
+        setSpotlightRect(null);
+        setSpotlightFallbackOnly(true);
+      } catch (err) {
+        onReportErrorRef.current?.({
+          action: 'locate_spotlight',
+          selectedResult: spotlightTarget.helpId,
+          error: err,
+        });
+        setSpotlightRect(null);
+        setSpotlightFallbackOnly(true);
       }
     };
 
-    const timer1 = window.setTimeout(locate, 70);
-    const timer2 = window.setTimeout(locate, 280);
-    const timer3 = window.setTimeout(locate, 520);
-    const autoDismiss = window.setTimeout(onClearSpotlight, 7000);
+    const timer1 = window.setTimeout(locate, 60);
+    const timer2 = window.setTimeout(locate, 240);
+    const timer3 = window.setTimeout(locate, 480);
+    const autoDismiss = window.setTimeout(() => onClearSpotlightRef.current(), 6500);
 
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClearSpotlight();
+      if (e.key === 'Escape') {
+        onClearSpotlightRef.current();
+      }
     };
+    const handleViewportChange = () => locate();
     window.addEventListener('keydown', handleKey);
+    window.addEventListener('resize', handleViewportChange);
 
     return () => {
       window.clearTimeout(timer1);
@@ -182,10 +293,10 @@ export const WhatIsThisOverlay: React.FC<WhatIsThisOverlayProps> = ({
       window.clearTimeout(timer3);
       window.clearTimeout(autoDismiss);
       window.removeEventListener('keydown', handleKey);
+      window.removeEventListener('resize', handleViewportChange);
     };
-  }, [spotlightTarget, onClearSpotlight]);
+  }, [spotlightTarget]);
 
-  // Compute safe card coordinates inside viewport
   const cardWidth = 310;
   const cardHeight = 205;
   const safeLeft =
@@ -215,10 +326,11 @@ export const WhatIsThisOverlay: React.FC<WhatIsThisOverlayProps> = ({
               </span>
             </div>
             <button
+              type="button"
               onClick={onClose}
-              className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 hover:bg-amber-500/35 text-amber-200 border border-amber-400/50 transition-colors cursor-pointer"
+              className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 hover:bg-amber-500/35 text-amber-200 border border-amber-400/50 transition-colors cursor-pointer whitespace-nowrap"
             >
-              Salir (F1)
+              Salir (Shift+F1)
             </button>
           </div>
 
@@ -255,6 +367,7 @@ export const WhatIsThisOverlay: React.FC<WhatIsThisOverlayProps> = ({
               <div className="flex items-center justify-between pt-1 border-t border-slate-800">
                 <span className="text-[10px] text-slate-400">Haz clic para ver guía completa</span>
                 <button
+                  type="button"
                   onClick={() => onOpenHelpItem(hoveredItem)}
                   className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-[10px] cursor-pointer"
                 >
@@ -267,9 +380,10 @@ export const WhatIsThisOverlay: React.FC<WhatIsThisOverlayProps> = ({
         </>
       )}
 
-      {/* "Llévame a esta herramienta" Spotlight Highlight */}
+      {/* "Mostrar ubicación" Spotlight Highlight */}
       {spotlightTarget && spotlightRect && (
         <div
+          data-what-is-this-ui="true"
           className="fixed inset-0 z-[135] pointer-events-none"
           aria-live="polite"
         >
@@ -284,10 +398,10 @@ export const WhatIsThisOverlay: React.FC<WhatIsThisOverlayProps> = ({
             }}
           />
           <div
-            className="pointer-events-auto fixed flex items-center gap-2 px-3 py-1.5 rounded-lg border border-amber-400 bg-slate-950/95 text-slate-100 shadow-2xl"
+            className="pointer-events-auto fixed flex items-center gap-2 px-3 py-1.5 rounded-lg border border-amber-400 bg-slate-950/95 text-slate-100 shadow-2xl max-w-[min(92vw,420px)]"
             style={{
               left: Math.min(
-                typeof window !== 'undefined' ? window.innerWidth - 290 : 300,
+                typeof window !== 'undefined' ? Math.max(12, window.innerWidth - 430) : 300,
                 Math.max(12, spotlightRect.left)
               ),
               top:
@@ -297,20 +411,45 @@ export const WhatIsThisOverlay: React.FC<WhatIsThisOverlayProps> = ({
             }}
           >
             <Compass className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-            <div className="text-[11px] leading-tight">
+            <div className="text-[11px] leading-tight min-w-0">
               <span className="font-bold text-amber-300">{spotlightTarget.label}</span>
               {spotlightTarget.hint && (
                 <span className="text-slate-300 ml-1.5">{spotlightTarget.hint}</span>
               )}
             </div>
             <button
+              type="button"
               onClick={onClearSpotlight}
-              className="p-0.5 rounded hover:bg-slate-800 text-slate-400 hover:text-white cursor-pointer"
+              className="p-0.5 rounded hover:bg-slate-800 text-slate-400 hover:text-white cursor-pointer shrink-0"
               title="Cerrar indicador"
             >
               <X className="w-3 h-3" />
             </button>
           </div>
+        </div>
+      )}
+
+      {/* Non-blocking location banner if target control is inside a menu/sub-dialog or hidden dock */}
+      {spotlightTarget && spotlightFallbackOnly && !spotlightRect && (
+        <div
+          data-what-is-this-ui="true"
+          className="pointer-events-auto fixed top-12 left-1/2 -translate-x-1/2 z-[136] flex items-center gap-2.5 px-3.5 py-2 rounded-lg border border-amber-400/80 bg-slate-950/96 text-slate-100 shadow-2xl max-w-[min(92vw,520px)]"
+        >
+          <Compass className="w-4 h-4 text-amber-400 shrink-0" />
+          <div className="text-[11px] leading-snug min-w-0">
+            <div className="font-bold text-amber-300 truncate">{spotlightTarget.label}</div>
+            {spotlightTarget.hint && (
+              <div className="text-slate-300 line-clamp-2">{spotlightTarget.hint}</div>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={onClearSpotlight}
+            className="p-1 rounded hover:bg-slate-800 text-slate-400 hover:text-white cursor-pointer shrink-0"
+            title="Cerrar indicador (Esc)"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
         </div>
       )}
     </>

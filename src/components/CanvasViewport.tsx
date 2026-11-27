@@ -63,6 +63,8 @@ import {
   MagicWandOptions,
   MoveSubTool,
   MoveToolOptions,
+  DEFAULT_ONION_SKIN_CONFIG,
+  OnionSkinConfig,
   ParametricShapeObject,
   PerformanceMode,
   ProjectWorkMode,
@@ -235,9 +237,13 @@ import { analyzeTilesetSeams } from '../utils/workModesEngine';
 import {
   blitPixelGridToCanvas,
   getCachedLayerEffectivePixels,
-  getCachedOnionSkinCanvas,
   getCachedPixelGridCanvas,
 } from '../utils/renderCache';
+import {
+  getProcessedOnionSkinCanvas,
+  mapOnionBlendToCanvasComposite,
+  renderMotionPathsOverlay,
+} from '../utils/onionSkinEngine';
 import {
   TiledLayerStore,
   getTiledStore,
@@ -312,6 +318,7 @@ interface CanvasViewportProps {
   currentFrameIndex?: number;
   onionSkinPrev?: number;
   onionSkinNext?: number;
+  onionSkinConfig?: OnionSkinConfig;
   onSelectFrame?: (index: number) => void;
   linkMoveAllFrames?: boolean;
   onShiftAllFramesLayer?: (dx: number, dy: number) => void;
@@ -459,6 +466,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   onionSkinOpacity,
   onionSkinPrev = 1,
   onionSkinNext = 0,
+  onionSkinConfig,
   currentFrameIndex = 0,
   onSelectFrame,
   linkMoveAllFrames = false,
@@ -2276,97 +2284,208 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       animPhaseTimeRef.current
     );
 
-    // 3. Onion Skin: Previous Frames (Cyan) — Cached single-drawImage silhouette blitting
+    // 3 & 4. Onion Skin Pro + Modo Trail (Ghost, Tinted Ghost, Silhouette, Outline, Trail)
     const curIdx = currentFrameIndex >= 0 ? currentFrameIndex : allFrames.findIndex((f) => f.id === currentFrame.id);
-    const skipHeavyOnionDuringDraw = performanceMode === 'performance' && isDrawing;
-    if (
-      onionSkinEnabled &&
-      !isPlaying &&
+    const effOnion: OnionSkinConfig = onionSkinConfig
+      ? {
+          ...onionSkinConfig,
+          enabled: onionSkinEnabled,
+          globalOpacity: onionSkinOpacity,
+          prev: { ...onionSkinConfig.prev, count: onionSkinPrev ?? onionSkinConfig.prev.count },
+          next: { ...onionSkinConfig.next, count: onionSkinNext ?? onionSkinConfig.next.count },
+        }
+      : {
+          ...DEFAULT_ONION_SKIN_CONFIG,
+          enabled: onionSkinEnabled,
+          globalOpacity: onionSkinOpacity,
+          prev: { ...DEFAULT_ONION_SKIN_CONFIG.prev, count: onionSkinPrev ?? 1 },
+          next: { ...DEFAULT_ONION_SKIN_CONFIG.next, count: onionSkinNext ?? 0 },
+        };
+
+    const trailCfg = effOnion.trail;
+    const renderTrailPass =
+      Boolean(trailCfg?.enabled) &&
+      (!isPlaying || Boolean(trailCfg?.showDuringPlay)) &&
       !combatTestActive &&
-      !skipHeavyOnionDuringDraw &&
-      (onionSkinPrev ?? 1) > 0 &&
       allFrames.length > 1 &&
-      curIdx >= 0
-    ) {
-      const prevCount = performanceMode === 'performance' ? Math.min(1, onionSkinPrev ?? 1) : (onionSkinPrev ?? 1);
-      for (let step = 1; step <= prevCount; step++) {
-        const pIdx = curIdx - step;
-        if (pIdx >= 0 && allFrames[pIdx]) {
-          const prevF = allFrames[pIdx];
-          if (isFrameTiled(prevF)) {
-            const alpha = Math.max(0.08, onionSkinOpacity * (1 - (step - 1) * 0.25));
-            for (const lyr of prevF.layers) {
-              if (!lyr.visible || !lyr.tiledStoreId) continue;
-              const store = getTiledStore(lyr.tiledStoreId);
-              if (store) {
-                store.renderVisibleViewport(
-                  ctx,
-                  virtualRect.minWorldX,
-                  virtualRect.minWorldY,
-                  virtualRect.maxWorldX,
-                  virtualRect.maxWorldY,
-                  zoom,
-                  0,
-                  0,
-                  alpha * (lyr.opacity ?? 1)
-                );
-              }
+      curIdx > 0;
+
+    if (renderTrailPass && trailCfg) {
+      const trailCount = Math.max(1, Math.min(20, Math.round(trailCfg.framesCount || 5)));
+      const trailComposite = mapOnionBlendToCanvasComposite(trailCfg.blendMode || 'normal');
+      const baseTrailOp = Math.max(0, Math.min(1, trailCfg.opacity ?? 0.55));
+      const decay = Math.max(0, Math.min(0.95, trailCfg.decay ?? 0.45));
+
+      ctx.save();
+      ctx.globalCompositeOperation = trailComposite;
+      ctx.imageSmoothingEnabled = false;
+
+      for (let step = trailCount; step >= 1; step--) {
+        const tIdx = curIdx - step;
+        if (tIdx < 0 || !allFrames[tIdx]) continue;
+        const trailF = allFrames[tIdx];
+        const stepFactor = Math.pow(Math.max(0.18, 1 - decay * 0.62), step - 1);
+        const trailAlpha = Math.max(0, Math.min(1, baseTrailOp * stepFactor));
+        if (trailAlpha <= 0.002) continue;
+
+        if (isFrameTiled(trailF)) {
+          for (const lyr of trailF.layers) {
+            if (!lyr.visible || !lyr.tiledStoreId) continue;
+            const store = getTiledStore(lyr.tiledStoreId);
+            if (store) {
+              store.renderVisibleViewport(
+                ctx,
+                virtualRect.minWorldX,
+                virtualRect.minWorldY,
+                virtualRect.maxWorldX,
+                virtualRect.maxWorldY,
+                zoom,
+                0,
+                0,
+                trailAlpha * (lyr.opacity ?? 1)
+              );
             }
-          } else {
-            const prevComposited = compositeFrame(prevF, width, height, pIdx, false, layerGroups);
-            const onionCanvas = getCachedOnionSkinCanvas(prevComposited, width, height, '#00d2ff');
-            ctx.globalAlpha = Math.max(0.08, onionSkinOpacity * (1 - (step - 1) * 0.25));
-            ctx.imageSmoothingEnabled = false;
-            ctx.drawImage(onionCanvas, 0, 0, width * zoom, height * zoom);
           }
+        } else {
+          const trailComposited = compositeFrame(trailF, width, height, tIdx, false, layerGroups);
+          const trailCanvas = getProcessedOnionSkinCanvas(
+            trailComposited,
+            width,
+            height,
+            trailCfg.preserveOriginalColors ? 'ghost' : 'tinted_ghost',
+            'full',
+            trailCfg.tintColor || '#00d2ff',
+            trailCfg.preserveOriginalColors ? 'original' : 'custom',
+            0.55
+          );
+          ctx.globalAlpha = trailAlpha;
+          ctx.drawImage(trailCanvas, 0, 0, width * zoom, height * zoom);
         }
       }
+      ctx.restore();
       ctx.globalAlpha = 1.0;
     }
 
-    // 4. Onion Skin: Next Frames (Amber) — Cached single-drawImage silhouette blitting
+    const skipHeavyOnionDuringDraw = performanceMode === 'performance' && isDrawing && (effOnion.prev.count + effOnion.next.count > 6);
     if (
-      onionSkinEnabled &&
+      effOnion.enabled &&
       !isPlaying &&
       !combatTestActive &&
       !skipHeavyOnionDuringDraw &&
-      (onionSkinNext ?? 0) > 0 &&
       allFrames.length > 1 &&
       curIdx >= 0
     ) {
-      const nextCount = performanceMode === 'performance' ? Math.min(1, onionSkinNext ?? 0) : (onionSkinNext ?? 0);
-      for (let step = 1; step <= nextCount; step++) {
-        const nIdx = curIdx + step;
-        if (nIdx < allFrames.length && allFrames[nIdx]) {
-          const nextF = allFrames[nIdx];
-          if (isFrameTiled(nextF)) {
-            const alpha = Math.max(0.08, onionSkinOpacity * 0.85 * (1 - (step - 1) * 0.25));
-            for (const lyr of nextF.layers) {
-              if (!lyr.visible || !lyr.tiledStoreId) continue;
-              const store = getTiledStore(lyr.tiledStoreId);
-              if (store) {
-                store.renderVisibleViewport(
-                  ctx,
-                  virtualRect.minWorldX,
-                  virtualRect.minWorldY,
-                  virtualRect.maxWorldX,
-                  virtualRect.maxWorldY,
-                  zoom,
-                  0,
-                  0,
-                  alpha * (lyr.opacity ?? 1)
-                );
-              }
+      const compositeOp = mapOnionBlendToCanvasComposite(effOnion.blendMode);
+      const prevCount = Math.max(0, Math.min(20, effOnion.prev.count));
+      const nextCount = Math.max(0, Math.min(20, effOnion.next.count));
+
+      const computeStepAlpha = (dirOpacity: number, step: number, maxSteps: number) => {
+        const master = Math.max(0, Math.min(1, effOnion.globalOpacity));
+        const base = Math.max(0, Math.min(1, dirOpacity * master));
+        if (base <= 0.001) return 0;
+        if (!effOnion.autoDistanceFalloff || maxSteps <= 1) {
+          return Math.max(0, Math.min(1, base));
+        }
+        if (maxSteps === 2) {
+          return step === 1 ? base : base * 0.55;
+        }
+        if (maxSteps === 3) {
+          const factors = [1, 0.6, 0.3];
+          return base * (factors[step - 1] ?? 0.3);
+        }
+        const t = (step - 1) / Math.max(1, maxSteps - 1);
+        const factor = Math.pow(1 - t * 0.82, 1.15);
+        return Math.max(0.02, Math.min(1, base * factor));
+      };
+
+      ctx.save();
+      ctx.globalCompositeOperation = compositeOp;
+      ctx.imageSmoothingEnabled = false;
+
+      // Render farthest-to-nearest so closer frames sit clearly above older ones
+      for (let step = prevCount; step >= 1; step--) {
+        const pIdx = curIdx - step;
+        if (pIdx < 0 || !allFrames[pIdx]) continue;
+        const prevF = allFrames[pIdx];
+        const alpha = computeStepAlpha(effOnion.prev.opacity, step, prevCount);
+        if (alpha <= 0.001) continue;
+        if (isFrameTiled(prevF)) {
+          for (const lyr of prevF.layers) {
+            if (!lyr.visible || !lyr.tiledStoreId) continue;
+            const store = getTiledStore(lyr.tiledStoreId);
+            if (store) {
+              store.renderVisibleViewport(
+                ctx,
+                virtualRect.minWorldX,
+                virtualRect.minWorldY,
+                virtualRect.maxWorldX,
+                virtualRect.maxWorldY,
+                zoom,
+                0,
+                0,
+                alpha * (lyr.opacity ?? 1)
+              );
             }
-          } else {
-            const nextComposited = compositeFrame(nextF, width, height, nIdx, false, layerGroups);
-            const onionCanvas = getCachedOnionSkinCanvas(nextComposited, width, height, '#ff9900');
-            ctx.globalAlpha = Math.max(0.08, onionSkinOpacity * 0.85 * (1 - (step - 1) * 0.25));
-            ctx.imageSmoothingEnabled = false;
-            ctx.drawImage(onionCanvas, 0, 0, width * zoom, height * zoom);
           }
+        } else {
+          const prevComposited = compositeFrame(prevF, width, height, pIdx, false, layerGroups);
+          const onionCanvas = getProcessedOnionSkinCanvas(
+            prevComposited,
+            width,
+            height,
+            effOnion.prev.displayMode,
+            effOnion.detailLevel,
+            effOnion.prev.color,
+            effOnion.prev.colorMode ?? (effOnion.prev.displayMode === 'ghost' ? 'original' : 'custom'),
+            effOnion.prev.tintStrength ?? 0.58
+          );
+          ctx.globalAlpha = alpha;
+          ctx.drawImage(onionCanvas, 0, 0, width * zoom, height * zoom);
         }
       }
+
+      for (let step = nextCount; step >= 1; step--) {
+        const nIdx = curIdx + step;
+        if (nIdx >= allFrames.length || !allFrames[nIdx]) continue;
+        const nextF = allFrames[nIdx];
+        const alpha = computeStepAlpha(effOnion.next.opacity, step, nextCount);
+        if (alpha <= 0.001) continue;
+        if (isFrameTiled(nextF)) {
+          for (const lyr of nextF.layers) {
+            if (!lyr.visible || !lyr.tiledStoreId) continue;
+            const store = getTiledStore(lyr.tiledStoreId);
+            if (store) {
+              store.renderVisibleViewport(
+                ctx,
+                virtualRect.minWorldX,
+                virtualRect.minWorldY,
+                virtualRect.maxWorldX,
+                virtualRect.maxWorldY,
+                zoom,
+                0,
+                0,
+                alpha * (lyr.opacity ?? 1)
+              );
+            }
+          }
+        } else {
+          const nextComposited = compositeFrame(nextF, width, height, nIdx, false, layerGroups);
+          const onionCanvas = getProcessedOnionSkinCanvas(
+            nextComposited,
+            width,
+            height,
+            effOnion.next.displayMode,
+            effOnion.detailLevel,
+            effOnion.next.color,
+            effOnion.next.colorMode ?? (effOnion.next.displayMode === 'ghost' ? 'original' : 'custom'),
+            effOnion.next.tintStrength ?? 0.58
+          );
+          ctx.globalAlpha = alpha;
+          ctx.drawImage(onionCanvas, 0, 0, width * zoom, height * zoom);
+        }
+      }
+
+      ctx.restore();
       ctx.globalAlpha = 1.0;
     }
 
@@ -2756,6 +2875,20 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       ctx.fillStyle = '#fbbf24';
       ctx.fillText('DESPUÉS', Math.min(width * zoom - 47, splitX + 7), 16);
       ctx.restore();
+    }
+
+    // Motion Path Trajectory Overlay ("Modo Trazo de Movimiento")
+    if (!combatTestActive && onionSkinConfig?.motionPath?.enabled) {
+      renderMotionPathsOverlay(ctx, {
+        frames: allFrames,
+        currentFrameIndex: curRenderFrameIdx,
+        width,
+        height,
+        zoom,
+        layerGroups,
+        onionConfig: onionSkinConfig,
+        motionConfig: onionSkinConfig.motionPath,
+      });
     }
 
     // Quick Mask Ruby Overlay Preview when enabled on active layer
@@ -4338,6 +4471,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     allFrames,
     onionSkinPrev,
     onionSkinNext,
+    onionSkinConfig,
     currentFrameIndex,
     textAnchor,
     textMaxWidth,
